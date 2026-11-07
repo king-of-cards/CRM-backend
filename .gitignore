@@ -1,0 +1,49 @@
+# ── Secrets ─────────────────────────────────────────────
+# Real credentials: never commit
+.env
+.env.*
+!.env.example
+
+# SSL certificates / keys (e.g. RDS global-bundle.pem)
+*.pem
+*.key
+*.crt
+
+# ── Virtual environment ────────────────────────────────
+venv/
+.venv/
+env/
+ENV/
+
+# ── Python cache / build ───────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# ── Testing / tooling caches ───────────────────────────
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ── Local databases & logs ─────────────────────────────
+*.db
+*.sqlite3
+*.log
+logs/
+
+# ── Editors / IDEs ─────────────────────────────────────
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.swp
+
+# ── OS files ───────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
