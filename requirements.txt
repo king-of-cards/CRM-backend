@@ -3,3 +3,5 @@ sqlmodel
 pymysql
 cryptography
 pydantic-settings
+pyjwt
+pwdlib[argon2,bcrypt]

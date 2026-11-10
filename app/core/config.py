@@ -1,5 +1,6 @@
 from urllib.parse import quote_plus
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,6 +19,14 @@ class Settings(BaseSettings):
 
     # Optional full override, e.g. sqlite:///./local.db for quick local testing
     DATABASE_URL: str | None = None
+
+    # Auth. JWT_SECRET_KEY has no default on purpose: the app refuses to start without it.
+    JWT_SECRET_KEY: str = Field(min_length=32)
+    JWT_ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+
+    # Frontend origins allowed to call the API (CORS)
+    CORS_ORIGINS: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
     @property
     def sqlalchemy_url(self) -> str:
