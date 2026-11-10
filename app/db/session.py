@@ -1,3 +1,4 @@
+import ssl
 from collections.abc import Generator
 
 from fastapi import HTTPException
@@ -8,14 +9,31 @@ from sqlmodel import Session, create_engine
 from app.core.config import settings
 
 
+def _pg_ssl_context(ssl_ca: str | None) -> ssl.SSLContext:
+    """SSL is always on for PostgreSQL (AWS RDS requires it)."""
+    if ssl_ca:
+        # Verify the server certificate and hostname against the CA bundle
+        return ssl.create_default_context(cafile=ssl_ca)
+    # No CA bundle configured: still encrypted, but the certificate is not verified
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
 def make_engine(url: str, ssl_ca: str | None = None, read_only: bool = False) -> Engine:
-    backend = make_url(url).get_backend_name()  # "mysql", "postgresql" or "sqlite"
+    parsed = make_url(url)
+    backend = parsed.get_backend_name()  # "mysql", "postgresql" or "sqlite"
+    driver = parsed.get_driver_name()    # e.g. "pymysql", "pg8000"
     connect_args: dict = {}
 
     if backend == "mysql":
         if ssl_ca:
             connect_args["ssl"] = {"ca": ssl_ca}
+    elif backend == "postgresql" and driver == "pg8000":
+        connect_args["ssl_context"] = _pg_ssl_context(ssl_ca)
     elif backend == "postgresql":
+        # Other drivers (only via a READ_DATABASE_URL override): previous behaviour
         if ssl_ca:
             connect_args.update(sslmode="verify-full", sslrootcert=ssl_ca)
         if read_only:
@@ -38,6 +56,18 @@ def make_engine(url: str, ssl_ca: str | None = None, read_only: bool = False) ->
         def _set_read_only(dbapi_conn, _):
             with dbapi_conn.cursor() as cur:
                 cur.execute("SET SESSION TRANSACTION READ ONLY")
+
+    if read_only and backend == "postgresql" and driver == "pg8000":
+        # PostgreSQL itself rejects INSERT/UPDATE/DELETE/CREATE on these connections
+        @event.listens_for(engine, "connect")
+        def _set_pg_read_only(dbapi_conn, _):
+            cur = dbapi_conn.cursor()
+            try:
+                cur.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
+            finally:
+                cur.close()
+            # SET is transactional in PostgreSQL: commit so a later rollback can't undo it
+            dbapi_conn.commit()
 
     return engine
 

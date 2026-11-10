@@ -14,7 +14,7 @@ def mysql_url(user: str, password: str, host: str, port: int, name: str) -> str:
 
 def postgres_url(user: str, password: str, host: str, port: int, name: str) -> str:
     return (
-        f"postgresql+psycopg://{quote_plus(user)}:{quote_plus(password)}"
+        f"postgresql+pg8000://{quote_plus(user)}:{quote_plus(password)}"
         f"@{host}:{port}/{name}"
     )
 

@@ -5,4 +5,4 @@ cryptography
 pydantic-settings
 pyjwt
 pwdlib[argon2,bcrypt]
-psycopg[binary]
+pg8000
