@@ -3,3 +3,9 @@ sqlmodel
 pymysql
 cryptography
 pydantic-settings
+fastapi[standard]
+sqlmodel
+pymysql
+cryptography
+psycopg[binary]
+pydantic-settings
