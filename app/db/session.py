@@ -8,6 +8,9 @@ from sqlmodel import Session, create_engine
 
 from app.core.config import settings
 
+# Read queries are cancelled after this long, so a slow query can't hang a worker
+READ_STATEMENT_TIMEOUT_MS = 15_000
+
 
 def _pg_ssl_context(ssl_ca: str | None) -> ssl.SSLContext:
     """SSL is always on for PostgreSQL (AWS RDS requires it)."""
@@ -38,7 +41,10 @@ def make_engine(url: str, ssl_ca: str | None = None, read_only: bool = False) ->
             connect_args.update(sslmode="verify-full", sslrootcert=ssl_ca)
         if read_only:
             # PostgreSQL itself rejects INSERT/UPDATE/DELETE/CREATE on these connections
-            connect_args["options"] = "-c default_transaction_read_only=on"
+            connect_args["options"] = (
+                "-c default_transaction_read_only=on"
+                f" -c statement_timeout={READ_STATEMENT_TIMEOUT_MS}"
+            )
 
     kwargs = {"echo": settings.DEBUG, "connect_args": connect_args}
     if backend != "sqlite":
@@ -64,9 +70,10 @@ def make_engine(url: str, ssl_ca: str | None = None, read_only: bool = False) ->
             cur = dbapi_conn.cursor()
             try:
                 cur.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
+                cur.execute(f"SET statement_timeout = {int(READ_STATEMENT_TIMEOUT_MS)}")
             finally:
                 cur.close()
-            # SET is transactional in PostgreSQL: commit so a later rollback can't undo it
+            # SET is transactional in PostgreSQL: commit so a later rollback can't undo them
             dbapi_conn.commit()
 
     return engine
