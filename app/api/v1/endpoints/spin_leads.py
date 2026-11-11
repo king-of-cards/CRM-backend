@@ -5,6 +5,8 @@ Settings you may want to adjust (module level, below):
   HIDDEN_JSON_KEYS     keys inside expanded JSON columns, excluded the same way
   JSON_EXPAND_COLUMNS  jsonb columns returned as separate "<column>.<key>" fields (raw column never returned)
   RANGE_SORT_KEYS      JSON keys holding ranges like "10-20", sorted by their first number
+  REQUIRED_JSON_KEYS   keys in additional_details that must have a non-blank value;
+                       leads without one are never listed, counted, searched or discovered
 """
 import json
 import logging
@@ -19,7 +21,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import (
     Boolean, LargeBinary, MetaData, Numeric, String, Table, Text,
-    bindparam, case, cast, false, func, or_, select, true,
+    ColumnElement, bindparam, case, cast, false, func, or_, select, true,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import NoSuchTableError, SQLAlchemyError
@@ -39,6 +41,9 @@ HIDDEN_COLUMNS: set[str] = {"session_id", "consent_version", "created_by_user_id
 HIDDEN_JSON_KEYS: set[str] = set()
 JSON_EXPAND_COLUMNS: list[str] = ["additional_details"]
 RANGE_SORT_KEYS: set[str] = {"estimatedBudgetPerCard", "serviceBudget"}
+REQUIRED_JSON_KEYS: set[str] = {"otherWeddingServices"}
+REQUIRED_JSON_COLUMN = "additional_details"   # the JSON column REQUIRED_JSON_KEYS refer to
+BLANK_PATTERN = r"^\s*$"                      # empty or whitespace-only text
 
 JSON_KEYS_CACHE_SECONDS = 600    # re-discover JSON keys every 10 minutes
 JSON_KEYS_MAX = 100              # at most this many keys per JSON column (most common first)
@@ -88,8 +93,35 @@ def _jsonb(table: Table, source: str):
     return col if isinstance(col.type, JSONB) else cast(col, JSONB)
 
 
-def _discovery_query(table: Table, source: str):
-    """Rows of (key, jsonb_typeof(value), count) across the whole table."""
+class RequiredFilterError(Exception):
+    """REQUIRED_JSON_KEYS can't be applied (column missing or hidden). Fails closed."""
+
+
+def _required_filter(table: Table) -> list[ColumnElement]:
+    """Base filter applied to every query: each required key must have a non-blank value.
+
+    additional_details ->> :key IS NOT NULL AND additional_details ->> :key !~ :blank
+    JSON null and a missing key both give SQL NULL from ->>, so both are excluded.
+    """
+    if not REQUIRED_JSON_KEYS:
+        return []
+    if REQUIRED_JSON_COLUMN not in table.c or REQUIRED_JSON_COLUMN in HIDDEN_COLUMNS:
+        # Never fall back to listing all leads
+        raise RequiredFilterError(REQUIRED_JSON_COLUMN)
+    conditions = []
+    for key in sorted(REQUIRED_JSON_KEYS):
+        value = _jsonb(table, REQUIRED_JSON_COLUMN).op("->>", return_type=Text)(
+            bindparam(None, key, type_=Text)
+        )
+        conditions.append(value.is_not(None))
+        conditions.append(
+            value.op("!~", is_comparison=True)(bindparam(None, BLANK_PATTERN, type_=Text))
+        )
+    return conditions
+
+
+def _discovery_query(table: Table, source: str, base: list[ColumnElement]):
+    """Rows of (key, jsonb_typeof(value), count) across the filtered leads."""
     doc = _jsonb(table, source)
     # Anything that is not an object (SQL NULL, JSON null) becomes {} so jsonb_each can't fail
     obj = case((func.jsonb_typeof(doc) == "object", doc), else_=func.jsonb_build_object())
@@ -98,6 +130,7 @@ def _discovery_query(table: Table, source: str):
     return (
         select(kv.c["key"], typ, func.count())
         .select_from(table.join(kv, true()))
+        .where(*base)
         .group_by(kv.c["key"], typ)
     )
 
@@ -111,10 +144,10 @@ def _detect_type(counts: dict[str, int]) -> str:
     return "mixed"
 
 
-def _discover(conn, table: Table, source: str) -> list[JsonField]:
+def _discover(conn, table: Table, source: str, base: list[ColumnElement]) -> list[JsonField]:
     seen: dict[str, int] = {}                 # key -> rows containing it
     types: dict[str, dict[str, int]] = {}     # key -> {mapped type: count}, nulls ignored
-    for key, typ, n in conn.execute(_discovery_query(table, source)):
+    for key, typ, n in conn.execute(_discovery_query(table, source, base)):
         if key in HIDDEN_JSON_KEYS:
             continue
         seen[key] = seen.get(key, 0) + n
@@ -129,7 +162,7 @@ def _discover(conn, table: Table, source: str) -> list[JsonField]:
     ]
 
 
-def _get_json_fields(table: Table) -> dict[str, list[JsonField]]:
+def _get_json_fields(table: Table, base: list[ColumnElement]) -> dict[str, list[JsonField]]:
     """Expanded fields per JSON column. Missing or hidden columns are skipped silently."""
     sources = [s for s in JSON_EXPAND_COLUMNS if s in table.c and s not in HIDDEN_COLUMNS]
 
@@ -142,7 +175,7 @@ def _get_json_fields(table: Table) -> dict[str, list[JsonField]]:
             if stale:
                 with read_engine.connect() as conn:
                     for s in stale:
-                        fields = _discover(conn, table, s)
+                        fields = _discover(conn, table, s, base)
                         _json_cache[s] = (_time.monotonic() + JSON_KEYS_CACHE_SECONDS, fields)
     return {s: _json_cache[s][1] for s in sources}
 
@@ -231,7 +264,11 @@ def list_spin_leads(
 
     try:
         table = _get_table()
-        json_fields = _get_json_fields(table)
+        base = _required_filter(table)          # applied to discovery, count and rows
+        json_fields = _get_json_fields(table, base)
+    except RequiredFilterError:
+        logger.error("spin-leads: REQUIRED_JSON_COLUMN is missing or hidden; refusing to list leads")
+        raise HTTPException(503, "Read database unavailable")
     except NoSuchTableError:
         logger.error("spin-leads: table not found in the read database")
         raise HTTPException(404, "Table not found")
@@ -279,8 +316,9 @@ def list_spin_leads(
         if pk.name != sort:
             order_by.append(pk.desc() if order == "desc" else pk.asc())
 
-    # Search: one bound parameter, % _ / escaped, ILIKE on visible fields only
-    conditions = []
+    # Search: one bound parameter, % _ / escaped, ILIKE on visible fields only.
+    # The required-key base filter always comes first.
+    conditions = list(base)
     term = (search or "").strip()
     if term:
         pattern = bindparam("search_pattern", _like_pattern(term), type_=Text)
