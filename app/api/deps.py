@@ -1,10 +1,12 @@
 from typing import Annotated
+from urllib.parse import urlsplit
 
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlmodel import Session
 
+from app.core.config import settings
 from app.core.security import decode_access_token
 from app.crud import user as crud
 from app.db.session import get_db
@@ -44,3 +46,25 @@ def require_admin(user: CurrentUser) -> User:
 
 
 AdminUser = Annotated[User, Depends(require_admin)]
+
+
+def _origin_of(url: str | None) -> str | None:
+    """'https://app.example.com/path' -> 'https://app.example.com'; None if not a URL."""
+    if not url:
+        return None
+    parts = urlsplit(url.strip())
+    if not parts.scheme or not parts.netloc:
+        return None
+    return f"{parts.scheme}://{parts.netloc}".lower()
+
+
+def require_trusted_origin(request: Request) -> None:
+    """CSRF check for endpoints that use the refresh cookie.
+
+    The Origin header (or Referer if Origin is absent) must be one of CORS_ORIGINS.
+    """
+    allowed = {_origin_of(o) for o in settings.CORS_ORIGINS}
+    origin = request.headers.get("origin")
+    source = _origin_of(origin) if origin is not None else _origin_of(request.headers.get("referer"))
+    if source is None or source not in allowed:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Origin not allowed")

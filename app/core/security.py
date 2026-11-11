@@ -1,11 +1,18 @@
+import logging
 from datetime import datetime, timedelta, timezone
 
 import jwt
 from pwdlib import PasswordHash
+from pwdlib.exceptions import PwdlibError
 from pwdlib.hashers.argon2 import Argon2Hasher
 from pwdlib.hashers.bcrypt import BcryptHasher
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
+
+MAX_PASSWORD_LENGTH = 128   # characters; longer login passwords always fail
+BCRYPT_MAX_BYTES = 72       # bcrypt 5.x raises ValueError above this
 
 # Verifies both Argon2 and bcrypt hashes; new passwords are always hashed with Argon2
 # (the first hasher in the list).
@@ -20,8 +27,32 @@ def hash_password(plain_password: str) -> str:
     return password_hash.hash(plain_password)
 
 
+def verify_and_update_password(
+    plain_password: str, hashed_password: str
+) -> tuple[bool, str | None]:
+    """Check a password. Never raises for bad input.
+
+    Returns (valid, new_hash). new_hash is set when the stored hash should be
+    replaced: a bcrypt hash (upgraded to Argon2) or outdated Argon2 parameters.
+    Overlong passwords, passwords too long for a bcrypt hash and unrecognised
+    hashes all count as a failed check.
+    """
+    try:
+        if len(plain_password) > MAX_PASSWORD_LENGTH:
+            return False, None
+        if (BcryptHasher.identify(hashed_password)
+                and len(plain_password.encode("utf-8")) > BCRYPT_MAX_BYTES):
+            password_hash.verify(plain_password, DUMMY_HASH)  # similar timing to a real check
+            return False, None
+        return password_hash.verify_and_update(plain_password, hashed_password)
+    except (ValueError, PwdlibError) as exc:
+        # ValueError: bcrypt length limit, invalid encoding. PwdlibError: unknown hash format.
+        logger.warning("Password check failed: %s", type(exc).__name__)
+        return False, None
+
+
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return password_hash.verify(plain_password, hashed_password)
+    return verify_and_update_password(plain_password, hashed_password)[0]
 
 
 def create_access_token(user_id: int, role: str) -> str:
