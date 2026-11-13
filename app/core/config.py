@@ -49,6 +49,13 @@ class Settings(BaseSettings):
     READ_DB_SSL_CA: str | None = None
     READ_DATABASE_URL: str | None = None  # optional full override
 
+    # ── Google Sheets (read-only, through a service account) ──
+    GOOGLE_SERVICE_ACCOUNT_FILE: str | None = None
+    # Short name -> sheet id, as JSON in .env: GOOGLE_SHEETS={"whatsapp": "1DAnp5..."}
+    GOOGLE_SHEETS: dict[str, str] = {}
+    GOOGLE_SHEET_CACHE_SECONDS: int = 60
+    GOOGLE_SHEETS_SYNC_MINUTES: int = 5   # copy sheets into the database this often; 0 = off
+
     # Auth. JWT_SECRET_KEY has no default on purpose: the app refuses to start without it.
     JWT_SECRET_KEY: str = Field(min_length=32)
     JWT_ALGORITHM: str = "HS256"

@@ -9,6 +9,15 @@
 *.key
 *.crt
 
+
+
+# Google service account key (never commit: Google disables leaked keys)
+google-service-account.json
+*-service-account*.json
+king-of-cards-*.json
+
+
+
 # ── Virtual environment ────────────────────────────────
 venv/
 .venv/
@@ -47,3 +56,4 @@ logs/
 .DS_Store
 Thumbs.db
 desktop.ini
+

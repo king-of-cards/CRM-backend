@@ -20,13 +20,14 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import (
-    Boolean, LargeBinary, MetaData, Numeric, String, Table, Text,
-    ColumnElement, bindparam, case, cast, false, func, or_, select, true,
+    Boolean, LargeBinary, MetaData, Numeric, String, Table, Text, literal_column,
+    ColumnElement, and_, bindparam, case, cast, false, func, or_, select, true,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import NoSuchTableError, SQLAlchemyError
 
-from app.api.deps import AdminUser
+from app.api.deps import AdminUser, DbSession
+from app.core import response_cache
 from app.core.config import settings
 from app.db.session import read_engine
 
@@ -249,16 +250,128 @@ def _db_error(exc: Exception, stage: str) -> HTTPException:
     return HTTPException(503, "Read database unavailable")
 
 
-# ── Endpoint ───────────────────────────────────────────────────────────
-@router.get("")
+# ── Query (uncached) ───────────────────────────────────────────────────
+# ── Branch (store) of a lead ───────────────────────────────────────────
+BRANCH_FIELD_NAMES = ("branchid", "spinbranchid", "branch", "storeid", "store")
+
+
+def _norm_name(name: str) -> str:
+    return "".join(ch for ch in name.lower().split(".")[-1] if ch.isalnum())
+
+
+def _branch_field(table: Table, json_fields: dict) -> tuple[str | None, Any]:
+    """(output name, text expression) of the column holding the lead's branch id, if any.
+    A real column (e.g. branch_id) wins over a key inside a JSON column (e.g. branchId)."""
+    for wanted in BRANCH_FIELD_NAMES:
+        for col in table.columns:
+            if col.name not in HIDDEN_COLUMNS and _norm_name(col.name) == wanted:
+                return col.name, cast(col, Text)
+        for fields in json_fields.values():
+            for f in fields:
+                if _norm_name(f.key) == wanted:
+                    return f.name, _json_text_expr(table, f)
+    return None, None
+
+
+PINCODE_FIELD_NAMES = ("pincode", "pin", "zipcode", "postalcode")
+BUDGET_FIELD_NAMES = ("estimatedbudgetpercard", "servicebudget", "budget")
+
+
+def _named_field(table: Table, json_fields: dict, wanted_names: tuple[str, ...]) -> tuple[str | None, Any]:
+    """(output name, text expression) of the first column / JSON key with one of these names."""
+    for wanted in wanted_names:
+        for col in table.columns:
+            if col.name not in HIDDEN_COLUMNS and _norm_name(col.name) == wanted:
+                return col.name, cast(col, Text)
+        for fields in json_fields.values():
+            for f in fields:
+                if _norm_name(f.key) == wanted:
+                    return f.name, _json_text_expr(table, f)
+    return None, None
+
+
+def spin_filter_options() -> dict:
+    """Values for the filter dropdowns: the budget ranges and pincodes used on spin leads, with counts."""
+    if read_engine is None:
+        return {"budgets": [], "pincodes": [], "has_branch": False, "has_pincode": False, "has_budget": False}
+    try:
+        table = _get_table()
+        base = _required_filter(table)
+        json_fields = _get_json_fields(table, base)
+        _, branch_expr = _branch_field(table, json_fields)
+        _, pin_expr = _named_field(table, json_fields, PINCODE_FIELD_NAMES)
+        _, budget_expr = _named_field(table, json_fields, BUDGET_FIELD_NAMES)
+        budgets = []
+        if budget_expr is not None:
+            # GROUP BY 1: the JSON key is a bound parameter, so repeating the expression
+            # would make PostgreSQL see two different expressions
+            query = select(budget_expr.label("v"), func.count()).select_from(table).where(*base).group_by(literal_column("1"))
+            with read_engine.connect() as conn:
+                rows = [(v, n) for v, n in conn.execute(query).all() if v not in (None, "")]
+
+            def first_number(v):
+                digits = "".join(ch if ch.isdigit() else " " for ch in str(v)).split()
+                return int(digits[0]) if digits else 10**9
+
+            budgets = [{"value": v, "count": n} for v, n in sorted(rows, key=lambda r: (first_number(r[0]), str(r[0])))]
+        pincodes = []
+        if pin_expr is not None:
+            # GROUP BY 1: same reason as above
+            query = select(pin_expr.label("p"), func.count()).select_from(table).where(*base).group_by(literal_column("1"))
+            with read_engine.connect() as conn:
+                rows = [(str(p).strip(), n) for p, n in conn.execute(query).all() if p not in (None, "") and str(p).strip()]
+            merged: dict[str, int] = {}
+            for p, n in rows:
+                merged[p] = merged.get(p, 0) + n
+            pincodes = [{"value": p, "count": n} for p, n in sorted(merged.items(), key=lambda kv: (-kv[1], kv[0]))][:1000]
+        return {
+            "budgets": budgets,
+            "pincodes": pincodes,
+            "has_branch": branch_expr is not None,
+            "has_pincode": pin_expr is not None,
+            "has_budget": budget_expr is not None,
+        }
+    except Exception:  # noqa: BLE001
+        logger.warning("spin-leads: filter options unavailable", exc_info=True)
+        return {"budgets": [], "pincodes": [], "has_branch": False, "has_pincode": False, "has_budget": False}
+
+
+def spin_branch_counts() -> dict[str, int]:
+    """{branch id (text): number of listed spin leads}. Empty if the branch isn't stored."""
+    if read_engine is None:
+        return {}
+    try:
+        table = _get_table()
+        base = _required_filter(table)
+        name, expr = _branch_field(table, _get_json_fields(table, base))
+        if expr is None:
+            return {}
+        query = select(expr.label("b"), func.count()).select_from(table).where(*base).group_by(literal_column("1"))
+        with read_engine.connect() as conn:
+            return {str(b): n for b, n in conn.execute(query).all() if b is not None}
+    except Exception:  # noqa: BLE001
+        logger.warning("spin-leads: branch counts unavailable", exc_info=True)
+        return {}
+
+
 def list_spin_leads(
-    _admin: AdminUser,
-    page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=200),
-    search: str | None = Query(None, description="Case-insensitive match across visible text fields"),
-    sort: str | None = Query(None, description="Column name or additional_details.<key>"),
-    order: Literal["asc", "desc"] = Query("asc"),
+    _admin: Any = None,
+    page: int = 1,
+    page_size: int = 50,
+    search: str | None = None,
+    sort: str | None = None,
+    order: Literal["asc", "desc"] = "asc",
+    branch: str | None = None,
+    filters: dict | None = None,
 ):
+    """filters (all optional):
+      pincode        leads whose pincode starts with this
+      budget         exact budget value (e.g. "10-20")
+      ids_in         only these lead ids (from the CRM filters); [] = none
+      ids_not_in     never these lead ids
+      vendor         {manual_for, manual_other, branch_ids, pins, prefixes, fallback,
+                      other_pins, other_prefixes}: leads whose effective vendor is one vendor
+    """
     if read_engine is None:
         raise HTTPException(503, "Read database is not configured")
 
@@ -327,6 +440,53 @@ def list_spin_leads(
             if text_exprs else false()
         )
 
+    # Branch filter: only leads from this store
+    branch_name, branch_expr = _branch_field(table, json_fields)
+    if branch not in (None, ""):
+        conditions.append(branch_expr == str(branch) if branch_expr is not None else false())
+
+    # Other filters (pincode, budget, and the CRM-based ones turned into lead ids)
+    flt = filters or {}
+    pk_text = cast(list(table.primary_key.columns)[0], Text)
+    _, pin_expr = _named_field(table, json_fields, PINCODE_FIELD_NAMES)
+    _, budget_expr = _named_field(table, json_fields, BUDGET_FIELD_NAMES)
+
+    if flt.get("pincode"):
+        pin_pattern = bindparam("pin_pattern", _like_pattern(flt["pincode"]).strip("%") + "%", type_=Text)
+        conditions.append(pin_expr.ilike(pin_pattern, escape=LIKE_ESCAPE) if pin_expr is not None else false())
+    if flt.get("budget"):
+        conditions.append(budget_expr == str(flt["budget"]) if budget_expr is not None else false())
+    if flt.get("ids_in") is not None:
+        ids = [str(i) for i in flt["ids_in"]]
+        conditions.append(pk_text.in_(ids) if ids else false())
+    if flt.get("ids_not_in"):
+        conditions.append(pk_text.not_in([str(i) for i in flt["ids_not_in"]]))
+    if flt.get("vendor"):
+        v = flt["vendor"]
+        # 1) the lead's branch belongs to this vendor
+        parts = []
+        if branch_expr is not None and v["branch_ids"]:
+            parts.append(branch_expr.in_([str(b) for b in v["branch_ids"]]))
+        # 2) no branch: the vendor's pincode rules (fallback = no other vendor's pincode matches)
+        if pin_expr is not None:
+            no_branch = or_(branch_expr.is_(None), branch_expr == "") if branch_expr is not None else true()
+            if v["fallback"]:
+                others = [pin_expr.in_(v["other_pins"])] if v["other_pins"] else []
+                others += [pin_expr.like(f"{p}%") for p in v["other_prefixes"]]
+                pin_rule = and_(pin_expr.is_not(None), pin_expr != "", *(~o for o in others))
+            else:
+                matches = [pin_expr.in_(v["pins"])] if v["pins"] else []
+                matches += [pin_expr.like(f"{p}%") for p in v["prefixes"]]
+                # …but not pincodes a vendor checked earlier claims (RJ's 560018 isn't Phodeo's)
+                earlier = [pin_expr.in_(v["before_pins"])] if v.get("before_pins") else []
+                earlier += [pin_expr.like(f"{p}%") for p in v.get("before_prefixes", [])]
+                pin_rule = and_(or_(*matches), *(~e for e in earlier)) if matches else false()
+            parts.append(and_(no_branch, pin_rule))
+        automatic = or_(*parts) if parts else false()
+        if v["manual_other"]:
+            automatic = and_(pk_text.not_in(v["manual_other"]), automatic)
+        conditions.append(or_(pk_text.in_(v["manual_for"]), automatic) if v["manual_for"] else automatic)
+
     query = (
         select(*(e.label(f"f{i}") for i, e in enumerate(select_exprs)))
         .where(*conditions)
@@ -353,4 +513,185 @@ def list_spin_leads(
         "total": total,
         "page": page,
         "page_size": page_size,
+        "branch_column": branch_name,
     }
+
+
+# ── Endpoint (cached) ──────────────────────────────────────────────────
+# The workflow database is remote, so each page is kept in memory: repeat requests are
+# answered instantly and refreshed in the background (see app/core/response_cache.py).
+FRESH_SECONDS = 60
+STALE_SECONDS = 1800
+
+
+def _cache_key(page, page_size, search, sort, order, branch=None):
+    return ("spin", page, page_size, (search or "").strip().lower(), sort, order, branch or None)
+
+
+def _spin_location_keys(columns: list[dict]) -> tuple[str | None, str | None]:
+    """Names of the pincode and city/location fields in this table's output, if any."""
+    names = [c["name"] for c in columns]
+    lower = {n: n.lower().split(".")[-1] for n in names}
+    pin = next((n for n in names if "pincode" in lower[n] or lower[n] == "pin"), None)
+    city = next((n for n in names if "city" in lower[n] or "location" in lower[n]), None)
+    return pin, city
+
+
+QUOTE_OPS = {
+    "eq": lambda a, b: a == b,
+    "ne": lambda a, b: a != b,
+    "gt": lambda a, b: a > b,
+    "gte": lambda a, b: a >= b,
+    "lt": lambda a, b: a < b,
+    "lte": lambda a, b: a <= b,
+}
+
+
+def _crm_filters(db, pincode, budget, vendor_id, interest, converted, quoted_op, quoted_value) -> dict:
+    """Turn the filter choices into conditions the read-only database understands.
+    CRM fields (interest, converted, quote, assigned) live in our crm_lead_meta table, so
+    they become lists of lead ids."""
+    from sqlmodel import select as sm_select
+
+    from app.models.lead_meta import LeadMeta
+    from app.services import lead_crm
+    from app.services.branches import branches_by_id
+
+    flt: dict = {}
+    if pincode and pincode.strip():
+        flt["pincode"] = "".join(ch for ch in pincode if ch.isdigit()) or pincode.strip()
+    if budget:
+        flt["budget"] = budget
+
+    uses_meta = interest or converted or quoted_op or vendor_id is not None
+    if not uses_meta:
+        return flt
+    metas = list(db.exec(sm_select(LeadMeta).where(LeadMeta.source == "spin")))
+    include: set[str] | None = None
+    exclude: set[str] = set()
+
+    def narrow(keys: set[str]) -> None:
+        nonlocal include
+        include = keys if include is None else include & keys
+
+    if interest == "none":
+        exclude |= {m.lead_key for m in metas if m.interest}
+    elif interest:
+        narrow({m.lead_key for m in metas if m.interest == interest})
+
+    if converted == "yes":
+        narrow({m.lead_key for m in metas if m.converted})
+    elif converted == "no":
+        exclude |= {m.lead_key for m in metas if m.converted}
+
+    if quoted_op == "set":
+        narrow({m.lead_key for m in metas if m.quoted_amount is not None})
+    elif quoted_op == "unset":
+        exclude |= {m.lead_key for m in metas if m.quoted_amount is not None}
+    elif quoted_op and quoted_value is not None:
+        cmp = QUOTE_OPS[quoted_op]
+        narrow({m.lead_key for m in metas if m.quoted_amount is not None and cmp(m.quoted_amount, quoted_value)})
+
+    if include is not None:
+        flt["ids_in"] = sorted(include - exclude)
+    elif exclude:
+        flt["ids_not_in"] = sorted(exclude)
+
+    if vendor_id is not None:
+        vendors = lead_crm.active_vendors(db)
+        target = next((v for v in vendors if v.id == vendor_id), None)
+        if target is None:
+            flt["ids_in"] = []
+        else:
+            others = [v for v in vendors if v.id != vendor_id and not v.is_fallback]
+            before = [v for v in others if (v.priority, v.id) < (target.priority, target.id)]
+            flt["vendor"] = {
+                "manual_for": sorted(m.lead_key for m in metas if m.vendor_id == vendor_id),
+                "manual_other": sorted(m.lead_key for m in metas if m.vendor_id and m.vendor_id != vendor_id),
+                "branch_ids": [b["id"] for b in branches_by_id(db).values() if b["vendor_id"] == vendor_id],
+                "pins": list(target.pincodes or []),
+                "prefixes": list(target.pincode_prefixes or []),
+                "fallback": bool(target.is_fallback),
+                "other_pins": sorted({p for v in others for p in (v.pincodes or [])}),
+                "other_prefixes": sorted({p for v in others for p in (v.pincode_prefixes or [])}),
+                "before_pins": sorted({p for v in before for p in (v.pincodes or [])}),
+                "before_prefixes": sorted({p for v in before for p in (v.pincode_prefixes or [])}),
+            }
+    return flt
+
+
+@router.get("/filter-options")
+def spin_leads_filter_options(_admin: AdminUser):
+    """Budget values (with counts) for the filter dropdown, and which filters this data supports."""
+    return response_cache.get(("spin", "filter-options"), spin_filter_options, fresh=600, stale=3600)
+
+
+@router.get("")
+def spin_leads_endpoint(
+    _admin: AdminUser,
+    db: DbSession,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    search: str | None = Query(None, description="Case-insensitive match across visible text fields"),
+    sort: str | None = Query(None, description="Column name or additional_details.<key>"),
+    order: Literal["asc", "desc"] = Query("asc"),
+    branch: str | None = Query(None, description="Only leads from this branch id"),
+    pincode: str | None = Query(None, max_length=10, description="Pincode starts with"),
+    budget: str | None = Query(None, max_length=50, description="Exact budget value, e.g. 10-20"),
+    vendor_id: int | None = Query(None, description="Assigned to this vendor (CRM, branch or area rules)"),
+    interest: Literal["interested", "not_interested", "other", "follow_up", "none"] | None = None,
+    converted: Literal["yes", "no"] | None = None,
+    quoted_op: Literal["eq", "ne", "gt", "gte", "lt", "lte", "set", "unset"] | None = None,
+    quoted_value: int | None = Query(None, ge=0),
+):
+    filters = _crm_filters(db, pincode, budget, vendor_id, interest, converted, quoted_op, quoted_value)
+    if filters:
+        # Filters that use the CRM's own data change whenever someone edits a lead: no cache
+        data = list_spin_leads(None, page, page_size, search, sort, order, branch, filters)
+    else:
+        data = response_cache.get(
+            _cache_key(page, page_size, search, sort, order, branch),
+            lambda: list_spin_leads(None, page, page_size, search, sort, order, branch),
+            fresh=FRESH_SECONDS,
+            stale=STALE_SECONDS,
+        )
+
+    # Sidecar: the workflow database is read-only, so the CRM details (vendor, interest,
+    # quote, converted) come from our own crm_lead_meta table, matched by the lead's id.
+    from app.services import lead_crm
+    from app.services.branches import branches_by_id
+
+    pk = next((c.name for c in _get_table().primary_key.columns), "id")
+    pin_key, city_key = _spin_location_keys(data["columns"])
+    branch_key = data.get("branch_column")
+    branches = branches_by_id(db)
+
+    def branch_of(item):
+        return branches.get(str(item.get(branch_key))) if branch_key and item.get(branch_key) is not None else None
+
+    items = lead_crm.attach(
+        db,
+        "spin",
+        data["items"],
+        key=lambda i: i.get(pk),
+        location=lambda i: (i.get(city_key) if city_key else None) or ((branch_of(i) or {}).get("city")),
+        pincode=lambda i: str(i.get(pin_key) or "") if pin_key else None,
+        branch_vendor=lambda i: (branch_of(i) or {}).get("vendor_id"),
+    )
+    # The lead's branch (store), from the Branches page
+    for item in items:
+        b = branch_of(item)
+        item["branch"] = (
+            {"id": b["id"], "name": b["name"], "code": b["code"], "city": b["city"]}
+            if b
+            else ({"id": item.get(branch_key), "name": f"Branch {item.get(branch_key)}", "code": None, "city": None} if branch_key and item.get(branch_key) is not None else None)
+        )
+    return {**data, "items": items}
+
+
+def warm_first_pages() -> None:
+    """Load the pages the dashboard and the Spin leads tab open with, before anyone asks."""
+    if read_engine is None:
+        return
+    for args in ((1, 1, None, None, "asc"), (1, 10, None, None, "asc"), (1, 10, None, "created_at", "desc")):
+        response_cache.warm(_cache_key(*args), lambda a=args: list_spin_leads(None, *a))

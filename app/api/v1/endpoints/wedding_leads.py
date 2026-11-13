@@ -1,0 +1,142 @@
+"""Wedding & event photography leads copied from the Google Sheet (admin only).
+Reads from MySQL only: fast.
+
+GET /wedding-leads         list with search, filters, sort and pages
+GET /wedding-leads/stats   numbers for dashboard cards and filter options
+"""
+from datetime import date, datetime, timedelta, timezone
+from typing import Literal
+
+from fastapi import APIRouter, Query
+from sqlalchemy import func, or_
+from sqlmodel import col, select
+
+from app.api.deps import AdminUser, DbSession
+from app.models.wedding_lead import WeddingLead
+from app.services import lead_crm
+
+router = APIRouter(prefix="/wedding-leads", tags=["wedding-leads"])
+
+SORTABLE = {
+    "submitted_at": WeddingLead.submitted_at,
+    "event_date": WeddingLead.event_date,
+    "budget_amount": WeddingLead.budget_amount,
+    "name": WeddingLead.name,
+    "city": WeddingLead.city,
+}
+
+NOT_SHARED = "__none__"  # shared_with filter value for leads not shared with anyone yet
+
+
+def _utc(value: datetime | None) -> str | None:
+    """MySQL returns naive datetimes; they are stored as UTC."""
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.isoformat()
+
+
+def _out(lead: WeddingLead) -> dict:
+    return {
+        "id": lead.id,
+        "lead_key": lead.sheet_key,
+        "name": lead.name,
+        "email": lead.email,
+        "phone": lead.phone,
+        "phone_display": f"+{lead.phone}" if lead.phone else lead.phone_raw,
+        "city": lead.city,
+        "occasion": lead.occasion,
+        "event_date": lead.event_date.isoformat() if lead.event_date else None,
+        "event_date_text": lead.event_date_text,
+        "budget_amount": lead.budget_amount,
+        "budget_text": lead.budget_text,
+        "shared_with": lead.shared_with,
+        "oseid": lead.oseid,
+        "is_repeat": lead.is_repeat,
+        "submitted_at": _utc(lead.submitted_at),
+        "sheet_row": lead.sheet_row,
+    }
+
+
+@router.get("")
+def list_wedding_leads(
+    _: AdminUser,
+    db: DbSession,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(25, ge=1, le=200),
+    search: str | None = Query(None, max_length=100),
+    occasion: str | None = Query(None, max_length=100),
+    shared_with: str | None = Query(None, max_length=200, description=f"Partner name, or {NOT_SHARED} for not shared"),
+    hide_repeats: bool = False,
+    sort: Literal["submitted_at", "event_date", "budget_amount", "name", "city"] = "submitted_at",
+    order: Literal["asc", "desc"] = "desc",
+):
+    filters = [WeddingLead.is_deleted == False]  # noqa: E712
+    if occasion:
+        filters.append(WeddingLead.occasion == occasion)
+    if shared_with == NOT_SHARED:
+        filters.append(WeddingLead.shared_with.is_(None))
+    elif shared_with:
+        filters.append(WeddingLead.shared_with == shared_with)
+    if hide_repeats:
+        filters.append(WeddingLead.is_repeat == False)  # noqa: E712
+    if search and search.strip():
+        like = f"%{search.strip()}%"
+        digits = "".join(ch for ch in search if ch.isdigit())
+        conditions = [
+            col(WeddingLead.name).like(like),
+            col(WeddingLead.email).like(like),
+            col(WeddingLead.city).like(like),
+            col(WeddingLead.occasion).like(like),
+            col(WeddingLead.shared_with).like(like),
+        ]
+        if digits:
+            conditions.append(col(WeddingLead.phone).like(f"%{digits}%"))
+        filters.append(or_(*conditions))
+
+    total = db.exec(select(func.count()).select_from(WeddingLead).where(*filters)).one()
+
+    column = SORTABLE[sort]
+    ordering = [column.is_(None), column.desc() if order == "desc" else column.asc(), WeddingLead.id.desc()]
+    rows = db.exec(
+        select(WeddingLead).where(*filters).order_by(*ordering).offset((page - 1) * page_size).limit(page_size)
+    ).all()
+
+    # Add the CRM details (vendor, interest, quote, converted) from the sidecar table
+    items = lead_crm.attach(
+        db,
+        "wedding",
+        [_out(r) for r in rows],
+        key=lambda i: i["lead_key"],
+        location=lambda i: i["city"],
+        sheet_vendor=lambda i: i["shared_with"],
+    )
+    return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+
+@router.get("/stats")
+def wedding_lead_stats(_: AdminUser, db: DbSession):
+    active = WeddingLead.is_deleted == False  # noqa: E712
+    now = datetime.now(timezone.utc)
+
+    def count(*conditions) -> int:
+        return db.exec(select(func.count()).select_from(WeddingLead).where(active, *conditions)).one()
+
+    def grouped(column):
+        return [
+            {"value": value, "count": n}
+            for value, n in db.exec(
+                select(column, func.count()).where(active, column.is_not(None)).group_by(column).order_by(func.count().desc())
+            ).all()
+        ]
+
+    return {
+        "total": count(),
+        "last_7_days": count(WeddingLead.submitted_at >= now - timedelta(days=7)),
+        "upcoming_events": count(WeddingLead.event_date >= date.today()),
+        "not_shared": count(WeddingLead.shared_with.is_(None)),
+        "repeats": count(WeddingLead.is_repeat == True),  # noqa: E712
+        "occasions": grouped(WeddingLead.occasion),
+        "shared_with": grouped(WeddingLead.shared_with),
+    }
