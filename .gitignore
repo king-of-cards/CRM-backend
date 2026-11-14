@@ -6,6 +6,8 @@
 
 # SSL certificates / keys (e.g. RDS global-bundle.pem)
 *.pem
+# ...except the public AWS RDS CA bundle, which is committed
+!certs/*.pem
 *.key
 *.crt
 

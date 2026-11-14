@@ -1,5 +1,6 @@
 import ssl
 from collections.abc import Generator
+from pathlib import Path
 
 from fastapi import HTTPException
 from sqlalchemy import event
@@ -10,6 +11,25 @@ from app.core.config import settings
 
 # Read queries are cancelled after this long, so a slow query can't hang a worker
 READ_STATEMENT_TIMEOUT_MS = 15_000
+
+# Project root: relative SSL CA paths in .env are resolved against this
+BASE_DIR = Path(__file__).resolve().parents[2]
+
+
+def _resolve_ssl_ca(ssl_ca: str | None, setting: str) -> str | None:
+    """Resolve a relative CA path against the project root and check that it exists."""
+    if not ssl_ca:
+        return None
+    path = Path(ssl_ca).expanduser()
+    if not path.is_absolute():
+        path = BASE_DIR / path
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"{setting} points to a CA bundle that does not exist: {path}. "
+            "Download it from https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem "
+            "or fix the path in .env (relative paths are resolved from the project root)."
+        )
+    return str(path)
 
 
 def _pg_ssl_context(ssl_ca: str | None) -> ssl.SSLContext:
@@ -24,7 +44,10 @@ def _pg_ssl_context(ssl_ca: str | None) -> ssl.SSLContext:
     return ctx
 
 
-def make_engine(url: str, ssl_ca: str | None = None, read_only: bool = False) -> Engine:
+def make_engine(
+    url: str, ssl_ca: str | None = None, read_only: bool = False, ssl_ca_setting: str = "SSL CA"
+) -> Engine:
+    ssl_ca = _resolve_ssl_ca(ssl_ca, ssl_ca_setting)
     parsed = make_url(url)
     backend = parsed.get_backend_name()  # "mysql", "postgresql" or "sqlite"
     driver = parsed.get_driver_name()    # e.g. "pymysql", "pg8000"
@@ -80,11 +103,16 @@ def make_engine(url: str, ssl_ca: str | None = None, read_only: bool = False) ->
 
 
 # ── Primary database: MySQL (read + write) ──
-engine = make_engine(settings.sqlalchemy_url, settings.DB_SSL_CA)
+engine = make_engine(settings.sqlalchemy_url, settings.DB_SSL_CA, ssl_ca_setting="DB_SSL_CA")
 
 # ── Read-only database: PostgreSQL (None if not configured in .env) ──
 read_engine = (
-    make_engine(settings.read_sqlalchemy_url, settings.READ_DB_SSL_CA, read_only=True)
+    make_engine(
+        settings.read_sqlalchemy_url,
+        settings.READ_DB_SSL_CA,
+        read_only=True,
+        ssl_ca_setting="READ_DB_SSL_CA",
+    )
     if settings.read_db_enabled
     else None
 )
