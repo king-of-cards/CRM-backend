@@ -310,10 +310,15 @@ The example row must be deleted before uploading, or it will be imported as a le
 Checks an uploaded file and returns every row with its errors and duplicate status.
 **Nothing is saved.**
 
-**Request:** `multipart/form-data` with one field, `file`.
+**Request:** `multipart/form-data` with these fields:
 
-- **Excel `.xlsx`** (main format; detected by content or name). The sheet named `Leads` is
-  read, or else the first sheet. Formulas are read as their last saved value.
+| Field | Required | Meaning |
+|---|---|---|
+| `file` | ✔ | The `.xlsx` or `.csv` file. |
+| `sheet_name` | | Excel only: the sheet to read, up to 31 characters (Excel's limit). If it's missing or empty, the sheet named `Leads` is read, or else the first sheet. An exact name wins; otherwise a single match ignoring case and surrounding spaces is used. Ignored for CSV. |
+
+- **Excel `.xlsx`** (main format; detected by content or name). Formulas are read as their
+  last saved value.
 - **CSV** (`.csv`, `.txt`, or no file name). UTF-8 (with or without BOM) or Windows-1252.
   The delimiter (comma, semicolon or tab) is detected from the first line.
 - The first non-empty row is the header. Empty rows are skipped. Row numbers in the
@@ -396,10 +401,12 @@ with errors are never checked against other sources).
 | 400 | `The file is empty.` |
 | 400 | `Upload an Excel (.xlsx) or CSV file.` |
 | 400 | `This is not a readable Excel (.xlsx) file.` |
+| 400 | `There is no sheet named "April" in this file. Sheets in the file: "Instructions", "Leads", "March batch".` |
 | 400 | `The file has no header row.` |
 | 400 | `The file has more than 5,000 rows. Split it into smaller files.` |
 | 400 | `The file has no Phone column. Use the template's column names.` |
 | 400 | `The file has no leads (only a header row).` |
+| 422 | `sheet_name` longer than 31 characters (FastAPI validation format) |
 | 503 | Workflow duplicate check unavailable (see [Error format](#error-format)). |
 
 ---
@@ -716,6 +723,7 @@ The CRM details of an added/imported lead are stored like any other lead's:
 | Upload file size | 5 MB | `400` |
 | Rows per upload (non-empty rows after the header) | 5,000 | `400` |
 | Columns read per upload | 200 (extra columns ignored) | |
+| `sheet_name` | 31 characters | `422` |
 | Rows per import request | 5,000 | `422` |
 | Rows per export | 50,000 | `400` with the actual count |
 | Text fields | `max_length` per field (see [Fields per source](#2-fields-per-source)) | Row/field error |

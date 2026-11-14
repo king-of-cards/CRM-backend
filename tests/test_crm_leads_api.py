@@ -468,6 +468,50 @@ class CrmLeadsApiTest(unittest.TestCase):
         resp = self.client.post(f"{API}/crm-leads/wedding/import/preview", files={"file": ("x.xlsx", b"PK\x03\x04junk", XLSX)})
         self.assertEqual(resp.status_code, 400)
 
+    def test_preview_sheet_name(self):
+        def workbook(sheets: dict[str, list[list]]) -> bytes:
+            wb = Workbook()
+            wb.remove(wb.active)
+            for title, rows in sheets.items():
+                ws = wb.create_sheet(title)
+                for r in rows:
+                    ws.append(r)
+            buf = io.BytesIO()
+            wb.save(buf)
+            return buf.getvalue()
+
+        def preview(content: bytes, sheet_name=None, filename="leads.xlsx", media=XLSX):
+            data = {"sheet_name": sheet_name} if sheet_name is not None else {}
+            return self.client.post(f"{API}/crm-leads/wedding/import/preview",
+                                    files={"file": (filename, content, media)}, data=data)
+
+        def phones(resp) -> list[str]:
+            self.assertEqual(resp.status_code, 200, resp.text)
+            return [r["values"]["phone"] for r in resp.json()["rows"]]
+
+        content = workbook({
+            "Instructions": [["Read me first"]],
+            "Leads": [["Phone"], ["9845050001"]],
+            "March batch": [["Phone"], ["9845050002"], ["9845050003"]],
+        })
+        self.assertEqual(phones(preview(content)), ["9845050001"])                     # default: "Leads"
+        self.assertEqual(phones(preview(content, "")), ["9845050001"])                 # empty = default
+        self.assertEqual(phones(preview(content, "March batch")), ["9845050002", "9845050003"])
+        self.assertEqual(phones(preview(content, "  march BATCH ")), ["9845050002", "9845050003"])  # case/spaces
+
+        resp = preview(content, "April")
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.json()["detail"], 'There is no sheet named "April" in this file. '
+                                                'Sheets in the file: "Instructions", "Leads", "March batch".')
+        self.assertEqual(preview(content, "x" * 32).status_code, 422)                 # Excel names are <= 31 chars
+
+        # No "Leads" sheet: the first sheet is read
+        no_leads = workbook({"Batch 1": [["Phone"], ["9845050004"]], "Batch 2": [["Phone"], ["9845050005"]]})
+        self.assertEqual(phones(preview(no_leads)), ["9845050004"])
+        # CSV has no sheets: sheet_name is ignored
+        self.assertEqual(phones(preview(b"Phone\n9845050006\n", "Anything", "w.csv", "text/csv")), ["9845050006"])
+        self.assertEqual(self.count(WeddingLead), 0, "preview must not save anything")
+
     def test_fields_and_backfill(self):
         resp = self.client.get(f"{API}/crm-leads/spin/fields")
         self.assertEqual(resp.json()["fields"][0], {"key": "phone", "label": "Phone", "type": "phone", "required": True,

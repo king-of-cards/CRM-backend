@@ -39,15 +39,16 @@ class UploadError(ValueError):
 
 
 # ── Reading uploads ────────────────────────────────────────────────────
-def read_upload(filename: str, content: bytes) -> tuple[list[str], list[tuple[int, list[Any]]]]:
-    """(headers, [(row number as shown in Excel, values)]). Empty rows are skipped."""
+def read_upload(filename: str, content: bytes, sheet_name: str | None = None) -> tuple[list[str], list[tuple[int, list[Any]]]]:
+    """(headers, [(row number as shown in Excel, values)]). Empty rows are skipped.
+    sheet_name (Excel only): the sheet to read; default "Leads", else the first sheet."""
     if len(content) > MAX_UPLOAD_BYTES:
         raise UploadError("The file is larger than 5 MB.")
     if not content:
         raise UploadError("The file is empty.")
     name = (filename or "").lower()
     if content[:2] == b"PK" or name.endswith(".xlsx"):
-        rows = _xlsx_rows(content)
+        rows = _xlsx_rows(content, sheet_name)
     elif name.endswith((".csv", ".txt")) or not name:
         rows = _csv_rows(content)
     else:
@@ -72,13 +73,28 @@ def _filled(value: Any) -> bool:
     return value is not None and str(value).strip() != ""
 
 
-def _xlsx_rows(content: bytes) -> list[tuple[int, list[Any]]]:
+def _pick_sheet(wb, sheet_name: str | None):
+    """The requested sheet (exact name, else the only case-insensitive match), or by default
+    "Leads", else the first sheet. Unknown name: UploadError listing the sheets."""
+    wanted = (sheet_name or "").strip()
+    if not wanted:
+        return wb["Leads"] if "Leads" in wb.sheetnames else wb.worksheets[0]
+    if wanted in wb.sheetnames:
+        return wb[wanted]
+    matches = [n for n in wb.sheetnames if n.strip().casefold() == wanted.casefold()]
+    if len(matches) == 1:
+        return wb[matches[0]]
+    available = ", ".join(f'"{n}"' for n in wb.sheetnames)
+    raise UploadError(f'There is no sheet named "{wanted}" in this file. Sheets in the file: {available}.')
+
+
+def _xlsx_rows(content: bytes, sheet_name: str | None = None) -> list[tuple[int, list[Any]]]:
     try:
         wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
     except Exception as exc:  # noqa: BLE001  (bad zip, not a workbook, encrypted, ...)
         raise UploadError("This is not a readable Excel (.xlsx) file.") from exc
     try:
-        ws = wb["Leads"] if "Leads" in wb.sheetnames else wb.worksheets[0]
+        ws = _pick_sheet(wb, sheet_name)
         rows = []                                   # only rows with something in them
         for number, values in enumerate(ws.iter_rows(values_only=True, max_col=MAX_COLUMNS), start=1):
             if any(_filled(v) for v in values):

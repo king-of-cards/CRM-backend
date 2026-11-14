@@ -18,7 +18,7 @@ and are edited with PUT /leads/{source}/{lead_key}/crm, using the lead_key retur
 """
 from typing import Any, Literal
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy import func
@@ -78,11 +78,19 @@ def template(source: Source, _: AdminUser, db: DbSession, format: Format = "xlsx
 
 # ── Import ─────────────────────────────────────────────────────────────
 @router.post("/{source}/import/preview")
-async def import_preview(source: Source, _: AdminUser, db: DbSession, file: UploadFile = File(...)):
+async def import_preview(
+    source: Source,
+    _: AdminUser,
+    db: DbSession,
+    file: UploadFile = File(...),
+    sheet_name: str | None = Form(
+        None, max_length=31, description='Excel sheet to read (default "Leads", else the first sheet). Ignored for CSV.'
+    ),
+):
     """Check an uploaded file. Nothing is saved: send the rows' "values" to POST /import."""
     content = await file.read(tabular.MAX_UPLOAD_BYTES + 1)
     try:
-        headers, data = tabular.read_upload(file.filename or "", content)
+        headers, data = tabular.read_upload(file.filename or "", content, sheet_name)
     except tabular.UploadError as exc:
         raise HTTPException(400, str(exc))
 
