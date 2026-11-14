@@ -3,6 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
+from sqlmodel import SQLModel
 
 from app.api.deps import CurrentUser, DbSession, require_trusted_origin
 from app.core.config import settings
@@ -10,6 +11,8 @@ from app.core.security import create_access_token
 from app.crud import refresh_token as tokens
 from app.crud import user as crud
 from app.models.user import Token, UserRead
+from app.models.vendor import Vendor
+from app.models.vendor_user import VendorUser
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -96,6 +99,20 @@ def logout(request: Request, db: DbSession) -> Response:
     return response
 
 
-@router.get("/me", response_model=UserRead)
-def read_me(current_user: CurrentUser):
-    return current_user
+class VendorRef(SQLModel):
+    id: int
+    name: str
+
+
+class MeRead(UserRead):
+    vendor: VendorRef | None = None      # vendor logins: the vendor whose leads they see
+
+
+@router.get("/me", response_model=MeRead)
+def read_me(current_user: CurrentUser, db: DbSession):
+    vendor = None
+    link = db.get(VendorUser, current_user.id) if current_user.role != "admin" else None
+    if link is not None:
+        v = db.get(Vendor, link.vendor_id)
+        vendor = VendorRef(id=v.id, name=v.name) if v else None
+    return MeRead.model_validate({**current_user.model_dump(), "vendor": vendor})

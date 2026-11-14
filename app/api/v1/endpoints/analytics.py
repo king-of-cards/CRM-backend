@@ -20,8 +20,9 @@ from fastapi import APIRouter, Query
 from sqlalchemy import select as sa_select
 from sqlmodel import Session, select
 
-from app.api.deps import AdminUser
+from app.api.deps import DbSession, LeadViewer
 from app.core import response_cache
+from app.services import access
 from app.db.session import engine, read_engine
 from app.models.wedding_lead import WeddingLead
 from app.models.wedding_plan import WeddingPlan
@@ -96,6 +97,7 @@ def _spin_rows() -> list[dict] | None:
         for lead in crm_spin_leads.active(db):
             details = lead.additional_details or {}
             rows.append({
+                "key": lead.lead_key,
                 "created": lead.created_at,
                 "occasion_type": details.get("occasionType"),
                 "occasion_date": details.get("occasionDate"),
@@ -118,8 +120,9 @@ def _workflow_spin_rows() -> list[dict] | None:
         type_field = next((fields[k] for k in ("occasiontype", "eventtype", "occasion") if k in fields), None)
         date_field = next((fields[k] for k in ("occasiondate", "eventdate", "weddingdate") if k in fields), None)
 
-        exprs = []
-        names = []
+        pk = list(table.primary_key.columns)[0]
+        exprs = [pk.label("key")]
+        names = ["key"]
         if created_col is not None:
             exprs.append(created_col.label("created"))
             names.append("created")
@@ -129,19 +132,20 @@ def _workflow_spin_rows() -> list[dict] | None:
         if date_field is not None:
             exprs.append(sl._json_text_expr(table, date_field).label("occasion_date"))
             names.append("occasion_date")
-        if not exprs:
+        if len(exprs) == 1:
             return []
 
         with read_engine.connect() as conn:
             rows = conn.execute(sa_select(*exprs).select_from(table).where(*base)).all()
-        return [dict(zip(names, r)) for r in rows]
+        return [{**dict(zip(names, r)), "key": str(r[0])} for r in rows]
     except Exception:  # noqa: BLE001
         logger.warning("Spin analytics unavailable", exc_info=True)
         return None
 
 
 # ── Build the overview ─────────────────────────────────────────────────
-def _build(db: Session) -> dict:
+def _build(db: Session, keys: dict[str, set[str]] | None = None) -> dict:
+    """keys: {source: lead keys} to limit every number to (a vendor's own leads); None = all."""
     today = _as_date(datetime.now(timezone.utc))
     week_start = today - timedelta(days=6)           # last 7 days, today included
     prev_week_start = week_start - timedelta(days=7)
@@ -149,24 +153,29 @@ def _build(db: Session) -> dict:
 
     # Load the sheet tables (only the columns needed)
     wa = db.exec(
-        select(WhatsAppLead.submitted_at, WhatsAppLead.event_date, WhatsAppLead.country).where(
+        select(WhatsAppLead.submitted_at, WhatsAppLead.event_date, WhatsAppLead.country, WhatsAppLead.sheet_key).where(
             WhatsAppLead.is_deleted == False  # noqa: E712
         )
     ).all()
     wd = db.exec(
         select(
             WeddingLead.submitted_at, WeddingLead.event_date, WeddingLead.city, WeddingLead.occasion,
-            WeddingLead.budget_amount, WeddingLead.shared_with, WeddingLead.is_repeat,
+            WeddingLead.budget_amount, WeddingLead.shared_with, WeddingLead.is_repeat, WeddingLead.sheet_key,
         ).where(WeddingLead.is_deleted == False)  # noqa: E712
     ).all()
     wp = db.exec(
         select(
             WeddingPlan.updated_in_sheet_at, WeddingPlan.wedding_date, WeddingPlan.city, WeddingPlan.total_budget,
             WeddingPlan.plan_estimate, WeddingPlan.fits_budget, WeddingPlan.total_guests, WeddingPlan.shared_with,
-            WeddingPlan.last_step,
+            WeddingPlan.last_step, WeddingPlan.plan_id,
         ).where(WeddingPlan.is_deleted == False)  # noqa: E712
     ).all()
     spin = _spin_rows()
+    if keys is not None:
+        wa = [r for r in wa if r[-1] in keys["whatsapp"]]
+        wd = [r for r in wd if r[-1] in keys["wedding"]]
+        wp = [r for r in wp if r[-1] in keys["wedding_planner"]]
+        spin = None if spin is None else [r for r in spin if str(r.get("key")) in keys["spin"]]
 
     # (created date, event date) per source
     timeline: dict[str, list[tuple[date | None, date | None]]] = {
@@ -280,7 +289,15 @@ def warm_overview() -> None:
 
 
 @router.get("/overview")
-def analytics_overview(_: AdminUser, refresh: bool = Query(False)):
+def analytics_overview(viewer: LeadViewer, db: DbSession, refresh: bool = Query(False)):
+    """Admins: every lead. Vendor users: only their own leads (cached per vendor)."""
     if refresh:
         response_cache.clear("analytics")
-    return response_cache.get(CACHE_KEY, build_overview, fresh=FRESH_SECONDS, stale=STALE_SECONDS)
+    if viewer.is_admin:
+        return response_cache.get(CACHE_KEY, build_overview, fresh=FRESH_SECONDS, stale=STALE_SECONDS)
+    keys = {source: access.visible_keys(db, viewer, source) for source in SOURCES}
+
+    def build():
+        return _build(db, keys)
+
+    return response_cache.get(("analytics", "overview", viewer.vendor_id), build, fresh=FRESH_SECONDS, stale=FRESH_SECONDS)

@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlmodel import select
 
-from app.api.deps import AdminUser, DbSession
+from app.api.deps import AdminUser, DbSession, LeadViewer
 from app.api.v1.endpoints import spin_leads as spin_ep
 from app.api.v1.endpoints import wedding_leads as wedding_ep
 from app.api.v1.endpoints import wedding_plans as planner_ep
@@ -36,7 +36,11 @@ from app.models.wedding_plan import WeddingPlan
 from app.models.whatsapp_lead import WhatsAppLead
 from app.services.crm_leads import export as export_cols
 from app.services.crm_leads import service, tabular
-from app.services.crm_leads.fields import FIELDS, SOURCE_LABELS, clean_row, from_model, header_map
+from app.services import access
+from app.services.crm_leads.fields import (
+    FIELDS, SOURCE_LABELS, clean_row, from_model, header_map, norm_header, read_only_headers,
+)
+from app.services.lead_crm import active_vendors
 
 router = APIRouter(prefix="/crm-leads", tags=["crm leads (add, import, export)"])
 
@@ -72,7 +76,9 @@ def fields(source: Source, _: AdminUser, db: DbSession):
 
 @router.get("/{source}/template")
 def template(source: Source, _: AdminUser, db: DbSession, format: Format = "xlsx"):
-    content, media_type, ext = tabular.template(source, format, _branch_names(db) if source == "spin" else [])
+    content, media_type, ext = tabular.template(
+        source, format, _branch_names(db) if source == "spin" else [], [v.name for v in active_vendors(db)]
+    )
     return _file_response(content, media_type, tabular.filename(f"{source}-leads-template", ext))
 
 
@@ -95,18 +101,24 @@ async def import_preview(
         raise HTTPException(400, str(exc))
 
     names = header_map(source)
+    read_only = read_only_headers(source)
     mapping: dict[int, str] = {}
     matched: dict[str, str] = {}
     ignored: list[str] = []
+    read_only_found: list[str] = []
     for i, header in enumerate(headers):
-        key = names.get("".join(ch for ch in header.lower() if ch.isalnum()))
+        normalized = norm_header(header)
+        key = names.get(normalized)
         if key and key not in mapping.values():
             mapping[i] = key
             matched[header] = key
+        elif normalized in read_only:
+            read_only_found.append(header)       # e.g. Interest, Quoted amount: set by vendors, not uploads
         elif header:
             ignored.append(header)
     if "phone" not in mapping.values():
-        raise HTTPException(400, "The file has no Phone column. Use the template's column names.")
+        phone_label = next(f.label for f in FIELDS[source] if f.key == "phone")
+        raise HTTPException(400, f"The file has no {phone_label} (phone) column. Use the template's column names.")
     if not data:
         raise HTTPException(400, "The file has no leads (only a header row).")
 
@@ -115,7 +127,8 @@ async def import_preview(
         results, counts, _ = service.check_rows(db, source, rows)
     except service.WorkflowUnavailable:
         raise _workflow_down()
-    return {"source": source, "columns": matched, "ignored_columns": ignored, "rows": results, "counts": counts}
+    return {"source": source, "columns": matched, "ignored_columns": ignored, "read_only_columns": read_only_found,
+            "rows": results, "counts": counts}
 
 
 class ImportRow(BaseModel):
@@ -144,6 +157,7 @@ def import_rows(source: Source, body: ImportBody, user: AdminUser, db: DbSession
         lead = service.create(db, source, c, ORIGIN_IMPORTED, user.id)
         result["status"] = "imported"
         result["lead_key"] = service.lead_key_of(source, lead)
+        service.save_assignment(db, source, result["lead_key"], c.assignment, user.id, empty_means_unassigned=True)
         imported += 1
     db.commit()
     if imported:
@@ -163,8 +177,8 @@ def _check_cap(total: int) -> None:
 
 
 def _export(source: str, format: str, columns, items) -> Response:
-    headers, rows, text_cols = export_cols.build(columns, items)
-    content, media_type, ext = tabular.write_table(format, SOURCE_LABELS[source], headers, rows, text_cols)
+    headers, rows, kinds = export_cols.build(columns, items)
+    content, media_type, ext = tabular.write_table(format, SOURCE_LABELS[source], headers, rows, kinds)
     return _file_response(content, media_type, tabular.filename(f"{source}-leads", ext))
 
 
@@ -177,7 +191,7 @@ def _sheet_export(db, source: str, model, module, filters, sort: str, order: str
 
 @router.get("/whatsapp/export")
 def export_whatsapp(
-    _: AdminUser,
+    viewer: LeadViewer,
     db: DbSession,
     format: Format = "xlsx",
     search: str | None = Query(None, max_length=100),
@@ -185,13 +199,13 @@ def export_whatsapp(
     sort: Literal["submitted_at", "event_date", "country", "phone", "first_seen_at"] = "submitted_at",
     order: Literal["asc", "desc"] = "desc",
 ):
-    return _sheet_export(db, "whatsapp", WhatsAppLead, whatsapp_ep, whatsapp_ep.build_filters(search, country),
-                         sort, order, format)
+    filters = whatsapp_ep.build_filters(search, country, access.visible_keys(db, viewer, "whatsapp"))
+    return _sheet_export(db, "whatsapp", WhatsAppLead, whatsapp_ep, filters, sort, order, format)
 
 
 @router.get("/wedding/export")
 def export_wedding(
-    _: AdminUser,
+    viewer: LeadViewer,
     db: DbSession,
     format: Format = "xlsx",
     search: str | None = Query(None, max_length=100),
@@ -201,13 +215,14 @@ def export_wedding(
     sort: Literal["submitted_at", "event_date", "budget_amount", "name", "city"] = "submitted_at",
     order: Literal["asc", "desc"] = "desc",
 ):
-    filters = wedding_ep.build_filters(search, occasion, shared_with, hide_repeats)
+    filters = wedding_ep.build_filters(search, occasion, shared_with, hide_repeats,
+                                       access.visible_keys(db, viewer, "wedding"))
     return _sheet_export(db, "wedding", WeddingLead, wedding_ep, filters, sort, order, format)
 
 
 @router.get("/wedding_planner/export")
 def export_wedding_planner(
-    _: AdminUser,
+    viewer: LeadViewer,
     db: DbSession,
     format: Format = "xlsx",
     search: str | None = Query(None, max_length=100),
@@ -217,13 +232,14 @@ def export_wedding_planner(
     sort: Literal["updated", "wedding_date", "total_budget", "total_guests", "plan_estimate", "name"] = "updated",
     order: Literal["asc", "desc"] = "desc",
 ):
-    filters = planner_ep.build_filters(search, shared_with, fits_budget, last_step)
+    filters = planner_ep.build_filters(search, shared_with, fits_budget, last_step,
+                                       access.visible_keys(db, viewer, "wedding_planner"))
     return _sheet_export(db, "wedding_planner", WeddingPlan, planner_ep, filters, sort, order, format)
 
 
 @router.get("/spin/export")
 def export_spin(
-    _: AdminUser,
+    viewer: LeadViewer,
     db: DbSession,
     format: Format = "xlsx",
     search: str | None = Query(None),
@@ -238,8 +254,9 @@ def export_spin(
     quoted_op: Literal["eq", "ne", "gt", "gte", "lt", "lte", "set", "unset"] | None = None,
     quoted_value: int | None = Query(None, ge=0),
 ):
-    """Workflow and CRM spin leads together, with the same filters as GET /spin-leads."""
-    filters = spin_ep._crm_filters(db, pincode, budget, vendor_id, interest, converted, quoted_op, quoted_value)
+    """Exactly the requesting user's spin list (workflow and CRM leads, same filters and sort)."""
+    filters = spin_ep.viewer_filters(db, viewer, pincode, budget, vendor_id, interest, converted, quoted_op,
+                                     quoted_value)
     total = spin_ep.merged_page(db, 0, 0, search, sort, order, branch, filters, use_cache=False)["total"]
     _check_cap(total)
     data = spin_ep.merged_page(db, 0, total, search, sort, order, branch, filters, use_cache=False)
@@ -272,6 +289,8 @@ def add_lead(source: Source, body: AddBody, user: AdminUser, db: DbSession):
     if duplicate and not body.allow_duplicate:
         raise _duplicate_409(duplicate, others)
     lead = service.create(db, source, c, ORIGIN_ADDED, user.id)
+    service.save_assignment(db, source, service.lead_key_of(source, lead), c.assignment, user.id,
+                            empty_means_unassigned=False)
     db.commit()
     db.refresh(lead)
     service.clear_caches()
@@ -303,7 +322,7 @@ class EditBody(BaseModel):
 @router.patch("/{source}/{lead_key}")
 def edit_lead(source: Source, lead_key: str, body: EditBody, _: AdminUser, db: DbSession):
     lead = _crm_lead_or_error(db, source, lead_key)
-    raw = {k: v for k, v in body.values.items() if k in {f.key for f in FIELDS[source]}}
+    raw = {k: v for k, v in body.values.items() if k in {f.key for f in FIELDS[source]} and k != "assigned_to"}
     if not raw:
         raise HTTPException(422, {"message": "Nothing to change.", "errors": []})
     if source == "whatsapp" and "country" in raw and "phone" not in raw:

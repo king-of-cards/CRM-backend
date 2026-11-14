@@ -22,6 +22,9 @@ class LeadMeta(SQLModel, table=True):
     lead_key: str = Field(max_length=100, index=True)
 
     vendor_id: int | None = Field(default=None, foreign_key="crm_vendors.id", index=True)  # manual assignment
+    # False = never assigned automatically (sheet / branch / area rules): the lead stays
+    # unassigned until an admin picks a vendor. Uploaded rows with an empty "Assigned to".
+    auto_assign: bool = Field(default=True, sa_column_kwargs={"server_default": "1"})
     interest: str | None = Field(default=None, max_length=30, index=True)  # interested | follow_up | not_interested
     converted: bool = Field(default=False, index=True)
     converted_at: datetime | None = None

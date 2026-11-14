@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from app.api.v1.endpoints import (
     analytics,
     auth,
+    branches,
     crm_leads,
     health,
     lead_crm,
@@ -28,5 +29,6 @@ api_router.include_router(wedding_leads.router)
 api_router.include_router(wedding_plans.router)
 api_router.include_router(analytics.router)
 api_router.include_router(vendors.router)
+api_router.include_router(branches.router)
 api_router.include_router(lead_crm.router)
 api_router.include_router(crm_leads.router)

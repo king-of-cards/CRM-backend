@@ -11,6 +11,8 @@ from app.core.security import decode_access_token
 from app.crud import user as crud
 from app.db.session import get_db
 from app.models.user import Role, User
+from app.services import access
+from app.services.access import Viewer
 
 # tokenUrl makes the "Authorize" button in /docs work
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
@@ -46,6 +48,18 @@ def require_admin(user: CurrentUser) -> User:
 
 
 AdminUser = Annotated[User, Depends(require_admin)]
+
+
+def get_viewer(user: CurrentUser, db: DbSession) -> Viewer:
+    """Admin, or a vendor login linked to its vendor (see app/services/access.py)."""
+    try:
+        return access.viewer_for(db, user)
+    except access.NotLinked:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This login isn't linked to a vendor.")
+
+
+# Endpoints that admins and vendor users may call; results are limited to what the viewer may see
+LeadViewer = Annotated[Viewer, Depends(get_viewer)]
 
 
 def _origin_of(url: str | None) -> str | None:

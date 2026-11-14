@@ -13,14 +13,14 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
-from app.api.deps import AdminUser, DbSession
+from app.api.deps import AdminUser, DbSession, LeadViewer
 from app.core import response_cache
 from app.db.session import engine, read_engine
 from app.models.vendor import Vendor
 from app.models.wedding_lead import WeddingLead
 from app.models.wedding_plan import WeddingPlan
 from app.models.whatsapp_lead import WhatsAppLead
-from app.services import lead_crm
+from app.services import access, lead_crm
 
 logger = logging.getLogger(__name__)
 
@@ -90,13 +90,18 @@ def _changed():
 
     response_cache.clear("vendors")
     response_cache.clear("spin")  # spin leads' vendors come from branch + vendor rules
+    response_cache.clear("analytics")
+    access.forget()               # area rules decide which vendor sees which lead
     forget_cache()
 
 
 @router.get("")
-def list_vendors(_: AdminUser, db: DbSession, include_inactive: bool = False):
+def list_vendors(viewer: LeadViewer, db: DbSession, include_inactive: bool = False):
+    """Admins: all vendors. Vendor users: only their own vendor."""
     query = select(Vendor).order_by(Vendor.priority, Vendor.id)
-    if not include_inactive:
+    if not viewer.is_admin:
+        query = query.where(Vendor.id == viewer.vendor_id)
+    elif not include_inactive:
         query = query.where(Vendor.is_active == True)  # noqa: E712
     return [_out(v) for v in db.exec(query)]
 

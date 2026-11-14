@@ -1,17 +1,52 @@
-"""Export columns per source: the list rows (as the list endpoints return them, with their "crm"
-details) turned into a table. Dates become real dates, ISO times become India time when written."""
+"""Export (and template) columns per source: each list screen flattened into columns.
+
+The identity cell becomes Lead (+ its subtitle), the contact cell Contact, then the screen's
+columns in order (a cell with two lines becomes two columns), the CRM columns, and the trailing
+column. Values are what the screen shows:
+  dates        13 Dec 2026           (xlsx: date cells, "dd mmm yyyy")
+  date-times   14 Nov 2026, 10:30 am (India time; xlsx: datetime cells)
+  phones       +919845012345         (text)
+  money        full rupees           (xlsx: number cells with a ₹ format)
+  Assigned to  the chip text: "Phodeo", "Phodeo · auto" or "Unassigned"
+The template and the upload parser use the same headers (see fields.py), so an exported file
+can be uploaded back.
+"""
 import re
+from collections.abc import Callable
 from datetime import date, datetime, timezone
-from typing import Any, Callable
+from typing import Any
 
-from app.services.crm_leads.fields import FIELDS
+from app.services import phones
+from app.services.lead_crm import assigned_label
 
-Col = tuple[str, Callable[[dict], Any], str]          # (header, getter, kind: text | phone | date | dt | value)
+Col = tuple[str, Callable[[dict], Any], str]   # (header, getter, kind: text | phone | date | datetime | money | int | yesno)
 
-_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+INTEREST_LABELS = {"interested": "Interested", "not_interested": "Not interested", "other": "Others",
+                   "follow_up": "Follow up"}
+
+# Rough area of an Indian pincode (first 3 digits), as the spin screen shows it
+PINCODE_AREAS = {
+    560: "Bangalore", 561: "Bangalore Rural", 562: "Bangalore Rural", 563: "Kolar", 570: "Mysore", 571: "Mysore",
+    572: "Tumkur", 573: "Hassan", 574: "Dakshina Kannada", 575: "Mangalore", 576: "Udupi", 577: "Shimoga / Chitradurga",
+    580: "Hubballi-Dharwad", 581: "Uttara Kannada / Haveri", 582: "Gadag", 583: "Ballari", 584: "Raichur",
+    585: "Kalaburagi / Bidar", 586: "Vijayapura", 587: "Bagalkot", 590: "Belagavi", 591: "Belagavi",
+    500: "Hyderabad", 501: "Ranga Reddy", 502: "Sangareddy / Medak", 503: "Nizamabad", 504: "Adilabad",
+    505: "Karimnagar", 506: "Warangal", 507: "Khammam", 508: "Nalgonda", 509: "Mahabubnagar",
+    515: "Anantapur", 516: "Kadapa", 517: "Chittoor / Tirupati", 518: "Kurnool", 520: "Vijayawada", 521: "Krishna",
+    522: "Guntur", 523: "Prakasam", 524: "Nellore", 530: "Visakhapatnam", 531: "Visakhapatnam", 532: "Srikakulam",
+    533: "East Godavari", 534: "West Godavari", 535: "Vizianagaram",
+    600: "Chennai", 601: "Chennai region", 603: "Chengalpattu", 625: "Madurai", 641: "Coimbatore", 620: "Tiruchirappalli",
+    682: "Kochi", 695: "Thiruvananthapuram", 673: "Kozhikode", 400: "Mumbai", 411: "Pune", 110: "Delhi",
+    700: "Kolkata", 380: "Ahmedabad", 302: "Jaipur", 226: "Lucknow", 201: "Noida / Ghaziabad", 122: "Gurugram",
+}
 
 
-def _dt(value: Any) -> datetime | None:
+def pincode_area(pin: Any) -> str | None:
+    digits = re.sub(r"\D", "", str(pin or ""))
+    return PINCODE_AREAS.get(int(digits[:3])) if len(digits) == 6 else None
+
+
+def to_datetime(value: Any) -> datetime | None:
     if not value:
         return None
     if isinstance(value, datetime):
@@ -24,7 +59,7 @@ def _dt(value: Any) -> datetime | None:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)      # stored times are UTC
 
 
-def _date(value: Any) -> date | None:
+def to_date(value: Any) -> date | None:
     if not value:
         return None
     if isinstance(value, date) and not isinstance(value, datetime):
@@ -35,135 +70,162 @@ def _date(value: Any) -> date | None:
         return None
 
 
+def date_or_text(value: Any, fallback: Any = None) -> Any:
+    """A date when the value is an ISO date, else the text as shown (e.g. "December 2027")."""
+    return to_date(value) or (fallback if fallback not in ("", None) else None)
+
+
+def e164(value: Any) -> str | None:
+    if not value:
+        return None
+    text = str(value)
+    if text.startswith("+"):
+        return text
+    return phones.normalize(text, lenient=True).e164 or text
+
+
 def _crm(item: dict, key: str) -> Any:
     return (item.get("crm") or {}).get(key)
-
-
-CRM_COLUMNS: list[Col] = [
-    ("Assigned to", lambda i: (_crm(i, "vendor") or {}).get("name"), "text"),
-    ("Assigned how", lambda i: _crm(i, "vendor_source"), "text"),
-    ("Suggested vendor", lambda i: (_crm(i, "suggested_vendor") or {}).get("name"), "text"),
-    ("Interest", lambda i: _crm(i, "interest"), "text"),
-    ("Converted", lambda i: bool(_crm(i, "converted")), "value"),
-    ("Converted at", lambda i: _crm(i, "converted_at"), "dt"),
-    ("Quoted date", lambda i: _crm(i, "quoted_date"), "date"),
-    ("Quoted amount", lambda i: _crm(i, "quoted_amount"), "value"),
-    ("Notes", lambda i: _crm(i, "notes"), "text"),
-    ("CRM updated", lambda i: _crm(i, "updated_at"), "dt"),
-]
 
 
 def _g(key: str) -> Callable[[dict], Any]:
     return lambda i: i.get(key)
 
 
+CRM_COLUMNS: list[Col] = [
+    ("Assigned to", lambda i: assigned_label(i.get("crm")), "text"),
+    ("Interest", lambda i: INTEREST_LABELS.get(_crm(i, "interest"), _crm(i, "interest")), "text"),
+    ("Quoted amount", lambda i: _crm(i, "quoted_amount"), "money"),
+    ("Quoted date", lambda i: to_date(_crm(i, "quoted_date")), "date"),
+    ("Converted", lambda i: bool(_crm(i, "converted")), "yesno"),
+]
+
+
+def _event(i: dict) -> Any:
+    return date_or_text(i.get("event_date"), i.get("event_date_text"))
+
+
 SHEET_COLUMNS: dict[str, list[Col]] = {
     "whatsapp": [
-        ("Lead key", _g("lead_key"), "text"),
-        ("Origin", _g("origin"), "text"),
-        ("Phone", _g("phone_display"), "phone"),
+        ("Lead", lambda i: e164(i.get("phone_display")), "phone"),
         ("Country", _g("country"), "text"),
-        ("Event date (as written)", _g("event_date_text"), "text"),
-        ("Event date", _g("event_date"), "date"),
-        ("Submitted", _g("submitted_at"), "dt"),
-        ("First seen", _g("first_seen_at"), "dt"),
+        ("Event date", _event, "date"),
+        *CRM_COLUMNS,
+        ("Submitted", lambda i: to_datetime(i.get("submitted_at")), "datetime"),
     ],
     "wedding": [
-        ("Lead key", _g("lead_key"), "text"),
-        ("Origin", _g("origin"), "text"),
-        ("Name", _g("name"), "text"),
-        ("Phone", _g("phone_display"), "phone"),
+        ("Lead", _g("name"), "text"),
         ("Email", _g("email"), "text"),
-        ("City", _g("city"), "text"),
+        ("Contact", _g("phone_display"), "phone"),           # +<digits with country code>
         ("Occasion", _g("occasion"), "text"),
-        ("Event date (as written)", _g("event_date_text"), "text"),
-        ("Event date", _g("event_date"), "date"),
-        ("Budget (as written)", _g("budget_text"), "text"),
-        ("Budget amount", _g("budget_amount"), "value"),
-        ("Leads shared", _g("shared_with"), "text"),
-        ("Repeat", _g("is_repeat"), "value"),
-        ("Submitted", _g("submitted_at"), "dt"),
+        ("Event date", _event, "date"),
+        ("City", _g("city"), "text"),
+        ("Budget", lambda i: i.get("budget_amount") if i.get("budget_amount") is not None else i.get("budget_text"), "money"),
+        *CRM_COLUMNS,
+        ("Submitted", lambda i: to_datetime(i.get("submitted_at")), "datetime"),
     ],
     "wedding_planner": [
-        ("Plan ID", _g("plan_id"), "text"),
-        ("Origin", _g("origin"), "text"),
-        ("Last step", _g("last_step"), "text"),
-        ("Updated", _g("updated_at"), "dt"),
-        ("Name", _g("name"), "text"),
-        ("Phone", _g("phone_display"), "phone"),
+        ("Lead", _g("name"), "text"),
+        ("Role", _g("role"), "text"),
         ("Email", _g("email"), "text"),
-        ("You are the", _g("role"), "text"),
-        ("Wedding type", _g("wedding_type"), "text"),
+        ("Contact", _g("phone_display"), "phone"),
+        ("Wedding date", lambda i: date_or_text(i.get("first_day"), i.get("wedding_month")), "date"),
         ("Wedding city", _g("city"), "text"),
-        ("Family home city", _g("home_city"), "text"),
-        ("Kind of place", _g("place_kind"), "text"),
-        ("Wedding month", _g("wedding_month"), "text"),
-        ("First day", _g("first_day"), "date"),
-        ("Wedding date", _g("wedding_date"), "date"),
-        ("Total guests", _g("total_guests"), "value"),
-        ("Guests staying", _g("guests_staying"), "value"),
-        ("Traditions", _g("traditions"), "text"),
-        ("Food", _g("food"), "text"),
-        ("Alcohol", _g("alcohol"), "text"),
+        ("Guests", _g("total_guests"), "int"),
+        ("Guests staying", _g("guests_staying"), "int"),
+        ("Budget", _g("total_budget"), "money"),
         ("Budget range", _g("budget_range"), "text"),
-        ("Total budget", _g("total_budget"), "value"),
-        ("Budget includes jewellery and outfits", _g("budget_includes_jewellery"), "value"),
-        ("Jewellery and outfits", _g("jewellery_outfits"), "value"),
-        ("Plan estimate", _g("plan_estimate"), "value"),
-        ("Fits budget", _g("fits_budget"), "value"),
-        ("Priorities", lambda i: ", ".join(i.get("priorities") or []) or None, "text"),
-        ("Shortlisted vendors", _g("shortlisted_vendors"), "text"),
-        ("Leads shared", _g("shared_with"), "text"),
+        ("Estimate", _g("plan_estimate"), "money"),
+        ("Fits budget", _g("fits_budget"), "yesno"),
+        *CRM_COLUMNS,
+        ("Updated", lambda i: to_datetime(i.get("updated_at")), "datetime"),
+        ("Last step", _g("last_step"), "text"),
     ],
 }
 
-_SPIN_LABELS = {f.key: f.label for f in FIELDS["spin"]}
-_SPIN_LABELS.update({
-    "id": "Lead key", "created_at": "Created", "consent_at": "Consent at", "campaign_id": "Campaign id",
-    "customer_id": "Customer id", "branch_id": "Branch id", "source": "Lead source",
-})
-_SPIN_TEXT = {"phone", "brideGroomPhone", "pincode", "id"}
+# ── Spin: which list column is which (same matching as the spin screen) ─
+_SPIN_FIELDS = {
+    "name": ["name", "fullname", "bridegroomname", "customername", "leadname", "clientname", "contactname"],
+    "phone": ["phone", "phonenumber", "mobile", "mobilenumber", "bridegroomphone", "contactnumber", "whatsapp",
+              "whatsappnumber"],
+    "email": ["email", "emailaddress", "customeremail"],
+    "occasion": ["occasiontype", "eventtype", "occasion"],
+    "event_date": ["occasiondate", "eventdate", "weddingdate"],
+    "pincode": ["pincode", "pin", "zipcode"],
+    "city": ["city", "location", "eventcity"],
+    "budget": ["estimatedbudgetpercard", "servicebudget", "budget"],
+    "created": ["createdat", "created", "createdon", "submittedat"],
+}
+
+
+def _norm(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", re.sub(r"^additional_details\.", "", str(name).lower()))
+
+
+def spin_fields(columns: list[dict]) -> dict[str, dict | None]:
+    """{"name": column meta, ...} like the spin screen's pick()."""
+    by_norm: dict[str, dict] = {}
+    for c in columns:
+        by_norm.setdefault(_norm(c["name"]), c)
+    out = {f: next((by_norm[c] for c in candidates if c in by_norm), None) for f, candidates in _SPIN_FIELDS.items()}
+    if out["name"] is None:
+        out["name"] = next((c for c in columns if "name" in _norm(c["name"])), None)
+    if out["phone"] is None:
+        out["phone"] = next((c for c in columns if re.search("phone|mobile", _norm(c["name"]))), None)
+    return out
+
+
+def _spin_budget(value: Any, meta: dict | None) -> Any:
+    """₹10–20 for ranges that start with a number, as the screen shows them."""
+    if value in (None, ""):
+        return None
+    text = str(value)
+    if meta and meta.get("type") == "range" and re.match(r"^\d", text):
+        return "₹" + re.sub(r"[-_]", "–", text)
+    return text
 
 
 def spin_columns(columns_meta: list[dict]) -> list[Col]:
-    cols: list[Col] = [("Origin", _g("origin"), "text"), ("Branch", lambda i: (i.get("branch") or {}).get("name"), "text")]
-    for meta in columns_meta:
-        name = meta["name"]
-        short = meta.get("key") or name
-        label = _SPIN_LABELS.get(short) or short.replace("_", " ").capitalize()
-        type_name = str(meta.get("type", "")).upper()
-        if short in _SPIN_TEXT:
-            kind = "phone" if "phone" in short.lower() else "text"
-        elif "TIMESTAMP" in type_name:
-            kind = "dt"
-        elif type_name == "DATE":
-            kind = "date"
-        elif meta.get("json_field"):
-            kind = "iso_date_or_value"
-        else:
-            kind = "value"
-        cols.append((label, _g(name), kind))
-    return cols
+    f = spin_fields(columns_meta)
+
+    def val(item: dict, field: str) -> Any:
+        meta = f[field]
+        return item.get(meta["name"]) if meta else None
+
+    def location(item: dict) -> str | None:
+        pin = str(val(item, "pincode")) if val(item, "pincode") else None
+        city = str(val(item, "city")) if val(item, "city") else None
+        branch = item.get("branch") or {}
+        area = city or pincode_area(pin) or (None if pin else branch.get("city"))
+        return " · ".join(p for p in (area, pin) if p) or None
+
+    return [
+        ("Lead", lambda i: val(i, "name"), "text"),
+        ("Email", lambda i: val(i, "email"), "text"),
+        ("Contact", lambda i: e164(val(i, "phone")), "phone"),
+        ("Branch", lambda i: (i.get("branch") or {}).get("name"), "text"),
+        ("Branch code", lambda i: (i.get("branch") or {}).get("code"), "text"),
+        ("Location", location, "text"),
+        ("Occasion", lambda i: val(i, "occasion"), "text"),
+        ("Event date", lambda i: date_or_text(val(i, "event_date"), val(i, "event_date")), "date"),
+        ("Budget", lambda i: _spin_budget(val(i, "budget"), f["budget"]), "text"),
+        *CRM_COLUMNS,
+        ("Created", lambda i: to_datetime(val(i, "created")), "datetime"),
+    ]
 
 
-def build(columns: list[Col], items: list[dict]) -> tuple[list[str], list[list[Any]], set[int]]:
-    """-> (headers, rows, indexes of text-only columns)."""
-    cols = columns + CRM_COLUMNS
-    headers = [c[0] for c in cols]
-    text_cols = {i for i, c in enumerate(cols) if c[2] in ("phone", "text")}
-    rows = []
-    for item in items:
-        row = []
-        for _, get, kind in cols:
-            value = get(item)
-            if kind == "dt":
-                value = _dt(value)
-            elif kind == "date":
-                value = _date(value)
-            elif kind == "iso_date_or_value" and isinstance(value, str) and _ISO_DATE.match(value):
-                value = _date(value)
-            elif kind in ("text", "phone") and value is not None:
-                value = str(value)
-            row.append(value)
-        rows.append(row)
-    return headers, rows, text_cols
+def headers(source: str) -> list[str]:
+    """The column headers of a source's export and template."""
+    if source == "spin":
+        return [c[0] for c in spin_columns([])]
+    return [c[0] for c in SHEET_COLUMNS[source]]
+
+
+def kinds(source: str) -> list[str]:
+    cols = spin_columns([]) if source == "spin" else SHEET_COLUMNS[source]
+    return [c[2] for c in cols]
+
+
+def build(columns: list[Col], items: list[dict]) -> tuple[list[str], list[list[Any]], list[str]]:
+    """-> (headers, rows, kind per column)."""
+    return [c[0] for c in columns], [[get(item) for _, get, _ in columns] for item in items], [c[2] for c in columns]

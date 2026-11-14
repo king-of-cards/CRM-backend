@@ -21,6 +21,7 @@ os.environ.update({
 import csv  # noqa: E402
 import io  # noqa: E402
 import unittest  # noqa: E402
+from contextlib import contextmanager  # noqa: E402
 from datetime import date, datetime, timezone  # noqa: E402
 from unittest import mock  # noqa: E402
 
@@ -30,8 +31,9 @@ from sqlalchemy import BigInteger, Column, MetaData, Table, inspect  # noqa: E40
 from sqlalchemy.pool import StaticPool  # noqa: E402
 from sqlmodel import Session, SQLModel, create_engine, select  # noqa: E402
 
-from app.api.deps import require_admin  # noqa: E402
+from app.api.deps import get_current_user  # noqa: E402
 from app.api.v1.endpoints import spin_leads as spin_ep  # noqa: E402
+from app.api.v1.endpoints import vendors as vendors_ep  # noqa: E402
 from app.core import response_cache  # noqa: E402
 from app.db.session import get_db  # noqa: E402
 from app.main import app  # noqa: E402
@@ -39,10 +41,13 @@ from app.models.branch import Branch  # noqa: E402
 from app.models.crm_spin_lead import CrmSpinLead  # noqa: E402
 from app.models.lead_meta import LeadMeta  # noqa: E402
 from app.models.user import User  # noqa: E402
+from app.models.vendor import Vendor  # noqa: E402
+from app.models.vendor_user import VendorUser  # noqa: E402
 from app.models.wedding_lead import WeddingLead  # noqa: E402
 from app.models.wedding_plan import WeddingPlan  # noqa: E402
 from app.models.whatsapp_lead import WhatsAppLead  # noqa: E402
 from app.services import branches as branch_service  # noqa: E402
+from app.services import phones  # noqa: E402
 from app.services.crm_leads import service, tabular  # noqa: E402
 from app.services.lead_crm import seed_vendors  # noqa: E402
 
@@ -58,15 +63,18 @@ SAMPLE = {
     "whatsapp": {"phone": "+971 50 123 4567", "country": "UAE", "event_date": "20-12-2026"},
     "wedding": {"phone": "09845010003", "name": "Ravi", "city": "Bangalore", "budget": "1.5 lakh",
                 "submitted_at": "14-11-2026 10:30"},
-    "wedding_planner": {"phone": "+91 98450 10004", "name": "Meera", "wedding_month": "December 2027",
-                        "total_guests": "300", "priority1": "Food"},
+    "wedding_planner": {"phone": "+91 98450 10004", "name": "Meera", "city": "Udaipur",
+                        "wedding_month": "December 2027", "total_guests": "300", "priority1": "Food"},
 }
+# Who SAMPLE leads are assigned to automatically (branch / area rules)
+SAMPLE_VENDOR = {"spin": "phodeo", "whatsapp": "ohp", "wedding": "phodeo", "wedding_planner": "ohp"}
 SAME_PHONE_OTHER_FORMAT = {
     "spin": "+919845010001", "whatsapp": "00971501234567", "wedding": "+91 98450 10003", "wedding_planner": "9845010004",
 }
 LIST_URL = {
     "spin": "/spin-leads", "whatsapp": "/whatsapp-leads", "wedding": "/wedding-leads", "wedding_planner": "/wedding-plans",
 }
+STATS_URL = {s: f"{u}/stats" for s, u in LIST_URL.items() if s != "spin"}
 
 # ── Fake workflow database (spin_lead) ─────────────────────────────────
 WORKFLOW_COLUMNS = [
@@ -78,10 +86,13 @@ WORKFLOW_COLUMNS = [
     {"name": "additional_details.pincode", "type": "string", "json_field": True, "source": "additional_details", "key": "pincode"},
     {"name": "additional_details.occasionDate", "type": "string", "json_field": True, "source": "additional_details",
      "key": "occasionDate"},
+    {"name": "additional_details.estimatedBudgetPerCard", "type": "range", "json_field": True,
+     "source": "additional_details", "key": "estimatedBudgetPerCard"},
 ]
 WORKFLOW_ROWS = [
     {"id": 101, "name": "Workflow One", "phone": "9845099999", "created_at": "2026-11-01T04:30:00", "branch_id": 1,
-     "additional_details.pincode": "560018", "additional_details.occasionDate": "2026-12-20"},
+     "additional_details.pincode": "560018", "additional_details.occasionDate": "2026-12-20",
+     "additional_details.estimatedBudgetPerCard": "10-20"},
 ]
 WORKFLOW_PHONE = "+919845099999"
 
@@ -101,7 +112,23 @@ FAKE_TABLE = Table("spin_lead", MetaData(), Column("id", BigInteger, primary_key
 
 
 def fake_workflow_phones(e164s):
-    return {WORKFLOW_PHONE: ["101"]} if WORKFLOW_PHONE in e164s else {}
+    found = {}
+    for r in WORKFLOW_ROWS:
+        e164 = phones.normalize(r["phone"], lenient=True).e164
+        if e164 in e164s:
+            found.setdefault(e164, []).append(str(r["id"]))
+    return found
+
+
+def fake_workflow_spin_rows(db):
+    """What vendors._workflow_spin_rows reads from PostgreSQL, from the fake rows."""
+    branches = branch_service.branches_by_id(db)
+    out = []
+    for r in WORKFLOW_ROWS:
+        branch = branches.get(str(r["branch_id"])) if r.get("branch_id") is not None else None
+        out.append((str(r["id"]), (branch or {}).get("city"), r.get("additional_details.pincode"), None,
+                    (branch or {}).get("vendor_id")))
+    return out
 
 
 def xlsx_file(rows: list[list]) -> bytes:
@@ -119,30 +146,44 @@ def xlsx_file(rows: list[list]) -> bytes:
     return buf.getvalue()
 
 
-class CrmLeadsApiTest(unittest.TestCase):
+class ApiTestBase:
+    """In-memory database, the three default vendors (RJ, Phodeo, OHP) with one login each, an
+    admin, a vendor login without a vendor, and a fake workflow database."""
+
     def setUp(self):
         self.engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
         SQLModel.metadata.create_all(self.engine)
         with Session(self.engine, expire_on_commit=False) as s:
-            admin = User(name="Admin", email="admin@example.com", hashed_password="x", role="admin", is_active=True)
-            s.add(admin)
-            for bid, name, city in ((1, "Chamrajpet", "Bangalore"), (4, "Jayanagar", "Bangalore"), (10, "Mysore", "Mysore")):
-                s.add(Branch(id=bid, name=name, city=city, source="workflow", created_at=NOW, updated_at=NOW))
+            for bid, name, code, city in ((1, "Chamrajpet", "CHA-001", "Bangalore"), (4, "Jayanagar", "JNG-004", "Bangalore"),
+                                          (10, "Mysore", "MYS-010", "Mysore")):
+                s.add(Branch(id=bid, name=name, code=code, city=city, source="workflow", created_at=NOW, updated_at=NOW))
             s.commit()
-            s.refresh(admin)
-            self.admin = admin
             seed_vendors(s)
+            self.vendor_ids = {v.name.lower(): v.id for v in s.exec(select(Vendor))}
+            self.users = {"admin": User(name="Admin", email="admin@example.com", hashed_password="x", role="admin")}
+            for who in ("phodeo", "rj", "ohp", "unlinked"):
+                self.users[who] = User(name=who, email=f"{who}@example.com", hashed_password="x", role="vendor")
+            s.add_all(self.users.values())
+            s.commit()
+            for who in ("phodeo", "rj", "ohp"):
+                s.add(VendorUser(user_id=self.users[who].id, vendor_id=self.vendor_ids[who]))
+            s.commit()
+            for u in self.users.values():
+                s.refresh(u)
+        self.admin = self.users["admin"]
+        self.current = self.admin
 
         def override_get_db():
             with Session(self.engine) as session:
                 yield session
 
         app.dependency_overrides[get_db] = override_get_db
-        app.dependency_overrides[require_admin] = lambda: self.admin
+        app.dependency_overrides[get_current_user] = lambda: self.current
         self.patches = [
             mock.patch.object(spin_ep, "list_spin_leads", fake_list_spin_leads),
             mock.patch.object(spin_ep, "_get_table", lambda: FAKE_TABLE),
             mock.patch.object(service, "workflow_phones", fake_workflow_phones),
+            mock.patch.object(vendors_ep, "_workflow_spin_rows", fake_workflow_spin_rows),
         ]
         for p in self.patches:
             p.start()
@@ -160,18 +201,34 @@ class CrmLeadsApiTest(unittest.TestCase):
         self.engine.dispose()
 
     # ── helpers ──
+    @contextmanager
+    def logged_in(self, who: str):
+        previous, self.current = self.current, self.users[who]
+        try:
+            yield
+        finally:
+            self.current = previous
+
     def add(self, source, values, allow_duplicate=False):
-        return self.client.post(f"{API}/crm-leads/{source}", json={"values": values, "allow_duplicate": allow_duplicate})
+        with self.logged_in("admin"):
+            return self.client.post(f"{API}/crm-leads/{source}", json={"values": values, "allow_duplicate": allow_duplicate})
 
     def add_ok(self, source, values=None) -> dict:
         resp = self.add(source, values or SAMPLE[source])
         self.assertEqual(resp.status_code, 201, resp.text)
         return resp.json()["lead"]
 
-    def listed_keys(self, source) -> list[str]:
-        resp = self.client.get(f"{API}{LIST_URL[source]}", params={"page_size": 200})
+    def put_crm(self, who, source, key, body):
+        with self.logged_in(who):
+            return self.client.put(f"{API}/leads/{source}/{key}/crm", json=body)
+
+    def list_items(self, source, **params) -> list[dict]:
+        resp = self.client.get(f"{API}{LIST_URL[source]}", params={"page_size": 200, **params})
         self.assertEqual(resp.status_code, 200, resp.text)
-        return [i["crm"]["lead_key"] for i in resp.json()["items"]]
+        return resp.json()["items"]
+
+    def listed_keys(self, source) -> list[str]:
+        return [i["crm"]["lead_key"] for i in self.list_items(source)]
 
     def export_rows(self, source, fmt="xlsx", **params) -> list[list]:
         resp = self.client.get(f"{API}/crm-leads/{source}/export", params={"format": fmt, **params})
@@ -181,10 +238,17 @@ class CrmLeadsApiTest(unittest.TestCase):
         ws = load_workbook(io.BytesIO(resp.content)).active
         return [[c.value for c in row] for row in ws.iter_rows()]
 
+    def export_sheet(self, source, **params):
+        resp = self.client.get(f"{API}/crm-leads/{source}/export", params={"format": "xlsx", **params})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        return load_workbook(io.BytesIO(resp.content)).active
+
     def count(self, model) -> int:
         with Session(self.engine) as s:
             return len(s.exec(select(model)).all())
 
+
+class CrmLeadsApiTest(ApiTestBase, unittest.TestCase):
     # ── 1. crm_lead_meta for an added spin lead (steps 1-5) ──
     def test_crm_fields_of_an_added_spin_lead_go_to_crm_lead_meta(self):
         # 1. Add a spin lead through the API
@@ -194,8 +258,11 @@ class CrmLeadsApiTest(unittest.TestCase):
         with Session(self.engine) as s:
             before = s.exec(select(CrmSpinLead)).one().model_dump()
 
-        # 2. Set Interest and Quoted amount from the API
-        resp = self.client.put(f"{API}/leads/spin/{key}/crm", json={"interest": "interested", "quoted_amount": 45000})
+        # 2. Set Interest and Quoted amount from the API, as a user of the assigned vendor
+        #    (Jayanagar is a Phodeo branch); an admin may not set them
+        resp = self.put_crm("admin", "spin", key, {"interest": "interested", "quoted_amount": 45000})
+        self.assertEqual(resp.status_code, 403, resp.text)
+        resp = self.put_crm("phodeo", "spin", key, {"interest": "interested", "quoted_amount": 45000})
         self.assertEqual(resp.status_code, 200, resp.text)
 
         with Session(self.engine) as s:
@@ -204,6 +271,7 @@ class CrmLeadsApiTest(unittest.TestCase):
             self.assertEqual(len(metas), 1)
             self.assertEqual((metas[0].source, metas[0].lead_key), ("spin", key))
             self.assertEqual((metas[0].interest, metas[0].quoted_amount), ("interested", 45000))
+            self.assertEqual(metas[0].updated_by, self.users["phodeo"].id)
             # 4. The crm_spin_leads row is unchanged, and that table has no CRM columns at all
             self.assertEqual(s.exec(select(CrmSpinLead)).one().model_dump(), before)
         columns = {c["name"] for c in inspect(self.engine).get_columns("crm_spin_leads")}
@@ -227,18 +295,21 @@ class CrmLeadsApiTest(unittest.TestCase):
     # ── 2. PUT /leads/{source}/{key}/crm and crm- keys ──
     def test_crm_put_404_for_unknown_crm_key_in_every_source(self):
         for source in SAMPLE:
-            resp = self.client.put(f"{API}/leads/{source}/crm-doesnotexist/crm", json={"interest": "interested"})
+            resp = self.client.put(f"{API}/leads/{source}/crm-doesnotexist/crm", json={"notes": "x"})
             self.assertEqual(resp.status_code, 404, source)
         self.assertEqual(self.client.put(f"{API}/leads/spin/crm-999/crm", json={"notes": "x"}).status_code, 404)
         # Workflow ids and sheet keys work as before (no lookup)
-        self.assertEqual(self.client.put(f"{API}/leads/spin/101/crm", json={"interest": "follow_up"}).status_code, 200)
+        self.assertEqual(self.client.put(f"{API}/leads/spin/101/crm", json={"notes": "n"}).status_code, 200)
         self.assertEqual(self.client.put(f"{API}/leads/wedding/abc123/crm", json={"notes": "n"}).status_code, 200)
-        # A real added lead works in every source, archived or not
+        # A real added lead works in every source, for the admin archived or not; the assigned
+        # vendor can't see archived leads (hidden everywhere)
         for source in SAMPLE:
             key = self.add_ok(source)["lead_key"]
-            self.assertEqual(self.client.put(f"{API}/leads/{source}/{key}/crm", json={"quoted_amount": 1}).status_code, 200)
+            vendor = SAMPLE_VENDOR[source]
+            self.assertEqual(self.put_crm(vendor, source, key, {"quoted_amount": 1}).status_code, 200, source)
             self.client.post(f"{API}/crm-leads/{source}/{key}/archive")
-            self.assertEqual(self.client.put(f"{API}/leads/{source}/{key}/crm", json={"quoted_amount": 2}).status_code, 200)
+            self.assertEqual(self.put_crm("admin", source, key, {"notes": "archived"}).status_code, 200)
+            self.assertEqual(self.put_crm(vendor, source, key, {"quoted_amount": 2}).status_code, 404)
 
     # ── 3. Add, duplicates, edit, archive for every source ──
     def test_add_duplicate_edit_archive_in_every_source(self):
@@ -273,14 +344,16 @@ class CrmLeadsApiTest(unittest.TestCase):
                 resp = self.client.patch(f"{API}/crm-leads/{source}/{key}", json={"values": {"phone": "+44 7911 123456"}})
                 self.assertEqual(resp.status_code, 409, resp.text)
 
-                # CRM details, then archive: hidden from list and export, phone still a duplicate, meta kept
-                self.client.put(f"{API}/leads/{source}/{key}/crm", json={"interest": "interested"})
+                # CRM details (by the assigned vendor), then archive: hidden from list and export,
+                # phone still a duplicate, meta kept
+                resp = self.put_crm(SAMPLE_VENDOR[source], source, key, {"interest": "interested"})
+                self.assertEqual(resp.status_code, 200, resp.text)
+                exported_before = len(self.export_rows(source))
                 resp = self.client.post(f"{API}/crm-leads/{source}/{key}/archive")
                 self.assertEqual(resp.status_code, 200, resp.text)
                 self.assertTrue(resp.json()["lead"]["archived"])
                 self.assertNotIn(key, self.listed_keys(source))
-                exported = self.export_rows(source)
-                self.assertNotIn(key, {str(c) for row in exported for c in row})
+                self.assertEqual(len(self.export_rows(source)), exported_before - 1)
                 resp = self.add(source, SAMPLE[source])
                 self.assertEqual(resp.status_code, 409)
                 self.assertTrue(resp.json()["detail"]["duplicate"]["archived"])
@@ -350,10 +423,15 @@ class CrmLeadsApiTest(unittest.TestCase):
         resp = self.client.get(f"{API}/crm-leads/spin/template")
         self.assertEqual(resp.status_code, 200)
         wb = load_workbook(io.BytesIO(resp.content))
-        self.assertEqual(wb.sheetnames, ["Leads", "Instructions", "Branches"])
+        self.assertEqual(wb.sheetnames, ["Leads", "Instructions", "Lists"])
         headers = [c.value for c in wb["Leads"][1]]
-        self.assertEqual(headers[:5], ["Phone", "Name", "Email", "Occasion", "Branch"])
-        self.assertEqual([r[0].value for r in wb["Branches"].iter_rows(min_row=2)], ["Chamrajpet", "Jayanagar", "Mysore"])
+        self.assertEqual(headers, ["Lead", "Email", "Contact", "Branch", "Branch code", "Location", "Occasion",
+                                   "Event date", "Budget", "Assigned to", "Interest", "Quoted amount", "Quoted date",
+                                   "Converted", "Created"])
+        lists = wb["Lists"]
+        self.assertEqual([r[0].value for r in lists.iter_rows(min_row=2) if r[0].value],
+                         ["Chamrajpet", "Jayanagar", "Mysore"])
+        self.assertIn("Phodeo · auto", [r[1].value for r in lists.iter_rows(min_row=2)])
 
         existing = self.add_ok("spin", {"phone": "9845020000"})
         upload = xlsx_file([
@@ -365,7 +443,7 @@ class CrmLeadsApiTest(unittest.TestCase):
             ["9845020000", "Already added", None, None, None, None, None],                                         # existing_added
             ["9845099999", "Workflow lead", None, None, None, None, None],                                         # existing_workflow
             [None, "No phone", None, None, None, None, None],                                                      # error
-            ["9845020004", "Fine too", None, "chamrajpet", None, "20/12/2026", None],                              # ok
+            ["9845020004", "Fine too", None, "chamrajpet", None, "20 Dec 2026", None],                             # ok
         ])
         resp = self.client.post(f"{API}/crm-leads/spin/import/preview", files={"file": ("leads.xlsx", upload, XLSX)})
         self.assertEqual(resp.status_code, 200, resp.text)
@@ -403,25 +481,34 @@ class CrmLeadsApiTest(unittest.TestCase):
                                 json={"rows": [{"row": r["row"], "values": r["values"]} for r in preview["rows"]]})
         self.assertEqual(resp.json()["counts"]["imported"], 0)
 
-        # Export (xlsx): formula-safe text, phone as text, dates DD-MM-YYYY, file name exposed to the browser
+        # Export (xlsx): the list screen's columns and formats, formula-safe, file name exposed to the browser
         resp = self.client.get(f"{API}/crm-leads/spin/export", headers={"Origin": ORIGIN})
         self.assertEqual(resp.status_code, 200, resp.text)
         self.assertRegex(resp.headers["content-disposition"], r'^attachment; filename="spin-leads-\d{4}-\d{2}-\d{2}\.xlsx"$')
         self.assertIn("content-disposition", resp.headers["access-control-expose-headers"].lower())
         ws = load_workbook(io.BytesIO(resp.content)).active
         header = [c.value for c in ws[1]]
-        rows = {str(r[header.index("Lead key")].value): r for r in ws.iter_rows(min_row=2)}
+        self.assertEqual(header, headers)                   # same columns as the template
+        rows = {r[header.index("Contact")].value: r for r in ws.iter_rows(min_row=2)}
         self.assertEqual(len(rows), 4)                      # 1 workflow + 3 CRM
-        row = next(r for r in rows.values() if r[header.index("Phone")].value == "9845020001")
-        name_cell = row[header.index("Name")]
+        row = rows["+919845020001"]
+        name_cell = row[header.index("Lead")]
         self.assertEqual((name_cell.value, name_cell.data_type), ('=HYPERLINK("http://x")', "s"))
-        self.assertEqual(row[header.index("Phone")].data_type, "s")
-        date_cell = row[header.index("Occasion date")]
-        self.assertEqual((date_cell.value.date(), date_cell.number_format), (date(2026, 12, 20), "DD-MM-YYYY"))
+        self.assertEqual(row[header.index("Contact")].data_type, "s")
+        date_cell = row[header.index("Event date")]
+        self.assertEqual((date_cell.value.date(), date_cell.number_format), (date(2026, 12, 20), "dd mmm yyyy"))
         self.assertEqual(row[header.index("Branch")].value, "Jayanagar")
-        self.assertEqual(row[header.index("Origin")].value, "imported")
-        workflow = rows["101"]
-        self.assertEqual(workflow[header.index("Created")].value, datetime(2026, 11, 1, 10, 0))   # 04:30 UTC = 10:00 IST
+        self.assertEqual(row[header.index("Branch code")].value, "JNG-004")
+        self.assertEqual(row[header.index("Location")].value, "Bangalore · 560011")
+        self.assertEqual(row[header.index("Assigned to")].value, "Unassigned")      # uploaded with it empty
+        workflow = rows["+919845099999"]
+        created = workflow[header.index("Created")]
+        self.assertEqual((created.value, created.number_format),
+                         (datetime(2026, 11, 1, 10, 0), "d mmm yyyy, hh:mm am/pm"))   # 04:30 UTC = 10:00 IST
+        self.assertEqual(workflow[header.index("Budget")].value, "₹10–20")
+        self.assertEqual(workflow[header.index("Location")].value, "Bangalore · 560018")
+        self.assertEqual(workflow[header.index("Assigned to")].value, "RJ")         # Chamrajpet branch
+        self.assertEqual(workflow[header.index("Converted")].value, "No")
 
     def test_csv_upload_and_csv_export(self):
         content = ("Contact Number;Full Name;Email Address;City;Budget;Timestamp\r\n"
@@ -436,12 +523,15 @@ class CrmLeadsApiTest(unittest.TestCase):
 
         out = self.export_rows("wedding", "csv")
         header = out[0]
+        self.assertEqual(header, ["Lead", "Email", "Contact", "Occasion", "Event date", "City", "Budget", "Assigned to",
+                                  "Interest", "Quoted amount", "Quoted date", "Converted", "Submitted"])
         first = next(r for r in out[1:] if r[header.index("Email")] == "x@example.com")
-        self.assertEqual(first[header.index("Name")], "'=cmd|' /C calc'!A0")      # apostrophe: not a formula
-        self.assertEqual(first[header.index("Phone")], "'+919845030001")           # text, formula-safe
-        self.assertEqual(first[header.index("Submitted")], "14-11-2026 10:30")     # IST, DD-MM-YYYY
-        self.assertEqual(first[header.index("Budget amount")], "50000")
-        second = next(r for r in out[1:] if r[header.index("Name")] == "'-Minus")
+        self.assertEqual(first[header.index("Lead")], "'=cmd|' /C calc'!A0")       # apostrophe: not a formula
+        self.assertEqual(first[header.index("Contact")], "'+919845030001")          # text, formula-safe
+        self.assertEqual(first[header.index("Submitted")], "14 Nov 2026, 10:30 am")  # IST, as on screen
+        self.assertEqual(first[header.index("Budget")], "50000")
+        self.assertEqual(first[header.index("Assigned to")], "Unassigned")
+        second = next(r for r in out[1:] if r[header.index("Lead")] == "'-Minus")
         self.assertTrue(second)
         resp = self.client.get(f"{API}/crm-leads/wedding/export", params={"format": "csv"})
         self.assertRegex(resp.headers["content-disposition"], r'filename="wedding-leads-\d{4}-\d{2}-\d{2}\.csv"')
@@ -514,8 +604,11 @@ class CrmLeadsApiTest(unittest.TestCase):
 
     def test_fields_and_backfill(self):
         resp = self.client.get(f"{API}/crm-leads/spin/fields")
-        self.assertEqual(resp.json()["fields"][0], {"key": "phone", "label": "Phone", "type": "phone", "required": True,
-                                                    "max_length": 20, "help": resp.json()["fields"][0]["help"]})
+        fields = resp.json()["fields"]
+        phone = next(f for f in fields if f["key"] == "phone")
+        self.assertEqual(phone, {"key": "phone", "label": "Contact", "type": "phone", "required": True,
+                                 "max_length": 20, "help": phone["help"]})
+        self.assertEqual([f["key"] for f in fields if f["required"]], ["phone"])     # only the phone is required
         self.assertEqual([b["name"] for b in resp.json()["branches"]], ["Chamrajpet", "Jayanagar", "Mysore"])
         for source in ("whatsapp", "wedding", "wedding_planner"):
             phone = next(f for f in self.client.get(f"{API}/crm-leads/{source}/fields").json()["fields"] if f["key"] == "phone")

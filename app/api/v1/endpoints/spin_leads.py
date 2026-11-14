@@ -26,10 +26,11 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import NoSuchTableError, SQLAlchemyError
 
-from app.api.deps import AdminUser, DbSession
+from app.api.deps import DbSession, LeadViewer
 from app.core import response_cache
 from app.core.config import settings
 from app.db.session import read_engine
+from app.services import access
 
 logger = logging.getLogger(__name__)
 
@@ -290,13 +291,17 @@ def _named_field(table: Table, json_fields: dict, wanted_names: tuple[str, ...])
     return None, None
 
 
-def spin_filter_options() -> dict:
-    """Values for the filter dropdowns: the budget ranges and pincodes used on spin leads, with counts."""
+def spin_filter_options(ids: set[str] | None = None) -> dict:
+    """Values for the filter dropdowns: the budget ranges and pincodes used on spin leads, with counts.
+    ids: only count these workflow lead ids (a vendor's own leads); None = all."""
     if read_engine is None:
         return {"budgets": [], "pincodes": [], "has_branch": False, "has_pincode": False, "has_budget": False}
     try:
         table = _get_table()
         base = _required_filter(table)
+        if ids is not None:
+            pk_text = cast(list(table.primary_key.columns)[0], Text)
+            base = base + [pk_text.in_(sorted(ids)) if ids else false()]
         json_fields = _get_json_fields(table, base)
         _, branch_expr = _branch_field(table, json_fields)
         _, pin_expr = _named_field(table, json_fields, PINCODE_FIELD_NAMES)
@@ -643,14 +648,17 @@ def _crm_filters(db, pincode, budget, vendor_id, interest, converted, quoted_op,
 
 
 @router.get("/filter-options")
-def spin_leads_filter_options(_admin: AdminUser):
-    """Budget values (with counts) for the filter dropdown, and which filters this data supports."""
-    return response_cache.get(("spin", "filter-options"), spin_filter_options, fresh=600, stale=3600)
+def spin_leads_filter_options(viewer: LeadViewer, db: DbSession):
+    """Budget values (with counts) for the filter dropdown, and which filters this data supports.
+    Vendor users get the values of their own leads only."""
+    if viewer.is_admin:
+        return response_cache.get(("spin", "filter-options"), spin_filter_options, fresh=600, stale=3600)
+    return spin_filter_options(access.visible_keys(db, viewer, "spin"))
 
 
 @router.get("")
 def spin_leads_endpoint(
-    _admin: AdminUser,
+    viewer: LeadViewer,
     db: DbSession,
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
@@ -666,9 +674,22 @@ def spin_leads_endpoint(
     quoted_op: Literal["eq", "ne", "gt", "gte", "lt", "lte", "set", "unset"] | None = None,
     quoted_value: int | None = Query(None, ge=0),
 ):
-    filters = _crm_filters(db, pincode, budget, vendor_id, interest, converted, quoted_op, quoted_value)
+    filters = viewer_filters(db, viewer, pincode, budget, vendor_id, interest, converted, quoted_op, quoted_value)
     data = merged_page(db, (page - 1) * page_size, page_size, search, sort, order, branch, filters)
     return {**data, "page": page, "page_size": page_size}
+
+
+def viewer_filters(db, viewer, pincode, budget, vendor_id, interest, converted, quoted_op, quoted_value) -> dict:
+    """The list filters, limited to what the viewer may see. Vendor users only ever get their own
+    leads (workflow and CRM-added), whatever vendor_id they send."""
+    if viewer.is_admin:
+        return _crm_filters(db, pincode, budget, vendor_id, interest, converted, quoted_op, quoted_value)
+    filters = _crm_filters(db, pincode, budget, None, interest, converted, quoted_op, quoted_value)
+    visible = access.visible_keys(db, viewer, "spin")
+    if filters.get("ids_in") is not None:
+        visible &= {str(i) for i in filters["ids_in"]}
+    filters["ids_in"] = sorted(visible)
+    return filters
 
 
 def merged_page(db, start: int, length: int, search, sort, order, branch, filters: dict, use_cache: bool = True) -> dict:

@@ -142,6 +142,8 @@ def meta_out(
     manual = vendors_by_id.get(meta.vendor_id) if meta and meta.vendor_id else None
     if manual:
         vendor, how = manual, "manual"
+    elif meta is not None and meta.auto_assign is False:
+        vendor, how = None, None                # uploaded unassigned: no automatic assignment
     elif sheet_vendor:
         vendor, how = sheet_vendor, "sheet"
     elif branch_vendor:
@@ -162,7 +164,17 @@ def meta_out(
         "quoted_amount": meta.quoted_amount if meta else None,
         "notes": meta.notes if meta else None,
         "updated_at": _iso(meta.updated_at) if meta else None,
+        "auto_assign": meta.auto_assign is not False if meta else True,
     }
+
+
+def assigned_label(crm: dict | None) -> str:
+    """The "Assigned to" chip text on the list screens: "Phodeo", "Phodeo · auto" (area rules),
+    or "Unassigned"."""
+    vendor = (crm or {}).get("vendor")
+    if not vendor:
+        return "Unassigned"
+    return f"{vendor['name']} · auto" if crm.get("vendor_source") == "suggested" else vendor["name"]
 
 
 def attach(

@@ -7,12 +7,12 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Query
-from sqlalchemy import func, or_
+from sqlalchemy import and_, false, func, or_
 from sqlmodel import col, select
 
-from app.api.deps import AdminUser, DbSession
+from app.api.deps import DbSession, LeadViewer
 from app.models.whatsapp_lead import WhatsAppLead
-from app.services import lead_crm
+from app.services import access, lead_crm
 
 router = APIRouter(prefix="/whatsapp-leads", tags=["whatsapp-leads"])
 
@@ -52,7 +52,7 @@ def _out(lead: WhatsAppLead) -> dict:
 
 @router.get("")
 def list_whatsapp_leads(
-    _: AdminUser,
+    viewer: LeadViewer,
     db: DbSession,
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=200),
@@ -61,7 +61,7 @@ def list_whatsapp_leads(
     sort: Literal["submitted_at", "event_date", "country", "phone", "first_seen_at"] = "submitted_at",
     order: Literal["asc", "desc"] = "desc",
 ):
-    filters = build_filters(search, country)
+    filters = build_filters(search, country, access.visible_keys(db, viewer, "whatsapp"))
     total = db.exec(select(func.count()).select_from(WhatsAppLead).where(*filters)).one()
     rows = db.exec(
         select(WhatsAppLead).where(*filters).order_by(*ordering(sort, order))
@@ -71,9 +71,12 @@ def list_whatsapp_leads(
 
 
 # ── Shared with the export (GET /crm-leads/whatsapp/export) ─────────────
-def build_filters(search: str | None, country: str | None) -> list:
-    """Archived and removed rows (is_deleted) are never listed or exported."""
+def build_filters(search: str | None, country: str | None, keys: set[str] | None = None) -> list:
+    """Archived and removed rows (is_deleted) are never listed or exported.
+    keys: the lead keys the viewer may see (None = all, for admins)."""
     filters = [WhatsAppLead.is_deleted == False]  # noqa: E712
+    if keys is not None:
+        filters.append(col(WhatsAppLead.sheet_key).in_(keys) if keys else false())
     if country:
         filters.append(WhatsAppLead.country == country)
     if search and search.strip():
@@ -100,8 +103,9 @@ def attach_crm(db, items: list[dict]) -> list[dict]:
 
 
 @router.get("/stats")
-def whatsapp_lead_stats(_: AdminUser, db: DbSession):
-    active = WhatsAppLead.is_deleted == False  # noqa: E712
+def whatsapp_lead_stats(viewer: LeadViewer, db: DbSession):
+    # Only the leads the viewer may see (vendors: their own)
+    active = and_(*build_filters(None, None, access.visible_keys(db, viewer, "whatsapp")))
     now = datetime.now(timezone.utc)
 
     total = db.exec(select(func.count()).select_from(WhatsAppLead).where(active)).one()

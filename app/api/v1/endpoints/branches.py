@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from sqlmodel import select
 
-from app.api.deps import AdminUser, DbSession
+from app.api.deps import AdminUser, DbSession, LeadViewer
 from app.core import response_cache
 from app.models.branch import Branch
 from app.models.vendor import Vendor
@@ -75,16 +75,28 @@ def _check_vendor(db, vendor_id: int | None) -> None:
 
 
 def _changed() -> None:
+    from app.services import access
+
     branch_service.forget_cache()
     response_cache.clear("spin")      # spin pages carry branch names and vendors
     response_cache.clear("vendors")
+    response_cache.clear("analytics")
+    access.forget()                   # a branch's vendor decides who sees its spin leads
 
 
 @router.get("")
-def list_branches(_: AdminUser, db: DbSession):
+def list_branches(viewer: LeadViewer, db: DbSession):
+    """Admins: branches with their vendor and lead counts. Vendor users: names, codes and cities
+    only (to show the branch on their spin leads), without other vendors' lead numbers."""
+    branches = db.exec(select(Branch).order_by(Branch.is_active.desc(), Branch.city, Branch.name)).all()
+    if not viewer.is_admin:
+        return {
+            "branches": [{"id": b.id, "name": b.name, "code": b.code, "city": b.city, "is_active": b.is_active}
+                         for b in branches],
+            "unknown_branch_ids": [],
+        }
     vendors = {v.id: v for v in db.exec(select(Vendor))}
     counts = _lead_counts()
-    branches = db.exec(select(Branch).order_by(Branch.is_active.desc(), Branch.city, Branch.name)).all()
     known = {str(b.id) for b in branches}
     return {
         "branches": [_out(b, vendors, counts) for b in branches],

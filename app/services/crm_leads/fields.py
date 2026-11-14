@@ -1,10 +1,14 @@
 """Fields of an added/imported lead, per source, and how each value is checked and cleaned.
 
-The same definitions drive the add/edit forms (GET /crm-leads/{source}/fields), the Excel/CSV
-template, the upload preview, the bulk import and the single add, so the rules can't drift.
+The same definitions drive the add/edit forms (GET /crm-leads/{source}/fields), the upload
+preview, the bulk import and the single add. Labels are the list screens' column headers (the
+export and template use the same headers, see layout.py), so an exported file uploads back.
+Older labels are still accepted as aliases, and columns that aren't on the screens (extra spin
+details, planner details) are accepted as optional extras.
 
-Only the lead's own details are here. CRM fields (assigned vendor, interest, quote, converted,
-notes) live in crm_lead_meta and are edited with PUT /leads/{source}/{lead_key}/crm.
+Only the lead's own details are stored on the lead. "Assigned to" is read here but saved in
+crm_lead_meta (a vendor name = manual, "<vendor> · auto" = automatic, empty = unassigned for
+uploads). Interest, quote and converted are never taken from uploads (vendor users set them).
 """
 import re
 from dataclasses import dataclass, field
@@ -28,14 +32,13 @@ SOURCE_LABELS = {
 class FieldDef:
     key: str
     label: str
-    type: str = "text"     # text | email | phone | country | date | date_text | datetime | month
-    #                        int | bool | range | budget | pincode | branch
+    type: str = "text"     # text | email | phone | country | date | event_date | datetime | month | int
+    #                        money | bool | range | budget | pincode | branch | assigned | location | wedding_when
     required: bool = False
     max_length: int | None = None
     aliases: tuple[str, ...] = ()        # other header names accepted in uploads
     detail: bool = False                 # spin: stored in additional_details under `key`
     help: str = ""
-    example: Any = None
 
     def as_dict(self) -> dict:
         return {
@@ -45,85 +48,109 @@ class FieldDef:
 
 
 PHONE_HELP_IN = "Indian numbers can be written without +91; other countries need their country code."
+ASSIGNED_HELP = ('A vendor name (e.g. Phodeo) assigns the lead to that vendor. "Phodeo · auto" leaves it to '
+                 "the automatic rules. Empty or Unassigned: the lead stays unassigned until an admin assigns it.")
+DATE_HELP = "13 Dec 2026 or 13-12-2026."
+DATETIME_HELP = "14 Nov 2026, 10:30 am or 14-11-2026 10:30 (India time); the time is optional. Empty = now."
+ASSIGNED = FieldDef("assigned_to", "Assigned to", "assigned", aliases=("assignedto", "vendor"), help=ASSIGNED_HELP)
 
 FIELDS: dict[str, list[FieldDef]] = {
     "spin": [
-        FieldDef("phone", "Phone", "phone", True, 20, ("mobile", "phonenumber", "contactnumber", "whatsappnumber"),
-                 help=PHONE_HELP_IN, example="9845012345"),
-        FieldDef("name", "Name", max_length=150, aliases=("fullname",), example="Asha Rao"),
-        FieldDef("email", "Email", "email", max_length=150, aliases=("emailaddress",), example="asha@example.com"),
-        FieldDef("occasion", "Occasion", max_length=100, example="Wedding"),
+        FieldDef("name", "Lead", max_length=150, aliases=("name", "fullname")),
+        FieldDef("email", "Email", "email", max_length=150, aliases=("emailaddress",)),
+        FieldDef("phone", "Contact", "phone", True, 20,
+                 ("phone", "mobile", "phonenumber", "contactnumber", "whatsappnumber"), help=PHONE_HELP_IN),
         FieldDef("branch", "Branch", "branch", aliases=("store", "branchname"),
-                 help="Branch name exactly as on the Branches page.", example="Jayanagar"),
-        FieldDef("pincode", "Pincode", "pincode", detail=True, aliases=("pin", "zipcode", "postalcode"), example="560011"),
-        FieldDef("occasionType", "Occasion type", max_length=100, detail=True, example="Wedding"),
-        FieldDef("occasionDate", "Occasion date", "date", detail=True, aliases=("eventdate",), example="20-12-2026"),
+                 help="Branch name exactly as on the Branches page."),
+        FieldDef("location", "Location", "location", help="The 6-digit pincode in it is saved (e.g. Bangalore · 560011)."),
+        FieldDef("occasionType", "Occasion", max_length=100, detail=True, aliases=("occasiontype",)),
+        FieldDef("occasionDate", "Event date", "date", detail=True, aliases=("occasiondate",), help=DATE_HELP),
+        FieldDef("estimatedBudgetPerCard", "Budget", "range", max_length=100, detail=True,
+                 aliases=("budgetpercard", "estimatedbudgetpercard"), help="A range such as ₹10–20 or 10-20."),
+        ASSIGNED,
+        FieldDef("created_at", "Created", "datetime", aliases=("createdat",), help=DATETIME_HELP),
+        # Extra columns (not on the list screen; optional)
+        FieldDef("pincode", "Pincode", "pincode", detail=True, aliases=("pin", "zipcode", "postalcode")),
+        FieldDef("occasion", "Lead occasion", max_length=100),
         FieldDef("brideGroomName", "Bride/Groom name", max_length=150, detail=True),
         FieldDef("brideGroomPhone", "Bride/Groom phone", max_length=30, detail=True),
         FieldDef("eventVenue", "Event venue", max_length=300, detail=True),
         FieldDef("coverageDays", "Coverage days", max_length=50, detail=True),
-        FieldDef("estimatedBudgetPerCard", "Budget per card", "range", max_length=100, detail=True,
-                 help="A range such as 10-20.", example="10-20"),
         FieldDef("quantityRequired", "Quantity required", "int", detail=True),
         FieldDef("service", "Service", max_length=200, detail=True),
         FieldDef("serviceTypes", "Service types", max_length=300, detail=True),
         FieldDef("serviceBudget", "Service budget", "range", max_length=100, detail=True),
         FieldDef("serviceQuantity", "Service quantity", "int", detail=True),
-        FieldDef("otherWeddingServices", "Other wedding services", max_length=500, detail=True, example="Photography"),
+        FieldDef("otherWeddingServices", "Other wedding services", max_length=500, detail=True),
     ],
     "whatsapp": [
-        FieldDef("phone", "Phone", "phone", True, 32, ("whatsapp", "whatsappnumber", "mobile", "phonenumber", "number"),
-                 help="With the country code (e.g. +971 50 123 4567), or fill in Country.", example="+971501234567"),
-        FieldDef("country", "Country", "country", max_length=100, example="United Arab Emirates"),
-        FieldDef("event_date", "Event date", "date_text", max_length=100, aliases=("weddingdate",),
-                 help="Kept as written; read as a date when it is clear.", example="20-12-2026"),
+        FieldDef("phone", "Lead", "phone", True, 32,
+                 ("phone", "contact", "whatsapp", "whatsappnumber", "mobile", "phonenumber", "number"),
+                 help="With the country code (e.g. +971501234567), or fill in Country."),
+        FieldDef("country", "Country", "country", max_length=100),
+        FieldDef("event_date", "Event date", "event_date", max_length=100, aliases=("weddingdate",), help=DATE_HELP),
+        ASSIGNED,
         FieldDef("submitted_at", "Submitted", "datetime", aliases=("submittedat", "submissiontime", "timestamp"),
-                 help="Date and time in India time. Empty = now."),
+                 help=DATETIME_HELP),
     ],
     "wedding": [
-        FieldDef("phone", "Phone", "phone", True, 50, ("contactnumber", "mobile", "phonenumber"),
-                 help=PHONE_HELP_IN, example="9845012345"),
-        FieldDef("name", "Name", max_length=200, aliases=("fullname",), example="Ravi Kumar"),
-        FieldDef("email", "Email", "email", max_length=254, aliases=("emailaddress",), example="ravi@example.com"),
-        FieldDef("city", "City", max_length=200, aliases=("cityeventlocation", "eventlocation", "location"), example="Bangalore"),
-        FieldDef("occasion", "Occasion", max_length=100, aliases=("whatistheoccasion",), example="Wedding"),
-        FieldDef("event_date", "Event date", "date_text", max_length=100, example="20-12-2026"),
+        FieldDef("name", "Lead", max_length=200, aliases=("name", "fullname")),
+        FieldDef("email", "Email", "email", max_length=254, aliases=("emailaddress",)),
+        FieldDef("phone", "Contact", "phone", True, 50, ("phone", "contactnumber", "mobile", "phonenumber"),
+                 help=PHONE_HELP_IN),
+        FieldDef("occasion", "Occasion", max_length=100, aliases=("whatistheoccasion",)),
+        FieldDef("event_date", "Event date", "event_date", max_length=100, help=DATE_HELP),
+        FieldDef("city", "City", max_length=200, aliases=("cityeventlocation", "eventlocation", "location")),
         FieldDef("budget", "Budget", "budget", max_length=100,
                  aliases=("photographybudget", "whatisyourapproximatephotographybudget"),
-                 help="E.g. 50000, 50k or 1.5 lakh.", example="1.5 lakh"),
-        FieldDef("submitted_at", "Submitted", "datetime", aliases=("timestamp", "submittedat"),
-                 help="Date and time in India time. Empty = now."),
+                 help="E.g. 150000, ₹1,50,000, 50k or 1.5 lakh."),
+        ASSIGNED,
+        FieldDef("submitted_at", "Submitted", "datetime", aliases=("timestamp", "submittedat"), help=DATETIME_HELP),
     ],
     "wedding_planner": [
-        FieldDef("phone", "Phone", "phone", True, 32, ("whatsappnumber", "contactnumber", "mobile", "phonenumber"),
-                 help=PHONE_HELP_IN, example="9845012345"),
-        FieldDef("name", "Name", max_length=200, aliases=("fullname",), example="Meera"),
+        FieldDef("name", "Lead", max_length=200, aliases=("name", "fullname")),
+        FieldDef("role", "Role", max_length=100, aliases=("youarethe",)),
         FieldDef("email", "Email", "email", max_length=254, aliases=("emailaddress",)),
-        FieldDef("role", "You are the", max_length=100, aliases=("role",), example="Bride"),
-        FieldDef("wedding_type", "Wedding type", max_length=100),
+        FieldDef("phone", "Contact", "phone", True, 32, ("phone", "whatsappnumber", "contactnumber", "mobile", "phonenumber"),
+                 help=PHONE_HELP_IN),
+        FieldDef("wedding_when", "Wedding date", "wedding_when",
+                 help="A date (20 Dec 2027) or a month (December 2027)."),
         FieldDef("city", "Wedding city", max_length=200, aliases=("weddingcitydestination", "city")),
+        FieldDef("total_guests", "Guests", "int", aliases=("totalguests",)),
+        FieldDef("guests_staying", "Guests staying", "int", aliases=("guestsstayingneedingrooms",)),
+        FieldDef("total_budget", "Budget", "money", aliases=("totalbudget",)),
+        FieldDef("budget_range", "Budget range", max_length=100),
+        ASSIGNED,
+        FieldDef("updated", "Updated", "datetime", aliases=("lastupdated",), help=DATETIME_HELP),
+        # Extra columns (not on the list screen; optional)
+        FieldDef("wedding_month", "Wedding month", "month", max_length=50),
+        FieldDef("first_day", "First day of celebrations", "date", aliases=("firstday",)),
+        FieldDef("wedding_type", "Wedding type", max_length=100),
         FieldDef("home_city", "Family home city", max_length=200, aliases=("homecity",)),
         FieldDef("place_kind", "Kind of place", max_length=200, aliases=("kindofplaceifnotsure",)),
-        FieldDef("wedding_month", "Wedding month", "month", max_length=50, help="E.g. December 2027.", example="December 2027"),
-        FieldDef("first_day", "First day of celebrations", "date", aliases=("firstday",), example="20-12-2027"),
-        FieldDef("total_guests", "Total guests", "int", example=300),
-        FieldDef("guests_staying", "Guests staying", "int", aliases=("guestsstayingneedingrooms",)),
         FieldDef("traditions", "Traditions", max_length=300),
         FieldDef("food", "Food", max_length=100),
         FieldDef("alcohol", "Alcohol", max_length=50),
-        FieldDef("budget_range", "Budget range", max_length=100),
-        FieldDef("total_budget", "Total budget", "int", example=2500000),
         FieldDef("budget_includes_jewellery", "Budget includes jewellery and outfits", "bool",
-                 aliases=("budgetincludesjewelleryandoutfits",), help="Yes or No."),
-        FieldDef("jewellery_outfits", "Jewellery and outfits", "int", aliases=("jewelleryandoutfits",)),
+                 aliases=("budgetincludesjewelleryandoutfits",)),
+        FieldDef("jewellery_outfits", "Jewellery and outfits", "money", aliases=("jewelleryandoutfits",)),
         FieldDef("priority1", "Priority 1", max_length=100),
         FieldDef("priority2", "Priority 2", max_length=100),
         FieldDef("priority3", "Priority 3", max_length=100),
         FieldDef("shortlisted_vendors", "Shortlisted vendors", max_length=5000),
-        FieldDef("consent_share", "Consent: share plan", "bool", aliases=("consentshareplanwithkingofcards",), help="Yes or No."),
-        FieldDef("consent_offers", "Consent: offers on WhatsApp", "bool", aliases=("consentoffersonwhatsapp",), help="Yes or No."),
+        FieldDef("consent_share", "Consent: share plan", "bool", aliases=("consentshareplanwithkingofcards",)),
+        FieldDef("consent_offers", "Consent: offers on WhatsApp", "bool", aliases=("consentoffersonwhatsapp",)),
     ],
 }
+
+# Columns of the export/template that are shown but never read back from an upload
+READ_ONLY_COLUMNS: dict[str, tuple[str, ...]] = {
+    "spin": ("Branch code", "Interest", "Quoted amount", "Quoted date", "Converted"),
+    "whatsapp": ("Interest", "Quoted amount", "Quoted date", "Converted"),
+    "wedding": ("Interest", "Quoted amount", "Quoted date", "Converted"),
+    "wedding_planner": ("Estimate", "Fits budget", "Interest", "Quoted amount", "Quoted date", "Converted", "Last step"),
+}
+VIRTUAL_KEYS = {"assigned_to", "location", "wedding_when"}     # read from uploads, not lead columns
 
 
 def norm_header(text: Any) -> str:
@@ -131,12 +158,16 @@ def norm_header(text: Any) -> str:
 
 
 def header_map(source: str) -> dict[str, str]:
-    """Normalised header -> field key (key, label and aliases all accepted)."""
+    """Normalised header -> field key (label, key and aliases all accepted)."""
     out: dict[str, str] = {}
     for f in FIELDS[source]:
         for name in (f.label, f.key, *f.aliases):
             out.setdefault(norm_header(name), f.key)
     return out
+
+
+def read_only_headers(source: str) -> set[str]:
+    return {norm_header(h) for h in READ_ONLY_COLUMNS[source]}
 
 
 # ── Value parsing ───────────────────────────────────────────────────────
@@ -146,10 +177,10 @@ class Invalid(ValueError):
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _MONTHS = ("%B %Y", "%b %Y", "%m/%Y", "%m-%Y", "%Y-%m")
-_DATE_FORMATS = ("%d-%m-%Y", "%d/%m/%Y", "%d.%m.%Y", "%Y-%m-%d", "%d-%m-%y", "%d/%m/%y",
-                 "%d %B %Y", "%d %b %Y", "%B %d, %Y", "%b %d, %Y", "%B %d %Y")
-_DATETIME_FORMATS = ("%d-%m-%Y %H:%M:%S", "%d-%m-%Y %H:%M", "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M",
-                     "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M")
+# Uploads: the screen's formats (13 Dec 2026 / 14 Nov 2026, 10:30 am) and DD-MM-YYYY; time optional
+_UPLOAD_DATES = ("%d-%m-%Y", "%d %b %Y", "%d %B %Y")
+_UPLOAD_TIMES = ("", " %H:%M", " %H:%M:%S", ", %H:%M", ", %I:%M %p", " %I:%M %p", ", %I:%M:%S %p", " %I:%M:%S %p")
+DATE_ERROR = "Use a date like 13 Dec 2026 or 13-12-2026"
 
 
 def as_text(value: Any) -> str:
@@ -161,49 +192,75 @@ def as_text(value: Any) -> str:
     if isinstance(value, float) and value.is_integer():
         value = int(value)
     if isinstance(value, datetime):
-        return value.strftime("%d-%m-%Y %H:%M") if value.time() != time() else value.strftime("%d-%m-%Y")
+        return display_datetime(value.replace(tzinfo=IST) if value.tzinfo is None else value) \
+            if value.time() != time() else display_date(value.date())
     if isinstance(value, date):
-        return value.strftime("%d-%m-%Y")
+        return display_date(value)
     return str(value).strip()
 
 
-def parse_date(value: Any) -> date:
+def display_date(d: date) -> str:
+    """13 Dec 2026"""
+    return d.strftime("%d %b %Y")
+
+
+def display_datetime(dt: datetime) -> str:
+    """14 Nov 2026, 10:30 am (India time), as on the list screens."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    local = dt.astimezone(IST)
+    return f"{local.day} {local:%b %Y}, {local:%I:%M} {'am' if local.hour < 12 else 'pm'}"
+
+
+def _clean_text(value: Any) -> str:
+    text = re.sub(r"(\d)(st|nd|rd|th)\b", r"\1", as_text(value), flags=re.I)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _upload_datetime(text: str) -> datetime | None:
+    """Naive datetime (India time) from the accepted upload formats, or None."""
+    for d in _UPLOAD_DATES:
+        for t in _UPLOAD_TIMES:
+            try:
+                return datetime.strptime(text, d + t)
+            except ValueError:
+                continue
+    return None
+
+
+def parse_date(value: Any, *, upload: bool = False) -> date:
     if isinstance(value, datetime):
         return value.date()
     if isinstance(value, date):
         return value
-    text = re.sub(r"(\d)(st|nd|rd|th)\b", r"\1", as_text(value), flags=re.I)
-    text = re.sub(r"\s+", " ", text)
-    if re.match(r"^\d{4}-\d{2}-\d{2}T", text):          # ISO datetime from JSON
-        text = text[:10]
-    for fmt in _DATE_FORMATS:
+    text = _clean_text(value)
+    dt = _upload_datetime(text)
+    if dt is not None:
+        return dt.date()
+    if not upload:                                       # API: ISO dates as well
         try:
-            return datetime.strptime(text, fmt).date()
+            return date.fromisoformat(text[:10])
         except ValueError:
-            continue
-    raise Invalid("Not a date (use DD-MM-YYYY)")
+            pass
+    raise Invalid(DATE_ERROR)
 
 
-def parse_datetime(value: Any) -> datetime:
+def parse_datetime(value: Any, *, upload: bool = False) -> datetime:
     """-> aware UTC. Values without a time zone (typed or from Excel) are India time."""
     if isinstance(value, datetime):
         dt = value
     elif isinstance(value, date):
         dt = datetime.combine(value, time())
     else:
-        text = as_text(value)
-        dt = None
-        try:
-            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
-        except ValueError:
-            for fmt in _DATETIME_FORMATS:
-                try:
-                    dt = datetime.strptime(text, fmt)
-                    break
-                except ValueError:
-                    continue
+        text = _clean_text(value)
+        dt = _upload_datetime(text)
+        if dt is None and not upload:                    # API: ISO 8601 as well
+            try:
+                dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                dt = None
         if dt is None:
-            dt = datetime.combine(parse_date(text), time())
+            raise Invalid("Use a date like 14 Nov 2026, 10:30 am or 14-11-2026 10:30")
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=IST)
     return dt.astimezone(timezone.utc)
@@ -240,6 +297,16 @@ def parse_int(value: Any) -> int:
     return number
 
 
+def parse_money(value: Any) -> int:
+    """150000, 1,50,000, ₹1,50,000, 25L, 1.5 lakh -> rupees."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return parse_int(value)
+    amount = parse_budget(as_text(value).replace(" ", "").replace("L", "l"))
+    if amount is None:
+        raise Invalid("Not an amount (e.g. 150000 or ₹1,50,000)")
+    return parse_int(amount)
+
+
 def parse_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -251,11 +318,15 @@ def parse_bool(value: Any) -> bool:
     raise Invalid("Use Yes or No")
 
 
+_AUTO_RE = re.compile(r"^(.*?)\s*[·•\-–(]?\s*auto\)?$", re.I)
+
+
 @dataclass
 class RowContext:
-    """What validation needs from the database (branch names) and from the row (country)."""
+    """What validation needs from the database (branch and vendor names)."""
     branches_by_name: dict[str, int] = field(default_factory=dict)   # norm_header(name) -> id
     branch_ids: set[int] = field(default_factory=set)
+    vendors_by_name: dict[str, tuple[int, str]] = field(default_factory=dict)   # norm name -> (id, name)
 
 
 @dataclass
@@ -264,22 +335,37 @@ class Cleaned:
     errors: list[dict]                     # [{"field": key, "message": ...}]
     phone: phones.Phone | None = None
     phone_input: str = ""
+    # "Assigned to": None = column empty/absent; ("none", None) | ("auto", id) | ("manual", id)
+    assignment: tuple[str, int | None] | None = None
 
     @property
     def ok(self) -> bool:
         return not self.errors
 
 
-def clean_row(source: str, raw: dict[str, Any], ctx: RowContext, *, partial: bool = False) -> Cleaned:
-    """Check and clean one lead. partial=True (edit): only the fields present in `raw`."""
+def parse_assigned(text: str, ctx: RowContext) -> tuple[tuple[str, int | None], str]:
+    """-> ((mode, vendor id), canonical text)."""
+    if norm_header(text) in ("", "unassigned", "none"):
+        return ("none", None), "Unassigned"
+    auto = _AUTO_RE.match(text)
+    name, mode = (auto.group(1), "auto") if auto and auto.group(1).strip() else (text, "manual")
+    vendor = ctx.vendors_by_name.get(norm_header(name))
+    if vendor is None:
+        raise Invalid(f"Unknown vendor '{name.strip()}'")
+    return (mode, vendor[0]), (f"{vendor[1]} · auto" if mode == "auto" else vendor[1])
+
+
+def clean_row(source: str, raw: dict[str, Any], ctx: RowContext, *, partial: bool = False, upload: bool = False) -> Cleaned:
+    """Check and clean one lead. partial=True (edit): only the fields present in `raw`.
+    upload=True: dates must be in the upload formats (13 Dec 2026 / 13-12-2026, time optional)."""
     values: dict[str, Any] = {}
     errors: list[dict] = []
     phone: phones.Phone | None = None
     phone_input = ""
-    defs = FIELDS[source]
+    assignment = None
     country = as_text(raw.get("country")) if source == "whatsapp" else None
 
-    for f in defs:
+    for f in FIELDS[source]:
         if partial and f.key not in raw:
             continue
         value = raw.get(f.key)
@@ -289,14 +375,16 @@ def clean_row(source: str, raw: dict[str, Any], ctx: RowContext, *, partial: boo
         if not text:
             if f.required:
                 errors.append({"field": f.key, "message": f"{f.label} is required"})
-            values[f.key] = None
+            values.setdefault(f.key, None)      # keep a value filled from Location / Wedding date
             continue
         try:
-            if f.max_length and f.type in ("text", "email", "country", "date_text", "range", "budget", "phone") \
+            if f.max_length and f.type in ("text", "email", "country", "event_date", "range", "budget", "phone") \
                     and len(text) > f.max_length:
                 raise Invalid(f"Longer than {f.max_length} characters")
-            if f.type in ("text", "country", "range"):
+            if f.type in ("text", "country"):
                 values[f.key] = text
+            elif f.type == "range":
+                values[f.key] = re.sub(r"\s*[–—]\s*", "-", text.replace("₹", "")).strip()
             elif f.type == "email":
                 if not _EMAIL_RE.match(text):
                     raise Invalid("Not a valid email address")
@@ -308,15 +396,22 @@ def clean_row(source: str, raw: dict[str, Any], ctx: RowContext, *, partial: boo
                     raise Invalid(phone.error)
                 values[f.key] = text
             elif f.type == "date":
-                values[f.key] = parse_date(value)
-            elif f.type == "date_text":
-                values[f.key] = text                       # parsed date added in to_model_kwargs
+                values[f.key] = parse_date(value, upload=upload)
+            elif f.type == "event_date":
+                if isinstance(value, (date, datetime)):     # Excel date cell
+                    values[f.key] = display_date(parse_date(value))
+                else:
+                    if upload:
+                        parse_date(value, upload=True)      # uploads: must be a real date
+                    values[f.key] = text                    # kept as written, parsed when clear
             elif f.type == "datetime":
-                values[f.key] = parse_datetime(value)
+                values[f.key] = parse_datetime(value, upload=upload)
             elif f.type == "month":
                 values[f.key] = parse_month(value)
             elif f.type == "int":
                 values[f.key] = parse_int(value)
+            elif f.type == "money":
+                values[f.key] = parse_money(value)
             elif f.type == "bool":
                 values[f.key] = parse_bool(value)
             elif f.type == "budget":
@@ -326,6 +421,20 @@ def clean_row(source: str, raw: dict[str, Any], ctx: RowContext, *, partial: boo
                 if len(digits) != 6:
                     raise Invalid("Pincode must have 6 digits")
                 values[f.key] = digits
+            elif f.type == "location":
+                pin = re.search(r"(?<!\d)(\d{6})(?!\d)", text)
+                values[f.key] = text
+                if pin and not as_text(raw.get("pincode")):
+                    values["pincode"] = pin.group(1)
+            elif f.type == "wedding_when":
+                values[f.key] = text
+                try:
+                    values["first_day"] = parse_date(value, upload=upload)
+                except Invalid:
+                    try:
+                        values["wedding_month"] = parse_month(value)
+                    except Invalid:
+                        raise Invalid("Use a date (20 Dec 2027) or a month (December 2027)")
             elif f.type == "branch":
                 if isinstance(value, int) and not isinstance(value, bool):
                     if value not in ctx.branch_ids:
@@ -336,11 +445,13 @@ def clean_row(source: str, raw: dict[str, Any], ctx: RowContext, *, partial: boo
                     if branch_id is None:
                         raise Invalid(f"Unknown branch '{text}' (use the name shown on the Branches page)")
                     values[f.key] = branch_id
+            elif f.type == "assigned":
+                assignment, values[f.key] = parse_assigned(text, ctx)
             else:  # pragma: no cover
                 values[f.key] = text
         except Invalid as exc:
             errors.append({"field": f.key, "message": str(exc)})
-    return Cleaned(values, errors, phone, phone_input)
+    return Cleaned(values, errors, phone, phone_input, assignment)
 
 
 def field_defs(source: str) -> dict[str, FieldDef]:
@@ -354,7 +465,7 @@ def to_model_kwargs(source: str, values: dict[str, Any], phone: phones.Phone | N
     if source == "spin":
         details = {}
         for f in FIELDS["spin"]:
-            if f.key not in values:
+            if f.key not in values or f.key in VIRTUAL_KEYS:
                 continue
             v = values[f.key]
             if f.key == "branch":
@@ -364,12 +475,17 @@ def to_model_kwargs(source: str, values: dict[str, Any], phone: phones.Phone | N
             elif f.key == "phone":
                 out["phone"] = phone.national_in
                 out["phone_e164"] = phone.e164
+            elif f.key == "created_at":
+                if v is not None:
+                    out["created_at"] = v
             else:
                 out[f.key] = v
         out["_details"] = details
         return out
 
     for key, v in values.items():
+        if key in VIRTUAL_KEYS:
+            continue
         if key == "phone":
             out["phone"] = phone.digits                        # same display form as the sync
             out["phone_e164"] = phone.e164
@@ -388,6 +504,11 @@ def to_model_kwargs(source: str, values: dict[str, Any], phone: phones.Phone | N
             out["budget_amount"] = parse_budget(v or "") if v else None
         elif key in ("priority1", "priority2", "priority3"):
             out.setdefault("_priorities", {})[key] = v
+        elif key == "updated":
+            if v is not None:
+                out["updated_in_sheet_at"] = v
+        elif key in ("submitted_at",) and v is None:
+            continue                                           # empty = now (set on create)
         else:
             out[key] = v
     if source == "wedding_planner" and ("first_day" in values or "wedding_month" in values):
@@ -396,22 +517,24 @@ def to_model_kwargs(source: str, values: dict[str, Any], phone: phones.Phone | N
 
 
 def from_model(source: str, lead) -> dict[str, Any]:
-    """Model -> form values (JSON-friendly), for the edit form and API answers."""
+    """Model -> form values (JSON-friendly), for the edit form and API answers.
+    "Assigned to" isn't a lead field: see the lead's crm details."""
     def j(v):
         return v.isoformat() if isinstance(v, (date, datetime)) else v
 
+    out: dict[str, Any] = {}
     if source == "spin":
         details = lead.additional_details or {}
-        out = {}
         for f in FIELDS["spin"]:
             if f.key == "branch":
                 out["branch"] = lead.branch_id
+            elif f.key in VIRTUAL_KEYS:
+                out[f.key] = None
             elif f.detail:
                 out[f.key] = details.get(f.key)
             else:
                 out[f.key] = j(getattr(lead, f.key))
         return out
-    out = {}
     for f in FIELDS[source]:
         if f.key == "phone":
             out["phone"] = lead.phone_raw if source == "wedding" and lead.phone_raw else (f"+{lead.phone}" if lead.phone else None)
@@ -419,6 +542,12 @@ def from_model(source: str, lead) -> dict[str, Any]:
             out["event_date"] = lead.event_date_text
         elif f.key == "budget":
             out["budget"] = lead.budget_text
+        elif f.key == "wedding_when":
+            out["wedding_when"] = j(lead.first_day) if lead.first_day else lead.wedding_month
+        elif f.key == "updated":
+            out["updated"] = j(lead.updated_in_sheet_at)
+        elif f.key in VIRTUAL_KEYS:
+            out[f.key] = None
         elif f.key in ("priority1", "priority2", "priority3"):
             prios = list(lead.priorities or [])
             idx = int(f.key[-1]) - 1
@@ -429,13 +558,13 @@ def from_model(source: str, lead) -> dict[str, Any]:
 
 
 def json_values(values: dict[str, Any]) -> dict[str, Any]:
-    """Clean values -> what the preview sends back (bulk save re-checks them)."""
+    """Clean values -> what the preview sends back, in upload formats (bulk save re-checks them)."""
     out = {}
     for k, v in values.items():
         if isinstance(v, datetime):
-            out[k] = v.isoformat()
+            out[k] = display_datetime(v)
         elif isinstance(v, date):
-            out[k] = v.strftime("%d-%m-%Y")
+            out[k] = display_date(v)
         else:
             out[k] = v
     return out

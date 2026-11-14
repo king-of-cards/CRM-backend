@@ -90,11 +90,34 @@ def is_sheet_lead(db: Session, source: str, lead_key: str) -> bool:
 
 
 def context(db: Session) -> RowContext:
+    from app.services.lead_crm import active_vendors
+
     branches = list(db.exec(select(Branch)))
     return RowContext(
         branches_by_name={norm_header(b.name): b.id for b in branches},
         branch_ids={b.id for b in branches},
+        vendors_by_name={norm_header(v.name): (v.id, v.name) for v in active_vendors(db)},
     )
+
+
+def save_assignment(db: Session, source: str, lead_key: str, assignment, user_id: int | None,
+                    *, empty_means_unassigned: bool) -> None:
+    """"Assigned to" from an upload or a single add -> crm_lead_meta (not committed).
+      manual vendor   vendor_id = that vendor
+      "<vendor> · auto" automatic (nothing stored)
+      Unassigned      auto_assign = False: stays unassigned until an admin assigns it
+      empty           uploads: unassigned; single add: automatic"""
+    from app.models.lead_meta import LeadMeta
+
+    if assignment is None:
+        assignment = ("none", None) if empty_means_unassigned else ("auto", None)
+    mode, vendor_id = assignment
+    if mode == "auto":
+        return
+    db.add(LeadMeta(
+        source=source, lead_key=lead_key, updated_at=_now(), updated_by=user_id,
+        vendor_id=vendor_id if mode == "manual" else None, auto_assign=mode == "manual",
+    ))
 
 
 def out(source: str, lead) -> dict:
@@ -193,7 +216,7 @@ def check_rows(db: Session, source: str, rows: list[tuple[int, dict[str, Any]]])
     """Validate rows and find duplicates. Returns (row results, counts, cleaned rows).
     A row is "ok" only if it has no errors and is not a duplicate."""
     ctx = context(db)
-    cleaned = [clean_row(source, raw, ctx) for _, raw in rows]
+    cleaned = [clean_row(source, raw, ctx, upload=True) for _, raw in rows]
     matches = lookup(db, {c.phone.e164 for c in cleaned if c.ok and c.phone and c.phone.e164})
 
     results: list[dict] = []
@@ -300,7 +323,7 @@ def set_archived(db: Session, lead, archived: bool) -> None:
 def clear_caches() -> None:
     from app.core import response_cache
 
-    for prefix in ("vendors", "analytics", "branches"):
+    for prefix in ("vendors", "analytics", "branches", "access"):
         response_cache.clear(prefix)
 
 

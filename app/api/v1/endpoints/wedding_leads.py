@@ -8,12 +8,12 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Query
-from sqlalchemy import func, or_
+from sqlalchemy import and_, false, func, or_
 from sqlmodel import col, select
 
-from app.api.deps import AdminUser, DbSession
+from app.api.deps import DbSession, LeadViewer
 from app.models.wedding_lead import WeddingLead
-from app.services import lead_crm
+from app.services import access, lead_crm
 
 router = APIRouter(prefix="/wedding-leads", tags=["wedding-leads"])
 
@@ -62,7 +62,7 @@ def _out(lead: WeddingLead) -> dict:
 
 @router.get("")
 def list_wedding_leads(
-    _: AdminUser,
+    viewer: LeadViewer,
     db: DbSession,
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=200),
@@ -73,7 +73,7 @@ def list_wedding_leads(
     sort: Literal["submitted_at", "event_date", "budget_amount", "name", "city"] = "submitted_at",
     order: Literal["asc", "desc"] = "desc",
 ):
-    filters = build_filters(search, occasion, shared_with, hide_repeats)
+    filters = build_filters(search, occasion, shared_with, hide_repeats, access.visible_keys(db, viewer, "wedding"))
     total = db.exec(select(func.count()).select_from(WeddingLead).where(*filters)).one()
     rows = db.exec(
         select(WeddingLead).where(*filters).order_by(*ordering(sort, order))
@@ -83,9 +83,12 @@ def list_wedding_leads(
 
 
 # ── Shared with the export (GET /crm-leads/wedding/export) ──────────────
-def build_filters(search: str | None, occasion: str | None, shared_with: str | None, hide_repeats: bool) -> list:
-    """Archived and removed rows (is_deleted) are never listed or exported."""
+def build_filters(search: str | None, occasion: str | None, shared_with: str | None, hide_repeats: bool, keys: set[str] | None = None) -> list:
+    """Archived and removed rows (is_deleted) are never listed or exported.
+    keys: the lead keys the viewer may see (None = all, for admins)."""
     filters = [WeddingLead.is_deleted == False]  # noqa: E712
+    if keys is not None:
+        filters.append(col(WeddingLead.sheet_key).in_(keys) if keys else false())
     if occasion:
         filters.append(WeddingLead.occasion == occasion)
     if shared_with == NOT_SHARED:
@@ -128,8 +131,9 @@ def attach_crm(db, items: list[dict]) -> list[dict]:
 
 
 @router.get("/stats")
-def wedding_lead_stats(_: AdminUser, db: DbSession):
-    active = WeddingLead.is_deleted == False  # noqa: E712
+def wedding_lead_stats(viewer: LeadViewer, db: DbSession):
+    # Only the leads the viewer may see (vendors: their own)
+    active = and_(*build_filters(None, None, None, None, access.visible_keys(db, viewer, "wedding")))
     now = datetime.now(timezone.utc)
 
     def count(*conditions) -> int:

@@ -5,7 +5,8 @@ Safety:
     through defusedxml and runs in read-only mode, and formulas are read as their saved values;
   - exports are formula-safe: in .xlsx every text value is written as a text cell (never a
     formula), in .csv text starting with = + - @ tab or CR gets a leading apostrophe;
-  - phone numbers are always text; dates are DD-MM-YYYY and times are India time (IST).
+  - values look as on the list screens: phones as text (+919845012345), dates "13 Dec 2026",
+    date-times "14 Nov 2026, 10:30 am" (India time), money as rupees with a ₹ format.
 """
 import csv
 import io
@@ -20,15 +21,13 @@ from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 
-from app.services.crm_leads.fields import FIELDS, SOURCE_LABELS
+from app.services.crm_leads.fields import FIELDS, READ_ONLY_COLUMNS, SOURCE_LABELS, display_date, display_datetime
 
 IST = timezone(timedelta(hours=5, minutes=30))
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024
 MAX_UPLOAD_ROWS = 5_000
 MAX_COLUMNS = 200
 EXPORT_MAX_ROWS = 50_000
-DATE_FORMAT = "DD-MM-YYYY"
-DATETIME_FORMAT = "DD-MM-YYYY HH:MM"
 XLSX_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 CSV_TYPE = "text/csv; charset=utf-8"
 _CSV_DANGEROUS = ("=", "+", "-", "@", "\t", "\r")
@@ -122,6 +121,12 @@ def _csv_rows(content: bytes) -> list[tuple[int, list[Any]]]:
 
 
 # ── Writing ────────────────────────────────────────────────────────────
+# Display formats, as the list screens show values
+XLSX_DATE_FORMAT = "dd mmm yyyy"                       # 13 Dec 2026
+XLSX_DATETIME_FORMAT = "d mmm yyyy, hh:mm am/pm"       # 14 Nov 2026, 10:30 am (India time)
+XLSX_INR_FORMAT = '[>=10000000]"₹"##\\,##\\,##\\,##0;[>=100000]"₹"##\\,##\\,##0;"₹"##,##0'   # ₹1,50,000
+
+
 def _text_cell_value(value: str) -> str:
     return ILLEGAL_CHARACTERS_RE.sub("", value)
 
@@ -132,8 +137,30 @@ def _ist(value: datetime) -> datetime:
     return value.astimezone(IST).replace(tzinfo=None)
 
 
-def write_xlsx(title: str, headers: list[str], rows: list[list[Any]], text_columns: set[int] = frozenset()) -> bytes:
-    """Write-only workbook. text_columns: indexes always written as text (e.g. phone)."""
+def _set_cell(cell, value: Any, kind: str) -> None:
+    """One xlsx cell (normal or write-only) with the column's display format."""
+    if value is None or value == "":
+        cell.value = None
+        return
+    if kind == "yesno":
+        value = "Yes" if value else "No"
+    if isinstance(value, datetime):
+        cell.value = _ist(value)
+        cell.number_format = XLSX_DATETIME_FORMAT
+    elif isinstance(value, date):
+        cell.value = value
+        cell.number_format = XLSX_DATE_FORMAT
+    elif isinstance(value, (int, float)) and not isinstance(value, bool) and kind in ("money", "int", "value"):
+        cell.value = value
+        if kind == "money":
+            cell.number_format = XLSX_INR_FORMAT
+    else:
+        cell.value = _text_cell_value(str(value))
+        cell.data_type = "s"                     # text, never a formula
+        cell.number_format = "@"
+
+
+def write_xlsx(title: str, headers: list[str], rows: list[list[Any]], kinds: list[str]) -> bytes:
     wb = Workbook(write_only=True)
     ws = wb.create_sheet(title[:31])
     ws.freeze_panes = "A2"
@@ -147,26 +174,9 @@ def write_xlsx(title: str, headers: list[str], rows: list[list[Any]], text_colum
     ws.append(header_cells)
     for row in rows:
         cells = []
-        for i, value in enumerate(row):
-            if value is not None and i in text_columns and not isinstance(value, str):
-                value = str(value)
-            if isinstance(value, datetime):
-                cell = WriteOnlyCell(ws, value=_ist(value))
-                cell.number_format = DATETIME_FORMAT
-            elif isinstance(value, date):
-                cell = WriteOnlyCell(ws, value=value)
-                cell.number_format = DATE_FORMAT
-            elif isinstance(value, bool):
-                cell = WriteOnlyCell(ws, value="Yes" if value else "No")
-                cell.data_type = "s"
-            elif isinstance(value, (int, float)):
-                cell = WriteOnlyCell(ws, value=value)
-            elif value is None:
-                cell = WriteOnlyCell(ws, value=None)
-            else:
-                cell = WriteOnlyCell(ws, value=_text_cell_value(str(value)))
-                cell.data_type = "s"                 # text, never a formula
-                cell.number_format = "@"
+        for value, kind in zip(row, kinds):
+            cell = WriteOnlyCell(ws)
+            _set_cell(cell, value, kind)
             cells.append(cell)
         ws.append(cells)
     buf = io.BytesIO()
@@ -174,35 +184,36 @@ def write_xlsx(title: str, headers: list[str], rows: list[list[Any]], text_colum
     return buf.getvalue()
 
 
-def csv_safe(value: Any) -> str:
-    if value is None:
+def csv_text(value: Any, kind: str = "text") -> str:
+    """The same text the xlsx cell shows; formula-safe."""
+    if value is None or value == "":
         return ""
-    if isinstance(value, bool):
+    if kind == "yesno" or isinstance(value, bool):
         return "Yes" if value else "No"
     if isinstance(value, datetime):
-        return _ist(value).strftime("%d-%m-%Y %H:%M")
+        return display_datetime(value)
     if isinstance(value, date):
-        return value.strftime("%d-%m-%Y")
+        return display_date(value)
     text = str(value)
     if isinstance(value, str) and text.startswith(_CSV_DANGEROUS):
         return "'" + text
     return text
 
 
-def write_csv(headers: list[str], rows: list[list[Any]], text_columns: set[int] = frozenset()) -> bytes:
+def write_csv(headers: list[str], rows: list[list[Any]], kinds: list[str]) -> bytes:
     buf = io.StringIO()
     writer = csv.writer(buf, lineterminator="\r\n")
-    writer.writerow([csv_safe(h) for h in headers])
+    writer.writerow([csv_text(h) for h in headers])
     for row in rows:
-        writer.writerow([csv_safe(str(v) if v is not None and i in text_columns else v) for i, v in enumerate(row)])
+        writer.writerow([csv_text(v, k) for v, k in zip(row, kinds)])
     return buf.getvalue().encode("utf-8-sig")      # BOM: Excel opens UTF-8 correctly
 
 
-def write_table(fmt: str, title: str, headers: list[str], rows: list[list[Any]], text_columns: set[int] = frozenset()):
+def write_table(fmt: str, title: str, headers: list[str], rows: list[list[Any]], kinds: list[str]):
     """-> (bytes, media type, file extension)."""
     if fmt == "csv":
-        return write_csv(headers, rows, text_columns), CSV_TYPE, "csv"
-    return write_xlsx(title, headers, rows, text_columns), XLSX_TYPE, "xlsx"
+        return write_csv(headers, rows, kinds), CSV_TYPE, "csv"
+    return write_xlsx(title, headers, rows, kinds), XLSX_TYPE, "xlsx"
 
 
 def filename(stem: str, ext: str) -> str:
@@ -215,51 +226,92 @@ def content_disposition(name: str) -> str:
 
 
 # ── Template ───────────────────────────────────────────────────────────
-def template(source: str, fmt: str, branch_names: list[str]) -> tuple[bytes, str, str]:
-    fields = FIELDS[source]
-    headers = [f.label for f in fields]
-    example = [f.example if f.example is not None else "" for f in fields]
-    if fmt == "csv":
-        return write_csv(headers, [example], {i for i, f in enumerate(fields) if f.type == "phone"}), CSV_TYPE, "csv"
+def template(source: str, fmt: str, branch_names: list[str], vendor_names: list[str]) -> tuple[bytes, str, str]:
+    """The export's columns, with one example row in the screen's formats. Read-only columns
+    (Interest, quote, converted, Branch code, Estimate…) are kept so files match the export;
+    they are ignored on upload."""
+    from app.services.crm_leads.export import headers as layout_headers
+    from app.services.crm_leads.export import kinds as layout_kinds
 
+    headers = layout_headers(source)
+    kinds = layout_kinds(source)
+    example = [EXAMPLES[source].get(h) for h in headers]
+    if fmt == "csv":
+        return write_csv(headers, [example], kinds), CSV_TYPE, "csv"
+
+    read_only = set(READ_ONLY_COLUMNS[source])
+    defs = {f.label: f for f in FIELDS[source]}
     wb = Workbook()
     ws = wb.active
     ws.title = "Leads"
     ws.append(headers)
-    ws.append([str(v) if fields[i].type == "phone" and v != "" else v for i, v in enumerate(example)])
+    for i, (value, kind) in enumerate(zip(example, kinds), start=1):
+        _set_cell(ws.cell(row=2, column=i), value, kind)
     ws.freeze_panes = "A2"
-    for i, f in enumerate(fields, start=1):
+    for i, h in enumerate(headers, start=1):
         letter = get_column_letter(i)
-        ws.cell(row=1, column=i).font = Font(bold=True, color="C00000" if f.required else None)
-        ws.column_dimensions[letter].width = max(14, len(f.label) + 4)
-        if f.type in ("phone", "pincode"):
-            for r in range(2, 2002):                     # keep leading zeros and + signs
+        required = defs.get(h) is not None and defs[h].required
+        color = "C00000" if required else ("808080" if h in read_only else None)
+        ws.cell(row=1, column=i).font = Font(bold=True, color=color)
+        ws.column_dimensions[letter].width = max(14, len(h) + 4)
+        if kinds[i - 1] == "phone":
+            for r in range(3, 2002):                     # keep + signs as text
                 ws.cell(row=r, column=i).number_format = "@"
 
     info = wb.create_sheet("Instructions")
-    info.append([f"{SOURCE_LABELS[source]}: fill in the Leads sheet, one lead per row. Red headers are required."])
-    info.append(["Dates: DD-MM-YYYY. Times: India time. Delete the example row before uploading."])
+    info.append([f"{SOURCE_LABELS[source]}: one lead per row. Only the red column (phone) is required."])
+    info.append(["Dates: 13 Dec 2026 or 13-12-2026. Date-times: 14 Nov 2026, 10:30 am (India time); time optional."])
+    info.append(["Grey columns are filled in by the CRM and ignored on upload. Delete the example row before uploading."])
     info.append([])
     info.append(["Column", "Required", "How to fill it in"])
-    for f in fields:
-        info.append([f.label, "Yes" if f.required else "", f.help])
-    for cell in info[4]:
+    for h in headers:
+        f = defs.get(h)
+        if h in read_only:
+            info.append([h, "", "Shown in exports; ignored on upload."])
+        else:
+            info.append([h, "Yes" if f and f.required else "", f.help if f else ""])
+    for cell in info[5]:
         cell.font = Font(bold=True)
-    info.column_dimensions["A"].width = 32
-    info.column_dimensions["C"].width = 80
+    info.column_dimensions["A"].width = 24
+    info.column_dimensions["C"].width = 100
 
-    branch_col = next((i for i, f in enumerate(fields, start=1) if f.type == "branch"), None)
-    if branch_col and branch_names:
-        lists = wb.create_sheet("Branches")
-        lists.append(["Branch"])
-        for name in branch_names:
-            lists.append([name])
-        letter = get_column_letter(branch_col)
-        dv = DataValidation(type="list", formula1=f"=Branches!$A$2:$A${len(branch_names) + 1}", allow_blank=True,
-                            showErrorMessage=True, error="Pick a branch from the list (Branches sheet).")
+    lists = wb.create_sheet("Lists")
+    choices = {
+        "Branch": branch_names if source == "spin" else [],
+        "Assigned to": ["Unassigned"] + vendor_names + [f"{v} · auto" for v in vendor_names],
+    }
+    col = 0
+    for header, values in choices.items():
+        if not values or header not in headers:
+            continue
+        col += 1
+        letter = get_column_letter(col)
+        lists.cell(row=1, column=col, value=header).font = Font(bold=True)
+        for r, value in enumerate(values, start=2):
+            lists.cell(row=r, column=col, value=value)
+        target = get_column_letter(headers.index(header) + 1)
+        dv = DataValidation(type="list", formula1=f"=Lists!${letter}$2:${letter}${len(values) + 1}", allow_blank=True,
+                            showErrorMessage=True, error=f"Pick a value from the list ({header}).")
         ws.add_data_validation(dv)
-        dv.add(f"{letter}2:{letter}5001")
+        dv.add(f"{target}2:{target}5001")
 
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue(), XLSX_TYPE, "xlsx"
+
+
+_D = date(2026, 12, 20)
+_T = datetime(2026, 11, 14, 5, 0, tzinfo=timezone.utc)        # 14 Nov 2026, 10:30 am IST
+EXAMPLES: dict[str, dict[str, Any]] = {
+    "spin": {"Lead": "Asha Rao", "Email": "asha@example.com", "Contact": "+919845012345", "Branch": "Jayanagar",
+             "Branch code": "JNG-004", "Location": "Bangalore · 560011", "Occasion": "Wedding", "Event date": _D,
+             "Budget": "₹10–20", "Assigned to": "Phodeo", "Created": _T},
+    "whatsapp": {"Lead": "+971501234567", "Country": "United Arab Emirates", "Event date": _D,
+                 "Assigned to": "OHP · auto", "Submitted": _T},
+    "wedding": {"Lead": "Ravi Kumar", "Email": "ravi@example.com", "Contact": "+919845010003", "Occasion": "Wedding",
+                "Event date": _D, "City": "Bangalore", "Budget": 150000, "Assigned to": "Phodeo", "Submitted": _T},
+    "wedding_planner": {"Lead": "Meera", "Role": "Bride", "Email": "meera@example.com", "Contact": "+919845010004",
+                        "Wedding date": date(2027, 12, 20), "Wedding city": "Udaipur", "Guests": 300,
+                        "Guests staying": 120, "Budget": 2500000, "Budget range": "20L–30L", "Assigned to": "",
+                        "Updated": _T},
+}

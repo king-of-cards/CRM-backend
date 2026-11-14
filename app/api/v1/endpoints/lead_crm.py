@@ -1,4 +1,5 @@
-"""CRM details on any lead (admin only): assigned vendor, interest, converted, quote, notes.
+"""CRM details on any lead: assigned vendor, interest, converted, quote, notes.
+Admins and vendor users; see save_lead_crm for who may change what.
 
 GET /leads/{source}/{lead_key}/crm   current details
 PUT /leads/{source}/{lead_key}/crm   save details (only the fields you send are changed)
@@ -14,12 +15,12 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from sqlmodel import select
 
-from app.api.deps import AdminUser, DbSession
+from app.api.deps import DbSession, LeadViewer
 from app.core import response_cache
 from app.models.lead_meta import LeadMeta
 from app.models.lead_origin import CRM_KEY_PREFIX
 from app.models.vendor import Vendor
-from app.services import lead_crm
+from app.services import access, lead_crm
 from app.services.crm_leads import service as crm_leads
 
 router = APIRouter(prefix="/leads", tags=["lead crm"])
@@ -30,7 +31,7 @@ Source = Literal["spin", "whatsapp", "wedding", "wedding_planner"]
 class LeadCrmUpdate(BaseModel):
     # Send only what changes. vendor_id: a vendor's id, or null to go back to automatic.
     vendor_id: int | None = None
-    interest: Literal["interested", "follow_up", "not_interested"] | None = None
+    interest: Literal["interested", "not_interested", "other", "follow_up"] | None = None
     converted: bool | None = None
     quoted_date: date | None = None
     quoted_amount: int | None = Field(default=None, ge=0, le=100_000_000)
@@ -43,6 +44,7 @@ class LeadCrmUpdate(BaseModel):
 
 
 EDITABLE = ("vendor_id", "interest", "converted", "quoted_date", "quoted_amount", "notes")
+VENDOR_ONLY = ("interest", "converted", "quoted_date", "quoted_amount")
 
 
 def _answer(db, source: str, lead_key: str, meta: LeadMeta | None, body: LeadCrmUpdate | None = None) -> dict:
@@ -62,19 +64,32 @@ def _find(db, source: str, lead_key: str) -> LeadMeta | None:
 
 
 @router.get("/{source}/{lead_key}/crm")
-def get_lead_crm(source: Source, lead_key: str, _: AdminUser, db: DbSession):
+def get_lead_crm(source: Source, lead_key: str, viewer: LeadViewer, db: DbSession):
+    if not access.can_see(db, viewer, source, lead_key):
+        raise HTTPException(404, "Lead not found")
     return _answer(db, source, lead_key, _find(db, source, lead_key))
 
 
 @router.put("/{source}/{lead_key}/crm")
-def save_lead_crm(source: Source, lead_key: str, body: LeadCrmUpdate, user: AdminUser, db: DbSession):
+def save_lead_crm(source: Source, lead_key: str, body: LeadCrmUpdate, viewer: LeadViewer, db: DbSession):
+    """Who may change what:
+      vendor_id                                          admins only
+      interest, quoted_amount, quoted_date, converted    only a vendor user of the assigned vendor
+      notes                                              admins and the assigned vendor's users
+    A vendor user can't see other vendors' or unassigned leads: those answer 404."""
     if len(lead_key) > 100:
         raise HTTPException(400, "Lead key is too long")
     # crm-… keys belong to leads added/imported in the CRM: they must exist (archived is fine).
     # Workflow ids and sheet keys are accepted as before.
     if lead_key.startswith(CRM_KEY_PREFIX) and crm_leads.find_crm_lead(db, source, lead_key) is None:
         raise HTTPException(404, "Lead not found")
+    if not access.can_see(db, viewer, source, lead_key):
+        raise HTTPException(404, "Lead not found")
     changes = {f: getattr(body, f) for f in EDITABLE if f in body.model_fields_set}
+    if viewer.is_admin and any(f in changes for f in VENDOR_ONLY):
+        raise HTTPException(403, "Only the assigned vendor can change interest, quote and converted.")
+    if not viewer.is_admin and "vendor_id" in changes:
+        raise HTTPException(403, "Only an admin can assign leads.")
 
     if changes.get("vendor_id") is not None:
         vendor = db.get(Vendor, changes["vendor_id"])
@@ -95,11 +110,16 @@ def save_lead_crm(source: Source, lead_key: str, body: LeadCrmUpdate, user: Admi
             meta.converted_at = None
     for field, value in changes.items():
         setattr(meta, field, value)
+    if "vendor_id" in changes:
+        # A vendor = manual assignment; null = back to automatic (also for leads uploaded unassigned)
+        meta.auto_assign = True
     meta.updated_at = now
-    meta.updated_by = user.id
+    meta.updated_by = viewer.user.id
     db.add(meta)
     db.commit()
     db.refresh(meta)
 
     response_cache.clear("vendors")  # vendor numbers changed
+    response_cache.clear("analytics")
+    access.forget()                  # who may see the lead can have changed
     return _answer(db, source, lead_key, meta, body)
