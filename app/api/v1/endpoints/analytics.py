@@ -85,7 +85,25 @@ def _norm(s: str) -> str:
 
 # ── Spin leads (PostgreSQL, read-only) ─────────────────────────────────
 def _spin_rows() -> list[dict] | None:
-    """[{created, occasion_type, occasion_date}] for every listed spin lead, or None if unavailable."""
+    """[{created, occasion_type, occasion_date}] for every listed spin lead (the workflow's and the
+    CRM's own, archived ones left out), or None if the workflow database is unavailable."""
+    rows = _workflow_spin_rows()
+    if rows is None:
+        return None
+    from app.services import crm_spin_leads
+
+    with Session(engine) as db:
+        for lead in crm_spin_leads.active(db):
+            details = lead.additional_details or {}
+            rows.append({
+                "created": lead.created_at,
+                "occasion_type": details.get("occasionType"),
+                "occasion_date": details.get("occasionDate"),
+            })
+    return rows
+
+
+def _workflow_spin_rows() -> list[dict] | None:
     if read_engine is None:
         return None
     try:

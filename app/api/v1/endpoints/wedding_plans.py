@@ -42,6 +42,7 @@ def _out(p: WeddingPlan) -> dict:
     return {
         "id": p.id,
         "plan_id": p.plan_id,
+        "origin": p.origin,             # sheet | added | imported
         "last_step": p.last_step,
         "updated_at": _utc(p.updated_in_sheet_at),
         "versions": p.versions,
@@ -90,6 +91,18 @@ def list_wedding_plans(
     sort: Literal["updated", "wedding_date", "total_budget", "total_guests", "plan_estimate", "name"] = "updated",
     order: Literal["asc", "desc"] = "desc",
 ):
+    filters = build_filters(search, shared_with, fits_budget, last_step)
+    total = db.exec(select(func.count()).select_from(WeddingPlan).where(*filters)).one()
+    rows = db.exec(
+        select(WeddingPlan).where(*filters).order_by(*ordering(sort, order))
+        .offset((page - 1) * page_size).limit(page_size)
+    ).all()
+    return {"items": attach_crm(db, [_out(r) for r in rows]), "total": total, "page": page, "page_size": page_size}
+
+
+# ── Shared with the export (GET /crm-leads/wedding_planner/export) ──────
+def build_filters(search: str | None, shared_with: str | None, fits_budget: bool | None, last_step: str | None) -> list:
+    """Archived and removed rows (is_deleted) are never listed or exported."""
     filters = [WeddingPlan.is_deleted == False]  # noqa: E712
     if shared_with == NOT_SHARED:
         filters.append(WeddingPlan.shared_with.is_(None))
@@ -113,25 +126,24 @@ def list_wedding_plans(
         if digits:
             conditions.append(col(WeddingPlan.phone).like(f"%{digits}%"))
         filters.append(or_(*conditions))
+    return filters
 
-    total = db.exec(select(func.count()).select_from(WeddingPlan).where(*filters)).one()
 
+def ordering(sort: str, order: str) -> list:
     column = SORTABLE[sort]
-    ordering = [column.is_(None), column.desc() if order == "desc" else column.asc(), WeddingPlan.id.desc()]
-    rows = db.exec(
-        select(WeddingPlan).where(*filters).order_by(*ordering).offset((page - 1) * page_size).limit(page_size)
-    ).all()
+    return [column.is_(None), column.desc() if order == "desc" else column.asc(), WeddingPlan.id.desc()]
 
-    # Add the CRM details (vendor, interest, quote, converted) from the sidecar table
-    items = lead_crm.attach(
+
+def attach_crm(db, items: list[dict]) -> list[dict]:
+    """Add the CRM details (vendor, interest, quote, converted) from the sidecar table."""
+    return lead_crm.attach(
         db,
         "wedding_planner",
-        [_out(r) for r in rows],
+        items,
         key=lambda i: i["plan_id"],
         location=lambda i: i["city"] or i["home_city"],
         sheet_vendor=lambda i: i["shared_with"],
     )
-    return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
 @router.get("/stats")

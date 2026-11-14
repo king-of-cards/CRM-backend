@@ -38,6 +38,7 @@ def _out(lead: WhatsAppLead) -> dict:
     return {
         "id": lead.id,
         "lead_key": lead.sheet_key,
+        "origin": lead.origin,          # sheet | added | imported
         "country": lead.country,
         "phone": lead.phone,
         "phone_display": f"+{lead.phone}",
@@ -60,6 +61,18 @@ def list_whatsapp_leads(
     sort: Literal["submitted_at", "event_date", "country", "phone", "first_seen_at"] = "submitted_at",
     order: Literal["asc", "desc"] = "desc",
 ):
+    filters = build_filters(search, country)
+    total = db.exec(select(func.count()).select_from(WhatsAppLead).where(*filters)).one()
+    rows = db.exec(
+        select(WhatsAppLead).where(*filters).order_by(*ordering(sort, order))
+        .offset((page - 1) * page_size).limit(page_size)
+    ).all()
+    return {"items": attach_crm(db, [_out(r) for r in rows]), "total": total, "page": page, "page_size": page_size}
+
+
+# ── Shared with the export (GET /crm-leads/whatsapp/export) ─────────────
+def build_filters(search: str | None, country: str | None) -> list:
+    """Archived and removed rows (is_deleted) are never listed or exported."""
     filters = [WhatsAppLead.is_deleted == False]  # noqa: E712
     if country:
         filters.append(WhatsAppLead.country == country)
@@ -72,19 +85,18 @@ def list_whatsapp_leads(
                 col(WhatsAppLead.event_date_text).like(like),
             )
         )
+    return filters
 
-    total = db.exec(select(func.count()).select_from(WhatsAppLead).where(*filters)).one()
 
-    column = SORTABLE[sort]
+def ordering(sort: str, order: str) -> list:
     # Rows without a value go last in both directions; id keeps the order stable
-    ordering = [column.is_(None), column.desc() if order == "desc" else column.asc(), WhatsAppLead.id.desc()]
-    rows = db.exec(
-        select(WhatsAppLead).where(*filters).order_by(*ordering).offset((page - 1) * page_size).limit(page_size)
-    ).all()
+    column = SORTABLE[sort]
+    return [column.is_(None), column.desc() if order == "desc" else column.asc(), WhatsAppLead.id.desc()]
 
-    # Add the CRM details (vendor, interest, quote, converted) from the sidecar table
-    items = lead_crm.attach(db, "whatsapp", [_out(r) for r in rows], key=lambda i: i["lead_key"], location=lambda i: i["country"])
-    return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+def attach_crm(db, items: list[dict]) -> list[dict]:
+    """Add the CRM details (vendor, interest, quote, converted) from the sidecar table."""
+    return lead_crm.attach(db, "whatsapp", items, key=lambda i: i["lead_key"], location=lambda i: i["country"])
 
 
 @router.get("/stats")

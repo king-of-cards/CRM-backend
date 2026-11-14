@@ -17,8 +17,10 @@ from sqlmodel import select
 from app.api.deps import AdminUser, DbSession
 from app.core import response_cache
 from app.models.lead_meta import LeadMeta
+from app.models.lead_origin import CRM_KEY_PREFIX
 from app.models.vendor import Vendor
 from app.services import lead_crm
+from app.services.crm_leads import service as crm_leads
 
 router = APIRouter(prefix="/leads", tags=["lead crm"])
 
@@ -68,6 +70,10 @@ def get_lead_crm(source: Source, lead_key: str, _: AdminUser, db: DbSession):
 def save_lead_crm(source: Source, lead_key: str, body: LeadCrmUpdate, user: AdminUser, db: DbSession):
     if len(lead_key) > 100:
         raise HTTPException(400, "Lead key is too long")
+    # crm-… keys belong to leads added/imported in the CRM: they must exist (archived is fine).
+    # Workflow ids and sheet keys are accepted as before.
+    if lead_key.startswith(CRM_KEY_PREFIX) and crm_leads.find_crm_lead(db, source, lead_key) is None:
+        raise HTTPException(404, "Lead not found")
     changes = {f: getattr(body, f) for f in EDITABLE if f in body.model_fields_set}
 
     if changes.get("vendor_id") is not None:

@@ -144,7 +144,21 @@ def update_vendor(vendor_id: int, body: VendorPatch, _: AdminUser, db: DbSession
 
 # ── Statistics ─────────────────────────────────────────────────────────
 def _spin_rows(db: Session) -> list[tuple]:
-    """(lead id, location, pincode, None, branch vendor id) for every listed spin lead."""
+    """(lead id, location, pincode, None, branch vendor id) for every listed spin lead:
+    the workflow's and the CRM's own (crm-<id>, archived ones left out)."""
+    from app.services import crm_spin_leads
+    from app.services.branches import branches_by_id
+
+    branches = branches_by_id(db)
+    added = []
+    for lead in crm_spin_leads.active(db):
+        branch = branches.get(str(lead.branch_id)) if lead.branch_id is not None else None
+        added.append((lead.lead_key, (branch or {}).get("city"), crm_spin_leads.pincode_of(lead), None,
+                      (branch or {}).get("vendor_id")))
+    return _workflow_spin_rows(db) + added
+
+
+def _workflow_spin_rows(db: Session) -> list[tuple]:
     if read_engine is None:
         return []
     try:

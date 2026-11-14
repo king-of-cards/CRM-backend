@@ -41,6 +41,7 @@ def _out(lead: WeddingLead) -> dict:
     return {
         "id": lead.id,
         "lead_key": lead.sheet_key,
+        "origin": lead.origin,          # sheet | added | imported
         "name": lead.name,
         "email": lead.email,
         "phone": lead.phone,
@@ -72,6 +73,18 @@ def list_wedding_leads(
     sort: Literal["submitted_at", "event_date", "budget_amount", "name", "city"] = "submitted_at",
     order: Literal["asc", "desc"] = "desc",
 ):
+    filters = build_filters(search, occasion, shared_with, hide_repeats)
+    total = db.exec(select(func.count()).select_from(WeddingLead).where(*filters)).one()
+    rows = db.exec(
+        select(WeddingLead).where(*filters).order_by(*ordering(sort, order))
+        .offset((page - 1) * page_size).limit(page_size)
+    ).all()
+    return {"items": attach_crm(db, [_out(r) for r in rows]), "total": total, "page": page, "page_size": page_size}
+
+
+# ── Shared with the export (GET /crm-leads/wedding/export) ──────────────
+def build_filters(search: str | None, occasion: str | None, shared_with: str | None, hide_repeats: bool) -> list:
+    """Archived and removed rows (is_deleted) are never listed or exported."""
     filters = [WeddingLead.is_deleted == False]  # noqa: E712
     if occasion:
         filters.append(WeddingLead.occasion == occasion)
@@ -94,25 +107,24 @@ def list_wedding_leads(
         if digits:
             conditions.append(col(WeddingLead.phone).like(f"%{digits}%"))
         filters.append(or_(*conditions))
+    return filters
 
-    total = db.exec(select(func.count()).select_from(WeddingLead).where(*filters)).one()
 
+def ordering(sort: str, order: str) -> list:
     column = SORTABLE[sort]
-    ordering = [column.is_(None), column.desc() if order == "desc" else column.asc(), WeddingLead.id.desc()]
-    rows = db.exec(
-        select(WeddingLead).where(*filters).order_by(*ordering).offset((page - 1) * page_size).limit(page_size)
-    ).all()
+    return [column.is_(None), column.desc() if order == "desc" else column.asc(), WeddingLead.id.desc()]
 
-    # Add the CRM details (vendor, interest, quote, converted) from the sidecar table
-    items = lead_crm.attach(
+
+def attach_crm(db, items: list[dict]) -> list[dict]:
+    """Add the CRM details (vendor, interest, quote, converted) from the sidecar table."""
+    return lead_crm.attach(
         db,
         "wedding",
-        [_out(r) for r in rows],
+        items,
         key=lambda i: i["lead_key"],
         location=lambda i: i["city"],
         sheet_vendor=lambda i: i["shared_with"],
     )
-    return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
 @router.get("/stats")

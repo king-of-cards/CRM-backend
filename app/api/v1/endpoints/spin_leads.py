@@ -337,7 +337,25 @@ def spin_filter_options() -> dict:
 
 
 def spin_branch_counts() -> dict[str, int]:
-    """{branch id (text): number of listed spin leads}. Empty if the branch isn't stored."""
+    """{branch id (text): number of listed spin leads}: workflow leads plus the CRM's own
+    (archived ones left out). Workflow part empty if the branch isn't stored there."""
+    counts = _workflow_branch_counts()
+    try:
+        from sqlmodel import Session
+
+        from app.db.session import engine
+        from app.services import crm_spin_leads
+
+        with Session(engine) as db:
+            for lead in crm_spin_leads.active(db):
+                if lead.branch_id is not None:
+                    counts[str(lead.branch_id)] = counts.get(str(lead.branch_id), 0) + 1
+    except Exception:  # noqa: BLE001
+        logger.warning("spin-leads: CRM branch counts unavailable", exc_info=True)
+    return counts
+
+
+def _workflow_branch_counts() -> dict[str, int]:
     if read_engine is None:
         return {}
     try:
@@ -363,8 +381,12 @@ def list_spin_leads(
     order: Literal["asc", "desc"] = "asc",
     branch: str | None = None,
     filters: dict | None = None,
+    offset: int | None = None,
+    limit: int | None = None,
 ):
-    """filters (all optional):
+    """offset/limit override page/page_size (used to page after the CRM's own spin leads).
+
+    filters (all optional):
       pincode        leads whose pincode starts with this
       budget         exact budget value (e.g. "10-20")
       ids_in         only these lead ids (from the CRM filters); [] = none
@@ -491,8 +513,8 @@ def list_spin_leads(
         select(*(e.label(f"f{i}") for i, e in enumerate(select_exprs)))
         .where(*conditions)
         .order_by(*order_by)
-        .limit(page_size)
-        .offset((page - 1) * page_size)
+        .limit(page_size if limit is None else limit)
+        .offset((page - 1) * page_size if offset is None else offset)
     )
     count_query = select(func.count()).select_from(table).where(*conditions)
 
@@ -524,8 +546,8 @@ FRESH_SECONDS = 60
 STALE_SECONDS = 1800
 
 
-def _cache_key(page, page_size, search, sort, order, branch=None):
-    return ("spin", page, page_size, (search or "").strip().lower(), sort, order, branch or None)
+def _cache_key(offset, limit, search, sort, order, branch=None):
+    return ("spin", offset, limit, (search or "").strip().lower(), sort, order, branch or None)
 
 
 def _spin_location_keys(columns: list[dict]) -> tuple[str | None, str | None]:
@@ -645,22 +667,40 @@ def spin_leads_endpoint(
     quoted_value: int | None = Query(None, ge=0),
 ):
     filters = _crm_filters(db, pincode, budget, vendor_id, interest, converted, quoted_op, quoted_value)
-    if filters:
+    data = merged_page(db, (page - 1) * page_size, page_size, search, sort, order, branch, filters)
+    return {**data, "page": page, "page_size": page_size}
+
+
+def merged_page(db, start: int, length: int, search, sort, order, branch, filters: dict, use_cache: bool = True) -> dict:
+    """Rows [start, start + length) of the combined spin list, with CRM details and branch.
+
+    Spin leads added/imported in the CRM (MySQL, archived ones left out) come first, then the
+    workflow leads (PostgreSQL); paging runs over both. The CRM ones are read fresh every time.
+    An unknown sort name is rejected with 400 by list_spin_leads. Also used by the export."""
+    from app.services import crm_spin_leads, lead_crm
+    from app.services.branches import branches_by_id
+
+    added = crm_spin_leads.matching(db, search, sort, order, branch, filters)
+    added_page = added[start:start + length]
+    pg_offset = max(0, start - len(added))
+    pg_limit = length - len(added_page)
+
+    if filters or not use_cache:
         # Filters that use the CRM's own data change whenever someone edits a lead: no cache
-        data = list_spin_leads(None, page, page_size, search, sort, order, branch, filters)
+        data = list_spin_leads(None, 1, length, search, sort, order, branch, filters or None, pg_offset, pg_limit)
     else:
         data = response_cache.get(
-            _cache_key(page, page_size, search, sort, order, branch),
-            lambda: list_spin_leads(None, page, page_size, search, sort, order, branch),
+            _cache_key(pg_offset, pg_limit, search, sort, order, branch),
+            lambda: list_spin_leads(None, 1, length, search, sort, order, branch, None, pg_offset, pg_limit),
             fresh=FRESH_SECONDS,
             stale=STALE_SECONDS,
         )
+    items = [crm_spin_leads.to_item(lead, data["columns"]) for lead in added_page] + [
+        {**item, "origin": "workflow"} for item in data["items"]
+    ]
 
     # Sidecar: the workflow database is read-only, so the CRM details (vendor, interest,
     # quote, converted) come from our own crm_lead_meta table, matched by the lead's id.
-    from app.services import lead_crm
-    from app.services.branches import branches_by_id
-
     pk = next((c.name for c in _get_table().primary_key.columns), "id")
     pin_key, city_key = _spin_location_keys(data["columns"])
     branch_key = data.get("branch_column")
@@ -672,7 +712,7 @@ def spin_leads_endpoint(
     items = lead_crm.attach(
         db,
         "spin",
-        data["items"],
+        items,
         key=lambda i: i.get(pk),
         location=lambda i: (i.get(city_key) if city_key else None) or ((branch_of(i) or {}).get("city")),
         pincode=lambda i: str(i.get(pin_key) or "") if pin_key else None,
@@ -686,12 +726,17 @@ def spin_leads_endpoint(
             if b
             else ({"id": item.get(branch_key), "name": f"Branch {item.get(branch_key)}", "code": None, "city": None} if branch_key and item.get(branch_key) is not None else None)
         )
-    return {**data, "items": items}
+    return {**data, "items": items, "total": data["total"] + len(added)}
 
 
 def warm_first_pages() -> None:
     """Load the pages the dashboard and the Spin leads tab open with, before anyone asks."""
     if read_engine is None:
         return
-    for args in ((1, 1, None, None, "asc"), (1, 10, None, None, "asc"), (1, 10, None, "created_at", "desc")):
-        response_cache.warm(_cache_key(*args), lambda a=args: list_spin_leads(None, *a))
+    # (offset, limit) as requested when there are no CRM spin leads in front of them
+    for args in ((0, 1, None, None, "asc"), (0, 10, None, None, "asc"), (0, 10, None, "created_at", "desc")):
+        offset, limit, *rest = args
+        response_cache.warm(
+            _cache_key(*args),
+            lambda o=offset, n=limit, r=rest: list_spin_leads(None, 1, n, *r, None, None, o, n),
+        )

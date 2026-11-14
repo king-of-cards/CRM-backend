@@ -6,6 +6,11 @@ Each sheet source has its own sync function (its columns are different). A sync:
   3. marks rows that disappeared from the sheet as removed (is_deleted),
   4. writes a SheetSyncRun log entry.
 Only one sync runs at a time.
+
+The same tables also hold leads added or imported in the CRM (origin = 'added' / 'imported').
+A sync only ever reads, inserts, updates or marks removed rows with origin = 'sheet'; the others
+are invisible to it. If a sheet row's key is already used by an added/imported row (only possible
+for a Plan ID typed into an import), that sheet row is skipped and a warning is logged.
 """
 import hashlib
 import logging
@@ -17,11 +22,12 @@ from typing import Any
 
 from sqlmodel import Session, select
 
+from app.models.lead_origin import ORIGIN_SHEET
 from app.models.sheet_sync_run import SheetSyncRun
 from app.models.wedding_lead import WeddingLead
 from app.models.wedding_plan import WeddingPlan
 from app.models.whatsapp_lead import WhatsAppLead
-from app.services import google_sheets
+from app.services import google_sheets, phones
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +57,36 @@ def _find_column(columns: list[str], *needles: str) -> str | None:
 
 def _sha1(*parts: str) -> str:
     return hashlib.sha1("\x1f".join(parts).encode("utf-8")).hexdigest()
+
+
+def _sheet_rows(session: Session, model, key_attr: str) -> tuple[dict[str, Any], set[str]]:
+    """({key: row} for origin='sheet' rows, keys taken by added/imported rows).
+
+    Everything a sync writes goes through the first dict, so rows of any other origin can
+    never be inserted over, updated or marked removed."""
+    key_col = getattr(model, key_attr)
+    sheet = {getattr(r, key_attr): r for r in session.exec(select(model).where(model.origin == ORIGIN_SHEET))}
+    taken = set(session.exec(select(key_col).where(model.origin != ORIGIN_SHEET)))
+    return sheet, taken
+
+
+def _e164(raw: str, *, international: bool = False, country: str | None = None) -> str:
+    """E.164 form for duplicate checks; "" when the sheet's number can't be read (checked, none)."""
+    return phones.normalize(raw, international=international, country=country, lenient=True).e164 or ""
+
+
+def _set_e164(lead, e164: str, session: Session) -> None:
+    """Kept out of row_hash, so filling it in never counts as an edit of the sheet row."""
+    if lead.phone_e164 != e164:
+        lead.phone_e164 = e164
+        session.add(lead)
+
+
+def _key_taken(source: str, key: str, taken: set[str]) -> bool:
+    if key in taken:
+        logger.warning("Sheet sync '%s': key %s belongs to an added/imported lead; sheet row skipped", source, key)
+        return True
+    return False
 
 
 # ── Parsing helpers for the WhatsApp sheet ──────────────────────────────────
@@ -122,7 +158,7 @@ def sync_whatsapp(session: Session, source: str, run: SheetSyncRun) -> None:
     if not phone_col:
         raise ValueError(f"No phone column found in the sheet. Columns: {', '.join(cols)}")
 
-    existing = {lead.sheet_key: lead for lead in session.exec(select(WhatsAppLead))}
+    existing, taken = _sheet_rows(session, WhatsAppLead, "sheet_key")
     seen: set[str] = set()
     key_counts: dict[str, int] = {}
     now = _now()
@@ -141,9 +177,12 @@ def sync_whatsapp(session: Session, source: str, run: SheetSyncRun) -> None:
         base = _sha1(phone, submitted_text)
         key_counts[base] = key_counts.get(base, 0) + 1
         key = base if key_counts[base] == 1 else _sha1(base, str(key_counts[base]))
+        if _key_taken(source, key, taken):
+            continue
         seen.add(key)
 
         row_hash = _sha1(country or "", phone, event_text or "", submitted_text)
+        e164 = _e164(row.get(phone_col, ""), international=True, country=country)
         lead = existing.get(key)
 
         if lead is None:
@@ -152,6 +191,7 @@ def sync_whatsapp(session: Session, source: str, run: SheetSyncRun) -> None:
                     sheet_key=key,
                     country=country,
                     phone=phone,
+                    phone_e164=e164,
                     event_date_text=event_text,
                     event_date=parse_event_date(event_text or ""),
                     submitted_at=parse_submitted(submitted_text),
@@ -173,11 +213,13 @@ def sync_whatsapp(session: Session, source: str, run: SheetSyncRun) -> None:
             lead.is_deleted = False
             lead.updated_at = now
             session.add(lead)
+            _set_e164(lead, e164, session)
             run.updated += 1
         else:
             if lead.sheet_row != row["_row"]:
                 lead.sheet_row = row["_row"]  # row moved (sorting); not counted as an edit
                 session.add(lead)
+            _set_e164(lead, e164, session)
             run.unchanged += 1
 
     # Rows that are no longer in the sheet
@@ -312,7 +354,7 @@ def sync_wedding(session: Session, source: str, run: SheetSyncRun) -> None:
         p["is_repeat"] = bool(contact) and order != first_by_contact[contact]
 
     # 3. Save
-    existing = {lead.sheet_key: lead for lead in session.exec(select(WeddingLead))}
+    existing, taken = _sheet_rows(session, WeddingLead, "sheet_key")
     seen: set[str] = set()
     key_counts: dict[str, int] = {}
     now = _now()
@@ -326,14 +368,18 @@ def sync_wedding(session: Session, source: str, run: SheetSyncRun) -> None:
         base = _sha1(p["timestamp_text"], p["phone"] or p["email"] or p["name"] or "")
         key_counts[base] = key_counts.get(base, 0) + 1
         key = base if key_counts[base] == 1 else _sha1(base, str(key_counts[base]))
+        if _key_taken(source, key, taken):
+            continue
         seen.add(key)
 
         row_hash = _sha1(*(str(p[f]) for f in fields))
+        e164 = _e164(p["phone_raw"] or "")
         lead = existing.get(key)
         if lead is None:
             session.add(
                 WeddingLead(
                     sheet_key=key,
+                    phone_e164=e164,
                     sheet_row=p["row"],
                     row_hash=row_hash,
                     first_seen_at=now,
@@ -350,11 +396,13 @@ def sync_wedding(session: Session, source: str, run: SheetSyncRun) -> None:
             lead.is_deleted = False
             lead.updated_at = now
             session.add(lead)
+            _set_e164(lead, e164, session)
             run.updated += 1
         else:
             if lead.sheet_row != p["row"]:
                 lead.sheet_row = p["row"]
                 session.add(lead)
+            _set_e164(lead, e164, session)
             run.unchanged += 1
 
     for key, lead in existing.items():
@@ -473,6 +521,7 @@ def sync_wedding_planner(session: Session, source: str, run: SheetSyncRun) -> No
         latest[plan_key] = {
             "_order": order,
             "_row": row["_row"],
+            "_e164": _e164(v["phone"]),
             "plan_id": plan_key,
             "session": v["session"] or None,
             "last_step": v["last_step"].lower() or None,
@@ -508,15 +557,18 @@ def sync_wedding_planner(session: Session, source: str, run: SheetSyncRun) -> No
         }
 
     # 2. Save
-    existing = {plan.plan_id: plan for plan in session.exec(select(WeddingPlan))}
+    existing, taken = _sheet_rows(session, WeddingPlan, "plan_id")
     now = _now()
     for plan_key, p in latest.items():
+        if _key_taken(source, plan_key, taken):
+            continue
         p["versions"] = versions[plan_key]
         values = {k: val for k, val in p.items() if not k.startswith("_")}
         row_hash = _sha1(*(f"{k}={values[k]}" for k in sorted(values)))
         plan = existing.get(plan_key)
         if plan is None:
-            session.add(WeddingPlan(**values, sheet_row=p["_row"], row_hash=row_hash, first_seen_at=now, updated_at=now))
+            session.add(WeddingPlan(**values, phone_e164=p["_e164"], sheet_row=p["_row"], row_hash=row_hash,
+                                    first_seen_at=now, updated_at=now))
             run.inserted += 1
         elif plan.row_hash != row_hash or plan.is_deleted:
             for k, val in values.items():
@@ -526,8 +578,10 @@ def sync_wedding_planner(session: Session, source: str, run: SheetSyncRun) -> No
             plan.is_deleted = False
             plan.updated_at = now
             session.add(plan)
+            _set_e164(plan, p["_e164"], session)
             run.updated += 1
         else:
+            _set_e164(plan, p["_e164"], session)
             run.unchanged += 1
 
     for plan_key, plan in existing.items():

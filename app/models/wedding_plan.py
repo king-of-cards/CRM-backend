@@ -4,6 +4,8 @@ from typing import Any
 from sqlalchemy import JSON, Column, Text
 from sqlmodel import Field, SQLModel
 
+from app.models.lead_origin import origin_field
+
 
 class WeddingPlan(SQLModel, table=True):
     """One wedding plan from the "Wedding planner" Google Sheet, copied by the sync.
@@ -56,6 +58,8 @@ class WeddingPlan(SQLModel, table=True):
     shortlisted_vendors: str | None = Field(default=None, sa_column=Column(Text))
     shared_with: str | None = Field(default=None, max_length=200, index=True)   # "Leads shared"
 
+    origin: str = origin_field()                                # sheet | added | imported
+    phone_e164: str | None = Field(default=None, max_length=16, index=True)  # +919845012345, for duplicate checks
     sheet_row: int | None = None
     row_hash: str = Field(max_length=40)
     is_deleted: bool = Field(default=False, index=True)

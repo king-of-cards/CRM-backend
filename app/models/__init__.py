@@ -7,4 +7,5 @@ from app.models.vendor import Vendor  # noqa: F401
 from app.models.lead_meta import LeadMeta  # noqa: F401
 from app.models.wedding_lead import WeddingLead  # noqa: F401
 from app.models.wedding_plan import WeddingPlan  # noqa: F401
+from app.models.crm_spin_lead import CrmSpinLead  # noqa: F401
 from app.models.whatsapp_lead import WhatsAppLead  # noqa: F401

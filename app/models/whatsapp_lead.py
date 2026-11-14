@@ -2,6 +2,8 @@ from datetime import date, datetime
 
 from sqlmodel import Field, SQLModel
 
+from app.models.lead_origin import origin_field
+
 
 class WhatsAppLead(SQLModel, table=True):
     """One row of the "International Phone Numbers (WhatsApp)" Google Sheet, copied by the sync.
@@ -19,6 +21,8 @@ class WhatsAppLead(SQLModel, table=True):
     event_date_text: str | None = Field(default=None, max_length=100)  # exactly as typed in the sheet
     event_date: date | None = Field(default=None, index=True)   # parsed when the text is clear
     submitted_at: datetime | None = Field(default=None, index=True)
+    origin: str = origin_field()                                # sheet | added | imported
+    phone_e164: str | None = Field(default=None, max_length=16, index=True)  # +919845012345, for duplicate checks
     sheet_row: int | None = None                                # row number at the last sync
     row_hash: str = Field(max_length=40)                        # detects edits in the sheet
     is_deleted: bool = Field(default=False, index=True)
