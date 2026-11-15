@@ -34,7 +34,7 @@ INTEREST_VALUES = ("interested", "not_interested", "other", "follow_up", "not_se
 SHEET_ORIGINS = ("sheet", "added", "imported")
 SPIN_ORIGINS = ("workflow", "added", "imported")
 MAX_UPCOMING_DAYS = 366
-_QUOTE_RE = re.compile(r"^(gt|lt|gte|lte|eq|ne):(\d{1,12})$")
+_QUOTE_RE = re.compile(r"^(gt|lt):(\d{1,12})$")
 
 
 def bad_request(message: str) -> HTTPException:
@@ -51,7 +51,7 @@ class CommonFilters:
     unassigned: bool = False
     interests: list[str] = field(default_factory=list)
     converted: str | None = None                           # yes | no
-    quote: tuple[str, int | None] | None = None            # (op, amount): has/none, gt/lt (+ old spin ops)
+    quote: tuple[str, int | None] | None = None            # (op, amount): has / none / gt / lt
     origins: list[str] = field(default_factory=list)
 
     @property
@@ -70,7 +70,7 @@ def parse_quote(text: str | None) -> tuple[str, int | None] | None:
     if value in ("has", "none"):
         return value, None
     m = _QUOTE_RE.match(value)
-    if not m or m.group(1) not in ("gt", "lt"):
+    if not m:
         raise bad_request("quote must be has, none, gt:<amount> or lt:<amount> (e.g. gt:50000)")
     return m.group(1), int(m.group(2))
 
@@ -116,7 +116,6 @@ def common_filters(
 
     interests = []
     for value in interest or []:
-        value = "not_set" if value == "none" else value          # old spin value
         if value not in INTEREST_VALUES:
             raise bad_request(f"interest must be one of: {', '.join(INTEREST_VALUES)}")
         interests.append(value)
@@ -154,8 +153,7 @@ def _quote_matches(amount: int | None, quote: tuple[str, int | None]) -> bool:
         return amount is None
     if amount is None:
         return False
-    return {"gt": amount > value, "lt": amount < value, "gte": amount >= value, "lte": amount <= value,
-            "eq": amount == value, "ne": amount != value}[op]
+    return amount > value if op == "gt" else amount < value
 
 
 def allowed_keys(db: Session, source: str, viewer, f: CommonFilters) -> set[str] | None:

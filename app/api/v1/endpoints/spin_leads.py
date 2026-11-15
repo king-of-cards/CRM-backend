@@ -586,15 +586,7 @@ def spin_filters(
     branch: str | None = Query(None, description="Only leads from this branch id"),
     pincode: str | None = Query(None, max_length=10, description="Pincode starts with"),
     budget: str | None = Query(None, max_length=50, description="Exact budget value, e.g. 10-20"),
-    # Old parameters, kept as aliases of quote until the frontend switches
-    quoted_op: Literal["eq", "ne", "gt", "gte", "lt", "lte", "set", "unset"] | None = Query(None, deprecated=True),
-    quoted_value: int | None = Query(None, ge=0, deprecated=True),
 ) -> SpinFilters:
-    if common.quote is None and quoted_op:
-        if quoted_op in ("set", "unset"):
-            common.quote = ("has" if quoted_op == "set" else "none", None)
-        elif quoted_value is not None:
-            common.quote = (quoted_op, quoted_value)
     pin = "".join(ch for ch in (pincode or "") if ch.isdigit()) or (pincode or "").strip() or None
     return SpinFilters(common, branch or None, pin, budget or None)
 

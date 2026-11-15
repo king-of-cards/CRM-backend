@@ -1014,10 +1014,6 @@ leads, whatever they send.
 | `guests_min`, `guests_max` | | | | ✔ | Inclusive total guests |
 | `page`, `page_size`, `sort`, `order` | ✔ | ✔ | ✔ | ✔ | Paging and sort (lists and exports) |
 
-**Older spin parameters**, still accepted until the frontend switches, then removed:
-`interest=none` (= `not_set`), and `quoted_op` (`set`, `unset`, `eq`, `ne`, `gt`, `gte`, `lt`,
-`lte`) with `quoted_value`. A `quote` parameter wins over them.
-
 ### Errors (400)
 
 | Case | `detail` |

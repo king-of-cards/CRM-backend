@@ -318,12 +318,11 @@ class SpinListFiltersTest(ApiTestBase, unittest.TestCase):
         c({"701", "703"}, vendor_id=v["rj"], unassigned="true")
         c({"701"}, interest="interested")
         c({"702", "703", crm}, interest="not_set")
-        c({"702", "703", crm}, interest="none")                        # old alias
         c({"701"}, converted="yes")
         c({"701"}, quote="gt:20000")
-        c({"701"}, quoted_op="gt", quoted_value=20000)                 # old alias
-        c({"701"}, quoted_op="set")
-        c({"702", "703", crm}, quoted_op="unset")
+        c({"701"}, quote="has")
+        c({"702", "703", crm}, quote="none")
+        c(set(), quote="lt:20000")
         c({"701", crm}, event_from="2026-11-01", event_to="2026-12-31")
         c({"701", crm}, upcoming_days=30)                              # 25 Nov, 5 Dec
         c({"701", "702", "703"}, origin="workflow")
@@ -352,6 +351,10 @@ class SpinListFiltersTest(ApiTestBase, unittest.TestCase):
         resp = self.client.get(f"{API}/spin-leads", params={"origin": "sheet"})
         self.assertEqual(resp.status_code, 400)
         self.assertIn("doesn't exist for Spin leads", resp.json()["detail"])
+        # The old aliases are gone: interest=none is an unknown value now
+        resp = self.client.get(f"{API}/spin-leads", params={"interest": "none"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("interest must be one of", resp.json()["detail"])
 
     def test_spin_filter_options(self):
         def options(who="admin"):
