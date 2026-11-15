@@ -457,7 +457,15 @@ class CrmLeadsApiTest(ApiTestBase, unittest.TestCase):
         lists = wb["Lists"]
         self.assertEqual([r[0].value for r in lists.iter_rows(min_row=2) if r[0].value],    # Branches page + built-in stores
                          sorted((s["name"] for s in STORES.values()), key=str.lower))
-        self.assertIn("Phodeo · auto", [r[1].value for r in lists.iter_rows(min_row=2)])
+        # Assigned to choices: Automatic, Unassigned, then each active vendor (priority order)
+        self.assertEqual([r[1].value for r in lists.iter_rows(min_row=2) if r[1].value],
+                         ["Automatic", "Unassigned", "RJ", "Phodeo", "OHP"])
+        # The example rows use dropdown values only
+        for source in ("spin", "whatsapp", "wedding", "wedding_planner"):
+            book = load_workbook(io.BytesIO(self.client.get(f"{API}/crm-leads/{source}/template").content))
+            head = [c.value for c in book["Leads"][1]]
+            example = book["Leads"].cell(row=2, column=head.index("Assigned to") + 1).value
+            self.assertIn(example, (None, "Automatic", "Unassigned", "RJ", "Phodeo", "OHP"), source)
 
         existing = self.add_ok("spin", {"phone": "9845020000"})
         upload = xlsx_file([

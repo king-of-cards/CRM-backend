@@ -331,7 +331,8 @@ file can be uploaded back.
     column is red (required) and read-only columns are grey.
   - **Instructions:** how to fill in each column; read-only columns are marked "ignored on upload".
   - **Lists:** the values for the dropdowns on the Leads sheet: branch names (spin) and every
-    "Assigned to" choice (`Unassigned`, each vendor, each `<vendor> · auto`).
+    "Assigned to" choice (`Automatic`, `Unassigned`, then each active vendor; uploads
+    still accept `<vendor> · auto` from exported files).
 - **CSV** (UTF-8 with BOM): the header row and the example row.
 
 Delete the example row before uploading, or it will be imported as a lead.

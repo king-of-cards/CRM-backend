@@ -278,7 +278,8 @@ def template(source: str, fmt: str, branch_names: list[str], vendor_names: list[
     lists = wb.create_sheet("Lists")
     choices = {
         "Branch": branch_names if source == "spin" else [],
-        "Assigned to": ["Unassigned"] + vendor_names + [f"{v} · auto" for v in vendor_names],
+        # "<vendor> · auto" isn't offered (Automatic covers it) but uploads still accept it
+        "Assigned to": ["Automatic", "Unassigned"] + vendor_names,
     }
     col = 0
     for header, values in choices.items():
@@ -307,7 +308,7 @@ EXAMPLES: dict[str, dict[str, Any]] = {
              "Branch code": "JNG-004 · Bangalore", "Location": "Bangalore · 560011", "Occasion": "Wedding", "Event date": _D,
              "Budget": "₹10–20", "Assigned to": "Phodeo", "Created": _T},
     "whatsapp": {"Lead": "+971501234567", "Country": "United Arab Emirates", "Event date": _D,
-                 "Assigned to": "OHP · auto", "Submitted": _T},
+                 "Assigned to": "Automatic", "Submitted": _T},
     "wedding": {"Lead": "Ravi Kumar", "Email": "ravi@example.com", "Contact": "+919845010003", "Occasion": "Wedding",
                 "Event date": _D, "City": "Bangalore", "Budget": 150000, "Assigned to": "Phodeo", "Submitted": _T},
     "wedding_planner": {"Lead": "Meera", "Role": "Bride", "Email": "meera@example.com", "Contact": "+919845010004",
