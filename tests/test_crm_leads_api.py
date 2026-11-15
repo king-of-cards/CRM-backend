@@ -598,7 +598,7 @@ class CrmLeadsApiTest(ApiTestBase, unittest.TestCase):
             s.commit()
         existing = {"spin": ("9845099999", "existing_workflow"), "whatsapp": ("+971500000001", "existing_sheet"),
                     "wedding": ("9845800001", "existing_sheet"), "wedding_planner": ("9845800001", "existing_sheet")}
-        bad = {"spin": ("Email", "not-an-email"), "whatsapp": ("Event date", "20/12/2026"),
+        bad = {"spin": ("Email", "not-an-email"), "whatsapp": ("Submitted", "not a date"),
                "wedding": ("Email", "not-an-email"), "wedding_planner": ("Email", "not-an-email")}
         for source, (phone, reason) in existing.items():
             with self.subTest(source=source):

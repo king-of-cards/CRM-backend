@@ -339,26 +339,57 @@ class VendorAccessTest(ApiTestBase, unittest.TestCase):
             self.assertNotIn(wed_key, self.keys(self.list_items("wedding")))
 
     def test_upload_date_formats(self):
+        """Event dates behave like the sheet sync (full date -> date, anything else kept as text,
+        no error); Submitted/Created stay strict (a date, optional time)."""
         upload = xlsx_file([
             ["Contact", "Event date", "Submitted"],
             ["9845600001", "13-12-2026", "14 Nov 2026, 10:30 am"],
             ["9845600002", "13 Dec 2026", "14-11-2026 10:30"],
             ["9845600003", "13 December 2026", "14 Nov 2026"],
             ["9845600004", "13-12-2026 18:00", None],
-            ["9845600005", "20/12/2026", None],                  # not an accepted format
-            ["9845600006", "2026-12-20", None],
-            ["9845600007", None, "14/11/2026 10:30"],
+            ["9845600005", "20/12/2026", None],                  # the sync reads this too
+            ["9845600006", "April 2027", None],                  # partial: kept as text
+            ["9845600007", "November 16", None],
+            ["9845600008", "16th Nov", None],
+            ["9845600009", None, "14/11/2026 10:30"],            # Submitted: not an accepted format
+            ["9845600010", "x" * 101, None],                     # longer than the column
         ])
         rows = self.client.post(f"{API}/crm-leads/wedding/import/preview", files={"file": ("d.xlsx", upload, XLSX)}).json()["rows"]
-        self.assertEqual([r["status"] for r in rows], ["ok", "ok", "ok", "ok", "error", "error", "error"])
-        self.assertEqual(rows[4]["errors"][0], {"field": "event_date", "message": "Use a date like 13 Dec 2026 or 13-12-2026"})
-        self.assertEqual(rows[6]["errors"][0]["field"], "submitted_at")
+        self.assertEqual([r["status"] for r in rows], ["ok"] * 8 + ["error", "error"])
+        self.assertEqual(rows[8]["errors"][0]["field"], "submitted_at")
+        self.assertEqual(rows[9]["errors"][0], {"field": "event_date", "message": "Longer than 100 characters"})
         self.client.post(f"{API}/crm-leads/wedding/import", json={"rows": [{"row": r["row"], "values": r["values"]} for r in rows]})
         with Session(self.engine) as s:
+            stored = {l.phone: (l.event_date, l.event_date_text) for l in s.exec(select(WeddingLead).where(WeddingLead.origin == "imported"))}
             lead = s.exec(select(WeddingLead).where(WeddingLead.phone == "919845600001")).one()
-            self.assertEqual((lead.event_date, lead.submitted_at.replace(tzinfo=None)),
-                             (date(2026, 12, 13), datetime(2026, 11, 14, 5, 0)))     # 10:30 IST = 05:00 UTC
+            self.assertEqual(lead.submitted_at.replace(tzinfo=None), datetime(2026, 11, 14, 5, 0))   # 10:30 IST = 05:00 UTC
+        self.assertEqual(stored["919845600001"], (date(2026, 12, 13), "13-12-2026"))
+        self.assertEqual(stored["919845600004"][0], date(2026, 12, 13))
+        self.assertEqual(stored["919845600005"][0], date(2026, 12, 20))
+        for phone, text in (("919845600006", "April 2027"), ("919845600007", "November 16"), ("919845600008", "16th Nov")):
+            self.assertEqual(stored[phone], (None, text))
 
+        # International: the same rule
+        upload = xlsx_file([["Lead", "Event date"], ["+971500000091", "16th Nov"], ["+971500000092", "20 Dec 2026"]])
+        rows = self.client.post(f"{API}/crm-leads/whatsapp/import/preview", files={"file": ("w.xlsx", upload, XLSX)}).json()["rows"]
+        self.assertEqual([r["status"] for r in rows], ["ok", "ok"])
+
+        # Planner: a full date is the first day; a month or partial date is the wedding month's text
+        upload = xlsx_file([
+            ["Contact", "Wedding date"],
+            ["9845610001", "20 Dec 2027"],
+            ["9845610002", "April 2027"],
+            ["9845610003", "16th Nov"],
+            ["9845610004", "y" * 51],
+        ])
+        rows = self.client.post(f"{API}/crm-leads/wedding_planner/import/preview", files={"file": ("p.xlsx", upload, XLSX)}).json()["rows"]
+        self.assertEqual([r["status"] for r in rows], ["ok", "ok", "ok", "error"])
+        self.client.post(f"{API}/crm-leads/wedding_planner/import", json={"rows": [{"row": r["row"], "values": r["values"]} for r in rows]})
+        with Session(self.engine) as s:
+            plans = {p.phone: (p.first_day, p.wedding_month, p.wedding_date) for p in s.exec(select(WeddingPlan).where(WeddingPlan.origin == "imported"))}
+        self.assertEqual(plans["919845610001"], (date(2027, 12, 20), None, date(2027, 12, 20)))
+        self.assertEqual(plans["919845610002"], (None, "April 2027", date(2027, 4, 1)))
+        self.assertEqual(plans["919845610003"], (None, "16th Nov", None))
 
 if __name__ == "__main__":
     unittest.main()

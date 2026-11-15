@@ -89,7 +89,14 @@ its CRM details are kept. It can be unarchived.
   - real Excel date/date-time cells.
 
   Anything else (`20/12/2026`, `2026-12-20`) is a row error:
-  `Use a date like 13 Dec 2026 or 13-12-2026`.
+  `Use a date like 13 Dec 2026 or 13-12-2026`. This applies to Submitted, Created, spin's
+  Event date and other date columns.
+- **Event dates** (International and wedding Event date, planner Wedding date) behave like the
+  sheet sync instead: any text is accepted and kept as written. A full date is also stored as
+  the date (`13 Dec 2026`, `13-12-2026`, `20/12/2026`), while partial dates such as `April 2027`,
+  `November 16` or `16th Nov` stay text. For the planner, a full date is the first day and anything
+  else becomes the wedding month's text. The only error is text longer than the column (100
+  characters; planner wedding month 50).
 - **JSON requests** (single add and edit) accept the same, plus ISO (`2026-12-20`,
   `2026-11-14T05:00:00Z`).
 - A time without a time zone is read as **India time (IST)**. Times are stored in UTC.
@@ -116,7 +123,7 @@ Export columns that are shown but never read back are listed under each source a
 | `phone` | See [Phone numbers](#1-concepts) | As the sync stores it, plus the E.164 form |
 | `country` | Country name, ISO code or dial code | Text |
 | `date` | See dates above | Date |
-| `event_date` | A date (see above; in uploads it must be one) | The text as written, plus the date |
+| `event_date` | Any text, like the sheet sync (see Event dates above) | The text as written, plus the date when it is one |
 | `datetime` | See date-times above. Empty means now. | UTC date-time |
 | `month` | `December 2027`, `Dec 2027`, `12/2027`, `2027-12` | `December 2027` |
 | `int` | Whole number, commas allowed | Number |
@@ -128,7 +135,7 @@ Export columns that are shown but never read back are listed under each source a
 | `branch` | Spin: a branch **name** as on the Branches page (in JSON also its numeric id) | Branch id |
 | `assigned` | `Phodeo` (manual), `Phodeo · auto` (automatic), `Unassigned` or empty | In `crm_lead_meta` (see below) |
 | `location` | Spin: `Bangalore · 560011`; the 6-digit pincode in it is saved | The pincode |
-| `wedding_when` | Planner: a date (fills the first day) or a month (fills the wedding month) | First day or wedding month |
+| `wedding_when` | Planner: a date (fills the first day), or a month or any other text (fills the wedding month) | First day or wedding month |
 
 **"Assigned to"** (`assigned_to`) is not stored on the lead:
 

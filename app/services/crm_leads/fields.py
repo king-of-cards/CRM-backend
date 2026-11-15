@@ -355,6 +355,25 @@ def parse_assigned(text: str, ctx: RowContext) -> tuple[tuple[str, int | None], 
     return (mode, vendor[0]), (f"{vendor[1]} · auto" if mode == "auto" else vendor[1])
 
 
+WEDDING_MONTH_MAX = 50       # crm_wedding_plans.wedding_month
+
+
+def _planner_when(value: Any, text: str, values: dict[str, Any], upload: bool) -> None:
+    """A planner date cell: a full date -> first_day; "December 2027" -> wedding_month as
+    "December 2027"; any other text -> wedding_month as written (the sync keeps it as text)."""
+    try:
+        values["first_day"] = parse_date(value, upload=upload)
+        return
+    except Invalid:
+        pass
+    try:
+        values["wedding_month"] = parse_month(value)
+    except Invalid:
+        if len(text) > WEDDING_MONTH_MAX:
+            raise Invalid(f"Longer than {WEDDING_MONTH_MAX} characters")
+        values["wedding_month"] = text
+
+
 def clean_row(source: str, raw: dict[str, Any], ctx: RowContext, *, partial: bool = False, upload: bool = False) -> Cleaned:
     """Check and clean one lead. partial=True (edit): only the fields present in `raw`.
     upload=True: dates must be in the upload formats (13 Dec 2026 / 13-12-2026, time optional)."""
@@ -381,7 +400,11 @@ def clean_row(source: str, raw: dict[str, Any], ctx: RowContext, *, partial: boo
             if f.max_length and f.type in ("text", "email", "country", "event_date", "range", "budget", "phone") \
                     and len(text) > f.max_length:
                 raise Invalid(f"Longer than {f.max_length} characters")
-            if f.type in ("text", "country"):
+            if upload and source == "wedding_planner" and f.key in ("first_day", "wedding_month"):
+                # Planner dates, like the sheet sync: a full date is the first day; a month or a
+                # partial date ("16th Nov") is kept as the wedding month's text
+                _planner_when(value, text, values, upload)
+            elif f.type in ("text", "country"):
                 values[f.key] = text
             elif f.type == "range":
                 values[f.key] = re.sub(r"\s*[–—]\s*", "-", text.replace("₹", "")).strip()
@@ -398,12 +421,12 @@ def clean_row(source: str, raw: dict[str, Any], ctx: RowContext, *, partial: boo
             elif f.type == "date":
                 values[f.key] = parse_date(value, upload=upload)
             elif f.type == "event_date":
+                # Like the sheet sync: kept as written ("April 2027", "16th Nov" too) and read as a
+                # date when it is one (to_model_kwargs); the sync rejects no text, so neither do we
                 if isinstance(value, (date, datetime)):     # Excel date cell
                     values[f.key] = display_date(parse_date(value))
                 else:
-                    if upload:
-                        parse_date(value, upload=True)      # uploads: must be a real date
-                    values[f.key] = text                    # kept as written, parsed when clear
+                    values[f.key] = text
             elif f.type == "datetime":
                 values[f.key] = parse_datetime(value, upload=upload)
             elif f.type == "month":
@@ -428,13 +451,7 @@ def clean_row(source: str, raw: dict[str, Any], ctx: RowContext, *, partial: boo
                     values["pincode"] = pin.group(1)
             elif f.type == "wedding_when":
                 values[f.key] = text
-                try:
-                    values["first_day"] = parse_date(value, upload=upload)
-                except Invalid:
-                    try:
-                        values["wedding_month"] = parse_month(value)
-                    except Invalid:
-                        raise Invalid("Use a date (20 Dec 2027) or a month (December 2027)")
+                _planner_when(value, text, values, upload)
             elif f.type == "branch":
                 if isinstance(value, int) and not isinstance(value, bool):
                     if value not in ctx.branch_ids:
