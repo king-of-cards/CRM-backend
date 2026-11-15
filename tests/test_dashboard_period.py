@@ -103,7 +103,7 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
                          ("2026-10-18", "2026-11-16", 30))
         self.assertEqual(len(default["trend"]), 30)
         self.assertEqual(default["trend"][0]["date"], "2026-10-18")
-        self.assertEqual(default["not_filtered"], ["upcoming_30_days", "upcoming_by_month", "needs_attention"])
+        self.assertEqual(default["not_filtered"], [])                    # every number follows the period
 
     def test_range_previous_period_and_change(self):
         o = self.overview(date_from="2026-11-10", date_to="2026-11-16")     # 7 days; previous 3-9 Nov
@@ -123,14 +123,22 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
         self.assertEqual(o["budget_fit"], {"over": 1})
         self.assertEqual([c["value"] for c in o["top_cities"]], ["Bangalore", "Udaipur"])
 
-    def test_totals_are_every_lead_up_to_date_to(self):
+    def test_totals_are_the_leads_that_arrived_in_the_period(self):
         o = self.overview(date_from="2026-11-01", date_to="2026-11-10")
-        # International: the lead with no arrival date counts; the 15/16 Nov ones don't
-        self.assertEqual(o["totals"]["whatsapp"], 1)
-        self.assertEqual(o["totals"]["wedding"], 3)                      # Oct, 5 Nov, 10 Nov
-        self.assertEqual(o["totals"]["wedding_planner"], 1)              # Sep (14 Nov is after date_to)
-        self.assertEqual(o["totals"]["spin"], 1)                         # 5 Nov (12 and 16 Nov are after date_to)
-        self.assertEqual(self.overview()["totals"], {"spin": 3, "whatsapp": 3, "wedding": 3, "wedding_planner": 2, "all": 11})
+        self.assertEqual(o["totals"], {"spin": 1, "whatsapp": 0, "wedding": 2, "wedding_planner": 0, "all": 3})
+        self.assertEqual(o["totals"], o["new_in_period"])
+        # Default period (18 Oct - 16 Nov): October, September and the lead with no date are left out
+        default = self.overview()
+        self.assertEqual(default["totals"], {"spin": 3, "whatsapp": 2, "wedding": 2, "wedding_planner": 1, "all": 8})
+
+    def test_average_per_day(self):
+        o = self.overview(date_from="2026-11-10", date_to="2026-11-16")      # 7 days: 6 leads, previous 2
+        self.assertEqual(o["average_per_day"]["period"],
+                         {"spin": 0.3, "whatsapp": 0.3, "wedding": 0.1, "wedding_planner": 0.1, "all": 0.9})
+        self.assertEqual(o["average_per_day"]["previous"],
+                         {"spin": 0.1, "whatsapp": 0.0, "wedding": 0.1, "wedding_planner": 0.0, "all": 0.3})
+        day = self.overview(date_from="2026-11-16", date_to="2026-11-16")
+        self.assertEqual(day["average_per_day"]["period"]["all"], 2.0)      # 1 International + 1 spin on one day
 
     def test_per_source_arrival_dates(self):
         # Planner: updated_in_sheet_at (14 Nov), not first_seen_at (1 Jan)
@@ -153,21 +161,34 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
                          o["new_in_period"]["all"])
         self.assertEqual(self.overview(date_from="2026-08-19", date_to="2026-11-16")["period"]["granularity"], "day")   # 90 days
 
-    def test_unfiltered_numbers_ignore_the_period(self):
-        a = self.overview(date_from="2026-11-15", date_to="2026-11-15")
-        b = self.overview(date_from="2026-01-01", date_to="2026-03-31")
-        for key in ("upcoming_30_days", "upcoming_by_month", "needs_attention", "this_week", "last_week"):
-            self.assertEqual(a[key], b[key], key)
-        self.assertEqual(a["needs_attention"], {"not_shared": 3, "over_budget": 2, "total": 5})
-        self.assertEqual(a["upcoming_30_days"]["wedding"], 2)            # 26 Nov and 1 Dec: within 30 days of today
-        self.assertEqual(a["this_week"]["whatsapp"], 2)                  # 10-16 Nov, the original meaning
+    def test_upcoming_events_and_needs_attention_follow_the_period(self):
+        nov = self.overview(date_from="2026-11-01", date_to="2026-11-16")
+        # Events within 30 days of today, of leads that arrived in the period: the 10 Nov wedding
+        # (event 26 Nov) and spin 501 (16 Nov, event 25 Nov); the October lead's 1 Dec event is left out
+        self.assertEqual(nov["upcoming_30_days"], {"spin": 1, "whatsapp": 0, "wedding": 1, "wedding_planner": 0, "all": 2})
+        months = {m["month"]: m for m in nov["upcoming_by_month"]}
+        self.assertEqual((months["2026-11"]["wedding"], months["2026-11"]["spin"]), (1, 1))
+        self.assertEqual(months["2026-12"]["wedding"], 0)                  # October lead: outside the period
+        self.assertEqual(months["2027-01"]["wedding_planner"], 1)          # plan of 14 Nov
+        # Not shared and over budget among the period's leads: 10 Nov wedding and the 14 Nov plan;
+        # the 14 Nov plan is over budget (the September one isn't in the period)
+        self.assertEqual(nov["needs_attention"], {"not_shared": 2, "over_budget": 1, "total": 3})
+        # A period with no leads: everything is zero
+        empty = self.overview(date_from="2026-01-01", date_to="2026-03-31")
+        self.assertEqual(empty["upcoming_30_days"]["all"], 0)
+        self.assertEqual(empty["needs_attention"], {"not_shared": 0, "over_budget": 0, "total": 0})
+        self.assertTrue(all(m[s] == 0 for m in empty["upcoming_by_month"]
+                            for s in ("spin", "whatsapp", "wedding", "wedding_planner")))
+        # this_week / last_week keep their original meaning (last 7 days vs the 7 before)
+        self.assertEqual(nov["this_week"], empty["this_week"])
+        self.assertEqual(nov["this_week"]["whatsapp"], 2)
 
     def test_vendor_sees_only_own_leads_in_the_period(self):
         phodeo = self.overview("phodeo", date_from="2026-11-01", date_to="2026-11-16")
         rj = self.overview("rj", date_from="2026-11-01", date_to="2026-11-16")
         self.assertEqual(phodeo["new_in_period"]["wedding"], 1)          # Bangalore (area rules)
         self.assertEqual(rj["new_in_period"]["wedding"], 1)              # leads shared: RJ (5 Nov)
-        self.assertEqual(rj["totals"]["wedding"], 2)                     # + October
+        self.assertEqual(rj["totals"]["wedding"], 1)                     # the period's only (October is outside)
         self.assertEqual(phodeo["needs_attention"]["not_shared"], 1)
         admin = self.overview(date_from="2026-11-01", date_to="2026-11-16")
         self.assertEqual(admin["new_in_period"]["wedding"], 2)

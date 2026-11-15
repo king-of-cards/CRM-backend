@@ -908,29 +908,33 @@ optional. Admins and vendor users; vendor users only ever get their own leads.
 | Wedding planner | `updated_in_sheet_at`: the sheet's "Last updated"; for added/imported plans the entry time or the uploaded "Updated" |
 
 A planner visitor who continues a plan later moves it to that later day; the sheet has no
-separate "submitted" time. Leads with no arrival time count in the totals, never in a period.
+separate "submitted" time. Leads with no arrival time are never in a period, so the dashboard doesn't count them.
 
 ### What each number covers (`/analytics/overview`)
 
+**Every number follows the period:** it counts only leads that arrived in it. The only exception is
+`this_week` / `last_week`, kept with their original meaning for the current screen.
+
 | Field | Screen | Covers |
 |---|---|---|
-| `totals` (per source, `all`) | Total leads, tile counts | Every lead up to `date_to` |
+| `totals` (per source, `all`) | Total leads, tile counts | Leads that arrived in the period (the same as `new_in_period`) |
 | `new_in_period` | New in period, tiles' "+N" | Leads that arrived in the period |
 | `previous_period` | Comparison | The same number of days right before `date_from` |
 | `change_pct` | % change | `new_in_period` vs `previous_period`, rounded; `null` when the previous period has 0 |
+| `average_per_day` | Average per day | `{period, previous}`, each per source plus `all`: leads per day, 1 decimal (e.g. 6 leads in 7 days = `0.9`) |
 | `source_mix` | Source mix, tiles' % bar | `[{source, count, pct}]` of `new_in_period` |
 | `trend` | Lead inflow | `[{date, end, <source counts>}]`: one point per day; for periods over 90 days, 7-day buckets starting at `date_from` (the last may be shorter). `period.granularity` says which |
 | `wedding_budget`, `photography_budget`, `guests`, `budget_fit`, `repeats` | Wedding budgets, Budgets & size | Leads that arrived in the period |
 | `sharing` | Shared with partners, Partners callout | Wedding and planner leads that arrived in the period |
 | `top_cities`, `top_countries`, `occasions`, `partners` | Lists | Leads that arrived in the period |
-| `upcoming_30_days` | Events in 30 days | **Not filtered:** events from today to today + 30, all of the viewer's leads |
-| `upcoming_by_month` | Upcoming events by month | **Not filtered:** months from this month |
-| `needs_attention` | Needs attention | **Not filtered:** `{not_shared, over_budget, total}` over everything still open |
+| `upcoming_30_days` | Events in 30 days | Leads that arrived in the period whose event is from today to today + 30 |
+| `upcoming_by_month` | Upcoming events by month | Leads that arrived in the period, by event month (from this month) |
+| `needs_attention` | Needs attention | `{not_shared, over_budget, total}` among the leads that arrived in the period |
 | `this_week`, `last_week` | (current screen) | **Original meaning**, not the period: the last 7 days vs the 7 before. Kept until the screen uses `new_in_period` / `previous_period`, then removed |
 
 Also in the response:
 - `period`: `{date_from, date_to, days, previous: {date_from, date_to}, granularity: "day" | "week"}`
-- `not_filtered`: `["upcoming_30_days", "upcoming_by_month", "needs_attention"]`
+- `not_filtered`: `[]` (kept for compatibility; every number follows the period)
 
 **Caching:** results are cached per viewer and period. Vendor logins of the same vendor share
 their vendor's entry, and `refresh=true` clears the cache.
