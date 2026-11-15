@@ -373,7 +373,10 @@ def sync_wedding(session: Session, source: str, run: SheetSyncRun) -> None:
         seen.add(key)
 
         row_hash = _sha1(*(str(p[f]) for f in fields))
-        e164 = _e164(p["phone_raw"] or "")
+        # From the phone already stored (digits with country code), not the number as typed: a
+        # foreign number typed with its country code but no "+" (447911123456) must not be read
+        # as an Indian number (+91 447911123456)
+        e164 = _e164("+" + p["phone"]) if p["phone"] else ""
         lead = existing.get(key)
         if lead is None:
             session.add(
@@ -521,7 +524,7 @@ def sync_wedding_planner(session: Session, source: str, run: SheetSyncRun) -> No
         latest[plan_key] = {
             "_order": order,
             "_row": row["_row"],
-            "_e164": _e164(v["phone"]),
+            "_e164": _e164("+" + phone) if phone else "",      # from the stored phone, as above
             "plan_id": plan_key,
             "session": v["session"] or None,
             "last_step": v["last_step"].lower() or None,

@@ -30,6 +30,7 @@ from app.models.wedding_lead import WeddingLead  # noqa: E402
 from app.models.wedding_plan import WeddingPlan  # noqa: E402
 from app.models.whatsapp_lead import WhatsAppLead  # noqa: E402
 from app.services import crm_spin_leads, google_sheets, sheet_sync  # noqa: E402
+from app.services.crm_leads import service  # noqa: E402
 
 NOW = datetime(2026, 11, 1, 10, 0, tzinfo=timezone.utc)
 
@@ -177,6 +178,45 @@ class SheetSyncOriginTest(unittest.TestCase):
         self.assertEqual(runs["whatsapp"]["updated"], 0)
         with Session(self.engine) as s:
             self.assertTrue(all(r.phone_e164 for r in s.exec(select(WhatsAppLead).where(WhatsAppLead.origin == ORIGIN_SHEET))))
+
+    def test_number_with_country_code_but_no_plus_gets_the_right_e164(self):
+        """A number typed with its country code but no "+" is stored with that country code
+        (447911123456, 919845012345); its E.164 form must come from that, not from re-reading the
+        typed digits as an Indian number (which gave +91 447911123456)."""
+        sheets = {
+            "wedding": [["10/11/2026 0:37:00", "Asha", "447911123456", "asha@example.com", "London"],
+                        ["10/12/2026 0:37:00", "Ravi", "919845012345", "ravi@example.com", "Bangalore"]],
+            "wedding_planner": [["KOC-UKNOPLUS", "10/11/2026 0:37:00", "Meera", "447911123499", "meera@example.com"]],
+        }
+        expected_wedding = {"447911123456": "+447911123456", "919845012345": "+919845012345"}
+        self.sync_all(sheets)
+        with Session(self.engine) as s:
+            weddings = s.exec(select(WeddingLead).where(WeddingLead.origin == ORIGIN_SHEET)).all()
+            self.assertEqual({w.phone: w.phone_e164 for w in weddings}, expected_wedding)
+            plan = s.exec(select(WeddingPlan).where(WeddingPlan.origin == ORIGIN_SHEET)).one()
+            self.assertEqual((plan.phone, plan.phone_e164), ("447911123499", "+447911123499"))
+            uk_key = next(w.sheet_key for w in weddings if w.phone == "447911123456")
+            # Rows synced by the old code have the wrong value: the next sync corrects it quietly
+            for w in weddings:
+                if w.phone == "447911123456":
+                    w.phone_e164 = "+91447911123456"
+                    s.add(w)
+            plan.phone_e164 = "+91447911123499"
+            s.add(plan)
+            s.commit()
+        runs = self.sync_all(sheets)
+        self.assertEqual((runs["wedding"]["updated"], runs["wedding_planner"]["updated"]), (0, 0))
+        with Session(self.engine) as s:
+            self.assertEqual({w.phone: w.phone_e164 for w in s.exec(select(WeddingLead).where(WeddingLead.origin == ORIGIN_SHEET))},
+                             expected_wedding)
+            self.assertEqual(s.exec(select(WeddingPlan.phone_e164).where(WeddingPlan.origin == ORIGIN_SHEET)).one(),
+                             "+447911123499")
+            # An upload of the same number (as exported, with "+") is recognised as the existing sheet lead
+            for source, phone, key in (("wedding", "+447911123456", uk_key),
+                                       ("wedding_planner", "+447911123499", "KOC-UKNOPLUS")):
+                results, _, _ = service.check_rows(s, source, [(2, {"phone": phone})])
+                self.assertEqual((results[0]["status"], results[0]["duplicate"]),
+                                 ("duplicate", {"reason": "existing_sheet", "lead_key": key}))
 
     def test_sheet_row_with_a_key_taken_by_an_imported_row_is_skipped(self):
         # An import that kept the sheet's Plan ID: the sync must not overwrite or remove it
