@@ -65,28 +65,6 @@ def _like(term: str, text: str) -> bool:
     return term.casefold() in text.casefold()
 
 
-def _matches_vendor(lead: CrmSpinLead, v: dict) -> bool:
-    """Python version of the vendor filter in spin_leads.list_spin_leads."""
-    key = lead.lead_key
-    if key in v["manual_for"]:
-        return True
-    if key in v["manual_other"]:
-        return False
-    branch = "" if lead.branch_id is None else str(lead.branch_id)
-    if branch and branch in {str(b) for b in v["branch_ids"]}:
-        return True
-    if branch:
-        return False                     # area rules only apply to leads without a branch
-    pin = _named_value(lead, PINCODE_FIELD_NAMES) or ""
-    if not pin:
-        return False
-    if v["fallback"]:
-        return pin not in v["other_pins"] and not any(pin.startswith(p) for p in v["other_prefixes"])
-    if not (pin in v["pins"] or any(pin.startswith(p) for p in v["prefixes"])):
-        return False
-    return not (pin in v.get("before_pins", []) or any(pin.startswith(p) for p in v.get("before_prefixes", [])))
-
-
 def _matches(lead: CrmSpinLead, search: str, branch: str | None, flt: dict) -> bool:
     if search:
         texts = [_text(getattr(lead, c)) for c in _SEARCH_COLUMNS] + [_text(v) for v in _details(lead).values()]
@@ -108,8 +86,16 @@ def _matches(lead: CrmSpinLead, search: str, branch: str | None, flt: dict) -> b
         created = lead.created_at.replace(tzinfo=None) if lead.created_at else None
         if created is None or not (flt["created_from"] <= created < flt["created_to"]):
             return False
-    if flt.get("vendor") and not _matches_vendor(lead, flt["vendor"]):
+    if flt.get("origins") and lead.origin not in flt["origins"]:
         return False
+    if flt.get("event_from") is not None or flt.get("event_to") is not None:
+        event = str(_details(lead).get("occasionDate") or "")[:10]       # YYYY-MM-DD
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", event):
+            return False
+        if flt.get("event_from") is not None and event < flt["event_from"]:
+            return False
+        if flt.get("event_to") is not None and event > flt["event_to"]:
+            return False
     return True
 
 

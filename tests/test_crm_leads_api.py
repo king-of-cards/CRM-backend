@@ -108,6 +108,16 @@ def fake_list_spin_leads(_admin=None, page=1, page_size=50, search=None, sort=No
         rows = [r for r in rows if str(r["id"]) in {str(i) for i in filters["ids_in"]}]
     if filters and filters.get("created_from") is not None:      # created_at in [from, to), naive UTC
         rows = [r for r in rows if filters["created_from"] <= datetime.fromisoformat(r["created_at"]) < filters["created_to"]]
+    if filters and (filters.get("event_from") or filters.get("event_to")):    # occasion date, YYYY-MM-DD text
+        rows = [r for r in rows if re.match(r"^\d{4}-\d{2}-\d{2}", str(r.get("additional_details.occasionDate") or ""))
+                and (not filters.get("event_from") or r["additional_details.occasionDate"][:10] >= filters["event_from"])
+                and (not filters.get("event_to") or r["additional_details.occasionDate"][:10] <= filters["event_to"])]
+    if filters and filters.get("no_workflow"):
+        rows = []
+    if filters and filters.get("pincode"):                       # pincode starts with
+        rows = [r for r in rows if str(r.get("additional_details.pincode") or "").startswith(filters["pincode"])]
+    if branch not in (None, ""):
+        rows = [r for r in rows if str(r.get("branch_id")) == str(branch)]
     return {"columns": WORKFLOW_COLUMNS, "items": [dict(r) for r in rows[start:start + count]], "total": len(rows),
             "page": page, "page_size": page_size, "branch_column": "branch_id"}
 

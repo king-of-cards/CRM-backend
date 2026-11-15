@@ -224,5 +224,100 @@ class SheetListFiltersTest(ApiTestBase, unittest.TestCase):
             self.assertEqual(export.status_code, 400, (source, params))               # same rules on the export
 
 
+
+SPIN_ROWS = [
+    {"id": 701, "name": "Spin RJ", "phone": "9845700701", "created_at": "2026-11-10T04:30:00", "branch_id": 1,
+     "additional_details.pincode": "560018", "additional_details.occasionDate": "2026-11-25",
+     "additional_details.estimatedBudgetPerCard": "10-20"},
+    {"id": 702, "name": "Spin Phodeo", "phone": "9845700702", "created_at": "2026-10-05T04:30:00", "branch_id": None,
+     "additional_details.pincode": "560034", "additional_details.occasionDate": "2027-02-01",
+     "additional_details.estimatedBudgetPerCard": "20-30"},
+    {"id": 703, "name": "Spin nobody", "phone": "9845700703", "created_at": "2026-11-15T04:30:00", "branch_id": None,
+     "additional_details.pincode": None, "additional_details.occasionDate": None,
+     "additional_details.estimatedBudgetPerCard": None},
+]
+
+
+class SpinListFiltersTest(ApiTestBase, unittest.TestCase):
+    """Spin: workflow leads (701 RJ by branch, 702 Phodeo by pincode, 703 unassigned) and one
+    imported CRM lead at the Jayanagar branch (Phodeo), 12 Nov, occasion 5 Dec."""
+
+    def setUp(self):
+        super().setUp()
+        import tests.test_crm_leads_api as base
+        from app.models.crm_spin_lead import CrmSpinLead
+        self.patches_extra = [mock.patch.object(periods, "today_ist", lambda: TODAY),
+                              mock.patch.object(base, "WORKFLOW_ROWS", SPIN_ROWS)]
+        for p in self.patches_extra:
+            p.start()
+        with Session(self.engine) as s:
+            lead = CrmSpinLead(origin="imported", name="Imported spin", phone="9845700799", phone_e164="+919845700799",
+                               branch_id=4, created_at=utc(2026, 11, 12), updated_at=NOW,
+                               additional_details={"occasionDate": "2026-12-05", "pincode": "560011"})
+            s.add(lead)
+            s.add(LeadMeta(source="spin", lead_key="701", interest="interested", quoted_amount=30000, converted=True,
+                           updated_at=NOW))
+            s.commit()
+            s.refresh(lead)
+            self.crm = lead.lead_key
+
+    def tearDown(self):
+        for p in reversed(self.patches_extra):
+            p.stop()
+        super().tearDown()
+
+    def ids(self, who="admin", **params) -> set[str]:
+        with self.logged_in(who):
+            resp = self.client.get(f"{API}/spin-leads", params={"page_size": 200, **params})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        body = resp.json()
+        self.assertEqual(body["total"], len(body["items"]))
+        return {str(i["id"]) for i in body["items"]}
+
+    def test_spin_filters(self):
+        v, crm = self.vendor_ids, self.crm
+        c = lambda expected, **p: self.assertEqual(self.ids(**p), expected, p)  # noqa: E731
+        c({"701", "702", "703", crm})
+        c({"701"}, vendor_id=v["rj"])                                  # exact chip: Chamrajpet branch
+        c({"702", crm}, vendor_id=v["phodeo"])                         # pincode 560034; Jayanagar branch
+        c({"703"}, unassigned="true")
+        c({"701", "703"}, vendor_id=v["rj"], unassigned="true")
+        c({"701"}, interest="interested")
+        c({"702", "703", crm}, interest="not_set")
+        c({"702", "703", crm}, interest="none")                        # old alias
+        c({"701"}, converted="yes")
+        c({"701"}, quote="gt:20000")
+        c({"701"}, quoted_op="gt", quoted_value=20000)                 # old alias
+        c({"701"}, quoted_op="set")
+        c({"702", "703", crm}, quoted_op="unset")
+        c({"701", crm}, event_from="2026-11-01", event_to="2026-12-31")
+        c({"701", crm}, upcoming_days=30)                              # 25 Nov, 5 Dec
+        c({"701", "702", "703"}, origin="workflow")
+        c({crm}, origin="imported")
+        c(set(), origin="added")
+        c({"701", "703", crm}, date_from="2026-11-10", date_to="2026-11-16")
+        c({"701", "703"}, date_from="2026-11-10", date_to="2026-11-16", origin="workflow")
+        c({"702"}, pincode="56003")
+        c({crm}, branch="4")
+
+    def test_spin_vendor_scope_and_export(self):
+        self.assertEqual(self.ids("phodeo"), {"702", self.crm})
+        self.assertEqual(self.ids("phodeo", vendor_id=self.vendor_ids["rj"]), {"702", self.crm})      # ignored
+        self.assertEqual(self.ids("rj", unassigned="true"), {"701"})
+        from app.services import phones
+        for who, params in (("admin", {}), ("admin", {"interest": "not_set", "origin": "workflow"}),
+                            ("admin", {"upcoming_days": 30}), ("phodeo", {}), ("phodeo", {"date_from": "2026-11-01"})):
+            with self.logged_in(who):
+                listed = self.client.get(f"{API}/spin-leads", params={"page_size": 200, **params}).json()["items"]
+                resp = self.client.get(f"{API}/crm-leads/spin/export", params=params)
+            self.assertEqual(resp.status_code, 200, resp.text)
+            ws = load_workbook(io.BytesIO(resp.content)).active
+            header = [c.value for c in ws[1]]
+            exported = [r[header.index("Contact")] for r in ws.iter_rows(min_row=2, values_only=True)]
+            self.assertEqual(exported, [phones.normalize(i["phone"]).e164 for i in listed], (who, params))
+        resp = self.client.get(f"{API}/spin-leads", params={"origin": "sheet"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("doesn't exist for Spin leads", resp.json()["detail"])
+
 if __name__ == "__main__":
     unittest.main()

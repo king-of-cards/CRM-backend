@@ -16,9 +16,9 @@ import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import (
     Boolean, LargeBinary, MetaData, Numeric, String, Table, Text, literal_column,
     ColumnElement, and_, bindparam, case, cast, false, func, or_, select, true,
@@ -26,11 +26,11 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import NoSuchTableError, SQLAlchemyError
 
-from app.api.deps import DbSession, LeadViewer, OptionalPeriod
+from app.api.deps import DbSession, LeadViewer, common_filter_params
 from app.core import response_cache
 from app.core.config import settings
 from app.db.session import read_engine
-from app.services import access
+from app.services import access, lead_filters
 
 logger = logging.getLogger(__name__)
 
@@ -275,6 +275,7 @@ def _branch_field(table: Table, json_fields: dict) -> tuple[str | None, Any]:
 
 
 PINCODE_FIELD_NAMES = ("pincode", "pin", "zipcode", "postalcode")
+EVENT_FIELD_NAMES = ("occasiondate", "eventdate", "weddingdate")
 BUDGET_FIELD_NAMES = ("estimatedbudgetpercard", "servicebudget", "budget")
 
 
@@ -495,31 +496,20 @@ def list_spin_leads(
             conditions.append(false())
         else:
             conditions += [created_col >= flt["created_from"], created_col < flt["created_to"]]
-    if flt.get("vendor"):
-        v = flt["vendor"]
-        # 1) the lead's branch belongs to this vendor
-        parts = []
-        if branch_expr is not None and v["branch_ids"]:
-            parts.append(branch_expr.in_([str(b) for b in v["branch_ids"]]))
-        # 2) no branch: the vendor's pincode rules (fallback = no other vendor's pincode matches)
-        if pin_expr is not None:
-            no_branch = or_(branch_expr.is_(None), branch_expr == "") if branch_expr is not None else true()
-            if v["fallback"]:
-                others = [pin_expr.in_(v["other_pins"])] if v["other_pins"] else []
-                others += [pin_expr.like(f"{p}%") for p in v["other_prefixes"]]
-                pin_rule = and_(pin_expr.is_not(None), pin_expr != "", *(~o for o in others))
-            else:
-                matches = [pin_expr.in_(v["pins"])] if v["pins"] else []
-                matches += [pin_expr.like(f"{p}%") for p in v["prefixes"]]
-                # …but not pincodes a vendor checked earlier claims (RJ's 560018 isn't Phodeo's)
-                earlier = [pin_expr.in_(v["before_pins"])] if v.get("before_pins") else []
-                earlier += [pin_expr.like(f"{p}%") for p in v.get("before_prefixes", [])]
-                pin_rule = and_(or_(*matches), *(~e for e in earlier)) if matches else false()
-            parts.append(and_(no_branch, pin_rule))
-        automatic = or_(*parts) if parts else false()
-        if v["manual_other"]:
-            automatic = and_(pk_text.not_in(v["manual_other"]), automatic)
-        conditions.append(or_(pk_text.in_(v["manual_for"]), automatic) if v["manual_for"] else automatic)
+    if flt.get("event_from") is not None or flt.get("event_to") is not None:
+        # Event date: the occasion date (YYYY-MM-DD text in the JSON); other texts never match
+        _, event_expr = _named_field(table, json_fields, EVENT_FIELD_NAMES)
+        if event_expr is None:
+            conditions.append(false())
+        else:
+            day = func.substr(event_expr, 1, 10)
+            conditions.append(event_expr.op("~", is_comparison=True)(bindparam(None, r"^\d{4}-\d{2}-\d{2}", type_=Text)))
+            if flt.get("event_from") is not None:
+                conditions.append(day >= bindparam(None, flt["event_from"], type_=Text))
+            if flt.get("event_to") is not None:
+                conditions.append(day <= bindparam(None, flt["event_to"], type_=Text))
+    if flt.get("no_workflow"):
+        conditions.append(false())                     # origin asked for has no workflow leads
 
     query = (
         select(*(e.label(f"f{i}") for i, e in enumerate(select_exprs)))
@@ -571,86 +561,60 @@ def _spin_location_keys(columns: list[dict]) -> tuple[str | None, str | None]:
     return pin, city
 
 
-QUOTE_OPS = {
-    "eq": lambda a, b: a == b,
-    "ne": lambda a, b: a != b,
-    "gt": lambda a, b: a > b,
-    "gte": lambda a, b: a >= b,
-    "lt": lambda a, b: a < b,
-    "lte": lambda a, b: a <= b,
-}
+@dataclass
+class SpinFilters:
+    common: lead_filters.CommonFilters
+    branch: str | None = None
+    pincode: str | None = None
+    budget: str | None = None
 
 
-def _crm_filters(db, pincode, budget, vendor_id, interest, converted, quoted_op, quoted_value) -> dict:
-    """Turn the filter choices into conditions the read-only database understands.
-    CRM fields (interest, converted, quote, assigned) live in our crm_lead_meta table, so
-    they become lists of lead ids."""
-    from sqlmodel import select as sm_select
+def spin_filters(
+    common: Annotated[lead_filters.CommonFilters,
+                      Depends(common_filter_params(lead_filters.SPIN_ORIGINS, "Spin leads"))],
+    branch: str | None = Query(None, description="Only leads from this branch id"),
+    pincode: str | None = Query(None, max_length=10, description="Pincode starts with"),
+    budget: str | None = Query(None, max_length=50, description="Exact budget value, e.g. 10-20"),
+    # Old parameters, kept as aliases of quote until the frontend switches
+    quoted_op: Literal["eq", "ne", "gt", "gte", "lt", "lte", "set", "unset"] | None = Query(None, deprecated=True),
+    quoted_value: int | None = Query(None, ge=0, deprecated=True),
+) -> SpinFilters:
+    if common.quote is None and quoted_op:
+        if quoted_op in ("set", "unset"):
+            common.quote = ("has" if quoted_op == "set" else "none", None)
+        elif quoted_value is not None:
+            common.quote = (quoted_op, quoted_value)
+    pin = "".join(ch for ch in (pincode or "") if ch.isdigit()) or (pincode or "").strip() or None
+    return SpinFilters(common, branch or None, pin, budget or None)
 
-    from app.models.lead_meta import LeadMeta
-    from app.services import lead_crm
-    from app.services.branches import branches_by_id
 
+Filters = Annotated[SpinFilters, Depends(spin_filters)]
+
+
+def filters_for(db, viewer, f: SpinFilters) -> dict:
+    """What list_spin_leads (PostgreSQL) and crm_spin_leads.matching (CRM leads) apply. CRM filters
+    and visibility become lead ids, from the same assignment map as vendor visibility. Shared by
+    the list and the export."""
+    c = f.common
     flt: dict = {}
-    if pincode and pincode.strip():
-        flt["pincode"] = "".join(ch for ch in pincode if ch.isdigit()) or pincode.strip()
-    if budget:
-        flt["budget"] = budget
-
-    uses_meta = interest or converted or quoted_op or vendor_id is not None
-    if not uses_meta:
-        return flt
-    metas = list(db.exec(sm_select(LeadMeta).where(LeadMeta.source == "spin")))
-    include: set[str] | None = None
-    exclude: set[str] = set()
-
-    def narrow(keys: set[str]) -> None:
-        nonlocal include
-        include = keys if include is None else include & keys
-
-    if interest == "none":
-        exclude |= {m.lead_key for m in metas if m.interest}
-    elif interest:
-        narrow({m.lead_key for m in metas if m.interest == interest})
-
-    if converted == "yes":
-        narrow({m.lead_key for m in metas if m.converted})
-    elif converted == "no":
-        exclude |= {m.lead_key for m in metas if m.converted}
-
-    if quoted_op == "set":
-        narrow({m.lead_key for m in metas if m.quoted_amount is not None})
-    elif quoted_op == "unset":
-        exclude |= {m.lead_key for m in metas if m.quoted_amount is not None}
-    elif quoted_op and quoted_value is not None:
-        cmp = QUOTE_OPS[quoted_op]
-        narrow({m.lead_key for m in metas if m.quoted_amount is not None and cmp(m.quoted_amount, quoted_value)})
-
-    if include is not None:
-        flt["ids_in"] = sorted(include - exclude)
-    elif exclude:
-        flt["ids_not_in"] = sorted(exclude)
-
-    if vendor_id is not None:
-        vendors = lead_crm.active_vendors(db)
-        target = next((v for v in vendors if v.id == vendor_id), None)
-        if target is None:
-            flt["ids_in"] = []
-        else:
-            others = [v for v in vendors if v.id != vendor_id and not v.is_fallback]
-            before = [v for v in others if (v.priority, v.id) < (target.priority, target.id)]
-            flt["vendor"] = {
-                "manual_for": sorted(m.lead_key for m in metas if m.vendor_id == vendor_id),
-                "manual_other": sorted(m.lead_key for m in metas if m.vendor_id and m.vendor_id != vendor_id),
-                "branch_ids": [b["id"] for b in branches_by_id(db).values() if b["vendor_id"] == vendor_id],
-                "pins": list(target.pincodes or []),
-                "prefixes": list(target.pincode_prefixes or []),
-                "fallback": bool(target.is_fallback),
-                "other_pins": sorted({p for v in others for p in (v.pincodes or [])}),
-                "other_prefixes": sorted({p for v in others for p in (v.pincode_prefixes or [])}),
-                "before_pins": sorted({p for v in before for p in (v.pincodes or [])}),
-                "before_prefixes": sorted({p for v in before for p in (v.pincode_prefixes or [])}),
-            }
+    if f.pincode:
+        flt["pincode"] = f.pincode
+    if f.budget:
+        flt["budget"] = f.budget
+    keys = lead_filters.allowed_keys(db, "spin", viewer, c)
+    if keys is not None:
+        flt["ids_in"] = sorted(keys)
+    if c.period is not None:
+        # Arrived in the period (IST days): created_at is stored in UTC without a time zone
+        start, end = c.period.utc_bounds()
+        flt["created_from"], flt["created_to"] = start.replace(tzinfo=None), end.replace(tzinfo=None)
+    if c.event_from is not None:
+        flt["event_from"] = c.event_from.isoformat()
+    if c.event_to is not None:
+        flt["event_to"] = c.event_to.isoformat()
+    if c.origins:
+        flt["origins"] = list(c.origins)
+        flt["no_workflow"] = "workflow" not in c.origins
     return flt
 
 
@@ -667,41 +631,17 @@ def spin_leads_filter_options(viewer: LeadViewer, db: DbSession):
 def spin_leads_endpoint(
     viewer: LeadViewer,
     db: DbSession,
+    f: Filters,
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
-    search: str | None = Query(None, description="Case-insensitive match across visible text fields"),
     sort: str | None = Query(None, description="Column name or additional_details.<key>"),
     order: Literal["asc", "desc"] = Query("asc"),
-    branch: str | None = Query(None, description="Only leads from this branch id"),
-    pincode: str | None = Query(None, max_length=10, description="Pincode starts with"),
-    budget: str | None = Query(None, max_length=50, description="Exact budget value, e.g. 10-20"),
-    vendor_id: int | None = Query(None, description="Assigned to this vendor (CRM, branch or area rules)"),
-    interest: Literal["interested", "not_interested", "other", "follow_up", "none"] | None = None,
-    converted: Literal["yes", "no"] | None = None,
-    quoted_op: Literal["eq", "ne", "gt", "gte", "lt", "lte", "set", "unset"] | None = None,
-    quoted_value: int | None = Query(None, ge=0),
-    period: OptionalPeriod = None,
 ):
-    filters = viewer_filters(db, viewer, pincode, budget, vendor_id, interest, converted, quoted_op, quoted_value)
-    if period is not None:
-        # Only leads created in the period (date_from / date_to, IST days); no dates = no filter
-        start, end = period.utc_bounds()
-        filters["created_from"], filters["created_to"] = start.replace(tzinfo=None), end.replace(tzinfo=None)
-    data = merged_page(db, (page - 1) * page_size, page_size, search, sort, order, branch, filters)
+    """Filters: app/services/lead_filters.py (common) + branch, pincode, budget. Vendor users only
+    ever get their own leads (vendor_id / unassigned are ignored for them)."""
+    data = merged_page(db, (page - 1) * page_size, page_size, f.common.search, sort, order, f.branch,
+                       filters_for(db, viewer, f))
     return {**data, "page": page, "page_size": page_size}
-
-
-def viewer_filters(db, viewer, pincode, budget, vendor_id, interest, converted, quoted_op, quoted_value) -> dict:
-    """The list filters, limited to what the viewer may see. Vendor users only ever get their own
-    leads (workflow and CRM-added), whatever vendor_id they send."""
-    if viewer.is_admin:
-        return _crm_filters(db, pincode, budget, vendor_id, interest, converted, quoted_op, quoted_value)
-    filters = _crm_filters(db, pincode, budget, None, interest, converted, quoted_op, quoted_value)
-    visible = access.visible_keys(db, viewer, "spin")
-    if filters.get("ids_in") is not None:
-        visible &= {str(i) for i in filters["ids_in"]}
-    filters["ids_in"] = sorted(visible)
-    return filters
 
 
 def merged_page(db, start: int, length: int, search, sort, order, branch, filters: dict, use_cache: bool = True) -> dict:

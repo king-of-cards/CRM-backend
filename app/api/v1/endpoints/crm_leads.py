@@ -36,7 +36,6 @@ from app.models.wedding_plan import WeddingPlan
 from app.models.whatsapp_lead import WhatsAppLead
 from app.services.crm_leads import export as export_cols
 from app.services.crm_leads import service, tabular
-from app.services import access
 from app.services.crm_leads.fields import (
     FIELDS, SOURCE_LABELS, clean_row, from_model, header_map, norm_header, read_only_headers,
 )
@@ -238,25 +237,16 @@ def export_wedding_planner(
 def export_spin(
     viewer: LeadViewer,
     db: DbSession,
+    f: spin_ep.Filters,
     format: Format = "xlsx",
-    search: str | None = Query(None),
     sort: str | None = Query(None),
     order: Literal["asc", "desc"] = Query("asc"),
-    branch: str | None = Query(None),
-    pincode: str | None = Query(None, max_length=10),
-    budget: str | None = Query(None, max_length=50),
-    vendor_id: int | None = Query(None),
-    interest: Literal["interested", "not_interested", "other", "follow_up", "none"] | None = None,
-    converted: Literal["yes", "no"] | None = None,
-    quoted_op: Literal["eq", "ne", "gt", "gte", "lt", "lte", "set", "unset"] | None = None,
-    quoted_value: int | None = Query(None, ge=0),
 ):
-    """Exactly the requesting user's spin list (workflow and CRM leads, same filters and sort)."""
-    filters = spin_ep.viewer_filters(db, viewer, pincode, budget, vendor_id, interest, converted, quoted_op,
-                                     quoted_value)
-    total = spin_ep.merged_page(db, 0, 0, search, sort, order, branch, filters, use_cache=False)["total"]
+    """Exactly the requesting user's spin list: same filters (GET /spin-leads) and sort, workflow and CRM leads."""
+    filters = spin_ep.filters_for(db, viewer, f)
+    total = spin_ep.merged_page(db, 0, 0, f.common.search, sort, order, f.branch, filters, use_cache=False)["total"]
     _check_cap(total)
-    data = spin_ep.merged_page(db, 0, total, search, sort, order, branch, filters, use_cache=False)
+    data = spin_ep.merged_page(db, 0, total, f.common.search, sort, order, f.branch, filters, use_cache=False)
     branches = list(branches_by_id(db).values())       # + the built-in stores, as the screen shows them
     return _export("spin", format, export_cols.spin_columns(data["columns"], branches), data["items"])
 
