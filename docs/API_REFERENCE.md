@@ -133,7 +133,7 @@ Export columns that are shown but never read back are listed under each source a
 | `budget` | `150000`, `₹1,50,000`, `50k`, `1.5 lakh` | The text, plus the amount in rupees when readable |
 | `pincode` | 6 digits | Digits |
 | `branch` | Spin: a branch **name** as on the Branches page (in JSON also its numeric id) | Branch id |
-| `assigned` | `Phodeo` (manual), `Phodeo · auto` (automatic), `Unassigned` or empty | In `crm_lead_meta` (see below) |
+| `assigned` | `Phodeo` (manual), `Automatic` / `Auto` / `Phodeo · auto` (automatic), `Unassigned` or empty | In `crm_lead_meta` (see below) |
 | `location` | Spin: `Bangalore · 560011`; the 6-digit pincode in it is saved | The pincode |
 | `wedding_when` | Planner: a date (fills the first day), or a month or any other text (fills the wedding month) | First day or wedding month |
 
@@ -142,7 +142,7 @@ Export columns that are shown but never read back are listed under each source a
 | Value | Uploads | Single add |
 |---|---|---|
 | A vendor name, e.g. `Phodeo` | Manual assignment to that vendor | Same |
-| `Phodeo · auto` | Automatic (as if empty in a single add) | Automatic |
+| `Automatic` or `Auto` (any case), or `Phodeo · auto` | Automatic (as if empty in a single add) | Automatic |
 | `Unassigned` | Unassigned: no automatic assignment | Same |
 | empty | **Unassigned**: no automatic assignment | **Automatic** |
 | Unknown or inactive vendor | Row error `Unknown vendor 'X'` | `422` |
@@ -419,7 +419,7 @@ Checks an uploaded file and returns every row with its errors and duplicate stat
 |---|---|
 | `row` | Row number in the file. |
 | `status` | `duplicate` (the phone matches an existing lead or an earlier row of the file; skipped), else `error` (no usable phone, or field errors), else `ok` (will be imported). A duplicate stays a duplicate even if other fields have errors; those errors are still listed, for information. |
-| `values` | Every field of the source (abbreviated above). Values are cleaned, in upload formats: dates `20 Dec 2026`, date-times `14 Nov 2026, 10:30 am` (IST), numbers, booleans, branch as id, `assigned_to` as `Phodeo` / `Phodeo · auto` / `Unassigned`. A field that has an error keeps the text as written. Send these to `POST /import` unchanged, or after the user fixes them. |
+| `values` | Every field of the source (abbreviated above). Values are cleaned, in upload formats: dates `20 Dec 2026`, date-times `14 Nov 2026, 10:30 am` (IST), numbers, booleans, branch as id, `assigned_to` as `Phodeo` / `Phodeo · auto` / `Automatic` / `Unassigned`. A field that has an error keeps the text as written. Send these to `POST /import` unchanged, or after the user fixes them. |
 | `errors` | `[{field, message}]`, empty when the row is valid. |
 | `duplicate` | `null`, or a duplicate object. See [Duplicates](#4-duplicates). |
 | `warnings` | Non-blocking. `{"type": "other_source", "sources": [...]}` lists the other sources where the phone exists. |
@@ -512,7 +512,7 @@ no override for imports.
 ```
 
 Each saved row's "Assigned to" is stored in `crm_lead_meta`: a vendor name = manual,
-`<vendor> · auto` = automatic, **empty or `Unassigned` = unassigned** (no automatic assignment).
+`Automatic`, `Auto` or `<vendor> · auto` = automatic, **empty or `Unassigned` = unassigned** (no automatic assignment).
 
 Importing the same file twice is safe: the second time every row is reported as a duplicate.
 The same goes for an exported file: its rows show as already existing (`existing_sheet`,
@@ -633,8 +633,8 @@ Adds one lead (`origin = added`). Not for spin: `POST /crm-leads/spin` answers
   `branch` can be the branch name or its numeric id.
 - `allow_duplicate` (default `false`): save even if the phone already exists in this
   source. Available only on this endpoint.
-- `values.assigned_to` (optional): a vendor name = manual, `Unassigned` = unassigned, empty or
-  `<vendor> · auto` = automatic.
+- `values.assigned_to` (optional): a vendor name = manual, `Unassigned` = unassigned, empty,
+  `Automatic`, `Auto` or `<vendor> · auto` = automatic.
 - Admin only, like every `/crm-leads` endpoint except export.
 
 **Response `201`**

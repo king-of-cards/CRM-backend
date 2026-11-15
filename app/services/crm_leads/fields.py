@@ -48,8 +48,9 @@ class FieldDef:
 
 
 PHONE_HELP_IN = "Indian numbers can be written without +91; other countries need their country code."
-ASSIGNED_HELP = ('A vendor name (e.g. Phodeo) assigns the lead to that vendor. "Phodeo · auto" leaves it to '
-                 "the automatic rules. Empty or Unassigned: the lead stays unassigned until an admin assigns it.")
+ASSIGNED_HELP = ('A vendor name (e.g. Phodeo) assigns the lead to that vendor. "Automatic" (or "Auto", or '
+                 '"Phodeo · auto") leaves it to the automatic rules. Empty or Unassigned: the lead stays '
+                 "unassigned until an admin assigns it.")
 DATE_HELP = "13 Dec 2026 or 13-12-2026."
 DATETIME_HELP = "14 Nov 2026, 10:30 am or 14-11-2026 10:30 (India time); the time is optional. Empty = now."
 ASSIGNED = FieldDef("assigned_to", "Assigned to", "assigned", aliases=("assignedto", "vendor"), help=ASSIGNED_HELP)
@@ -347,6 +348,8 @@ def parse_assigned(text: str, ctx: RowContext) -> tuple[tuple[str, int | None], 
     """-> ((mode, vendor id), canonical text)."""
     if norm_header(text) in ("", "unassigned", "none"):
         return ("none", None), "Unassigned"
+    if norm_header(text) in ("automatic", "auto"):
+        return ("auto", None), "Automatic"          # same as "<vendor> · auto": the automatic rules decide
     auto = _AUTO_RE.match(text)
     name, mode = (auto.group(1), "auto") if auto and auto.group(1).strip() else (text, "manual")
     vendor = ctx.vendors_by_name.get(norm_header(name))

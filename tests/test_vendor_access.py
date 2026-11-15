@@ -338,6 +338,38 @@ class VendorAccessTest(ApiTestBase, unittest.TestCase):
         with self.logged_in("phodeo"):
             self.assertNotIn(wed_key, self.keys(self.list_items("wedding")))
 
+    def test_upload_automatic_assignment_words(self):
+        """"Automatic" / "Auto" (any case) in Assigned to = automatic, like "<vendor> · auto"."""
+        upload = xlsx_file([
+            ["Lead", "Contact", "Branch", "Assigned to"],
+            ["Auto 1", "9845310001", "Jayanagar", "Automatic"],
+            ["Auto 2", "9845310002", "Jayanagar", "auto"],
+            ["Auto 3", "9845310003", "Jayanagar", "AUTO"],
+            ["Auto 4", "9845310004", "Jayanagar", "Phodeo · auto"],
+        ])
+        preview = self.client.post(f"{API}/crm-leads/spin/import/preview", files={"file": ("a.xlsx", upload, XLSX)}).json()
+        self.assertEqual([r["status"] for r in preview["rows"]], ["ok"] * 4)
+        self.assertEqual([r["values"]["assigned_to"] for r in preview["rows"]],
+                         ["Automatic", "Automatic", "Automatic", "Phodeo · auto"])
+        result = self.client.post(f"{API}/crm-leads/spin/import", json={
+            "rows": [{"row": r["row"], "values": r["values"]} for r in preview["rows"]]}).json()
+        keys = [r["lead_key"] for r in result["rows"]]
+        crm = {i["id"]: i["crm"] for i in self.list_items("spin")}
+        for key in keys:                                   # the Jayanagar branch's vendor, automatically
+            self.assertEqual((crm[key]["vendor"]["name"], crm[key]["vendor_source"]), ("Phodeo", "branch"))
+        with self.logged_in("phodeo"):
+            self.assertTrue(set(keys) <= self.keys(self.list_items("spin")))
+        with Session(self.engine) as s:                   # automatic: nothing stored in crm_lead_meta
+            self.assertEqual(s.exec(select(LeadMeta).where(LeadMeta.lead_key.in_(keys))).all(), [])
+
+        # A sheet source too: Bangalore -> Phodeo by the area rules
+        upload = xlsx_file([["Lead", "Contact", "City", "Assigned to"], ["Wed auto", "9845310010", "Bangalore", "Auto"]])
+        rows = self.client.post(f"{API}/crm-leads/wedding/import/preview", files={"file": ("w.xlsx", upload, XLSX)}).json()["rows"]
+        key = self.client.post(f"{API}/crm-leads/wedding/import", json={
+            "rows": [{"row": r["row"], "values": r["values"]} for r in rows]}).json()["rows"][0]["lead_key"]
+        item = next(i for i in self.list_items("wedding") if i["lead_key"] == key)
+        self.assertEqual(assigned_label(item["crm"]), "Phodeo · auto")
+
     def test_upload_date_formats(self):
         """Event dates behave like the sheet sync (full date -> date, anything else kept as text,
         no error); Submitted/Created stay strict (a date, optional time)."""
