@@ -2,7 +2,7 @@ from typing import Annotated
 from urllib.parse import urlsplit
 
 import jwt
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, HTTPException, Query, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlmodel import Session
 
@@ -11,7 +11,7 @@ from app.core.security import decode_access_token
 from app.crud import user as crud
 from app.db.session import get_db
 from app.models.user import Role, User
-from app.services import access
+from app.services import access, periods
 from app.services.access import Viewer
 
 # tokenUrl makes the "Authorize" button in /docs work
@@ -60,6 +60,23 @@ def get_viewer(user: CurrentUser, db: DbSession) -> Viewer:
 
 # Endpoints that admins and vendor users may call; results are limited to what the viewer may see
 LeadViewer = Annotated[Viewer, Depends(get_viewer)]
+
+
+def _period(required: bool):
+    def dependency(
+        date_from: str | None = Query(None, description="First day, YYYY-MM-DD (India time), included"),
+        date_to: str | None = Query(None, description="Last day, YYYY-MM-DD (India time), included"),
+    ):
+        try:
+            return periods.parse_period(date_from, date_to, required=required)
+        except periods.PeriodError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    return dependency
+
+
+# Dashboard: the period asked for, or the last 30 days. Lists: a period only if dates are given.
+DashboardPeriod = Annotated[periods.Period, Depends(_period(required=True))]
+OptionalPeriod = Annotated[periods.Period | None, Depends(_period(required=False))]
 
 
 def _origin_of(url: str | None) -> str | None:
