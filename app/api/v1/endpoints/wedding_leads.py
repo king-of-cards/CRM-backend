@@ -14,7 +14,7 @@ from sqlmodel import col, select
 
 from app.api.deps import DbSession, LeadViewer, common_filter_params
 from app.models.wedding_lead import WeddingLead
-from app.services import lead_crm, lead_filters
+from app.services import access, lead_crm, lead_filters
 
 router = APIRouter(prefix="/wedding-leads", tags=["wedding-leads"])
 
@@ -193,4 +193,26 @@ def wedding_lead_stats(viewer: LeadViewer, db: DbSession, f: Filters):
         "repeats": count(WeddingLead.is_repeat == True),  # noqa: E712
         "occasions": grouped(WeddingLead.occasion),
         "shared_with": grouped(WeddingLead.shared_with),
+    }
+
+
+@router.get("/filter-options")
+def wedding_filter_options(viewer: LeadViewer, db: DbSession):
+    """Values for the filter dropdowns, with counts over the leads the viewer may see (vendor users:
+    their own): occasions, cities (cleaned: "Shamirpet, Hyderabad" -> "Hyderabad", for the contains
+    filter), leads shared, origins, interests, and vendors (admins only)."""
+    from app.api.v1.endpoints.analytics import _clean_place
+
+    visible = access.visible_keys(db, viewer, "wedding")
+    query = select(WeddingLead.sheet_key, WeddingLead.occasion, WeddingLead.city, WeddingLead.shared_with,
+                   WeddingLead.origin).where(WeddingLead.is_deleted == False)  # noqa: E712
+    rows = [r for r in db.exec(query) if visible is None or r[0] in visible]
+    return {
+        "occasions": lead_filters.counted((r[1] or "").strip() for r in rows),
+        "cities": lead_filters.counted(_clean_place(r[2]) for r in rows),
+        "shared_with": lead_filters.counted(r[3] for r in rows) + [
+            {"value": NOT_SHARED, "count": sum(1 for r in rows if not r[3])}],
+        "origins": [{"value": o, "count": sum(1 for r in rows if r[4] == o)} for o in lead_filters.SHEET_ORIGINS],
+        "interests": lead_filters.interest_options(db, "wedding", {r[0] for r in rows}),
+        "vendors": lead_filters.vendor_options(db, viewer),
     }

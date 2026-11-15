@@ -14,7 +14,7 @@ from sqlmodel import col, select
 
 from app.api.deps import DbSession, LeadViewer, common_filter_params
 from app.models.wedding_plan import WeddingPlan
-from app.services import lead_crm, lead_filters
+from app.services import access, lead_crm, lead_filters
 
 router = APIRouter(prefix="/wedding-plans", tags=["wedding-plans"])
 
@@ -224,4 +224,26 @@ def wedding_plan_stats(viewer: LeadViewer, db: DbSession, f: Filters):
         "total_budget": int(total_budget),
         "shared_with": grouped(WeddingPlan.shared_with),
         "last_steps": grouped(WeddingPlan.last_step),
+    }
+
+
+@router.get("/filter-options")
+def wedding_plan_filter_options(viewer: LeadViewer, db: DbSession):
+    """Values for the filter dropdowns, with counts over the plans the viewer may see (vendor users:
+    their own): cities (cleaned, for the contains filter), last steps, leads shared, origins,
+    interests, and vendors (admins only)."""
+    from app.api.v1.endpoints.analytics import _clean_place
+
+    visible = access.visible_keys(db, viewer, "wedding_planner")
+    query = select(WeddingPlan.plan_id, WeddingPlan.city, WeddingPlan.last_step, WeddingPlan.shared_with,
+                   WeddingPlan.origin).where(WeddingPlan.is_deleted == False)  # noqa: E712
+    rows = [r for r in db.exec(query) if visible is None or r[0] in visible]
+    return {
+        "cities": lead_filters.counted(_clean_place(r[1]) for r in rows),
+        "last_steps": lead_filters.counted(r[2] for r in rows),
+        "shared_with": lead_filters.counted(r[3] for r in rows) + [
+            {"value": NOT_SHARED, "count": sum(1 for r in rows if not r[3])}],
+        "origins": [{"value": o, "count": sum(1 for r in rows if r[4] == o)} for o in lead_filters.SHEET_ORIGINS],
+        "interests": lead_filters.interest_options(db, "wedding_planner", {r[0] for r in rows}),
+        "vendors": lead_filters.vendor_options(db, viewer),
     }

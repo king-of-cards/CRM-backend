@@ -296,7 +296,8 @@ def spin_filter_options(ids: set[str] | None = None) -> dict:
     """Values for the filter dropdowns: the budget ranges and pincodes used on spin leads, with counts.
     ids: only count these workflow lead ids (a vendor's own leads); None = all."""
     if read_engine is None:
-        return {"budgets": [], "pincodes": [], "has_branch": False, "has_pincode": False, "has_budget": False}
+        return {"budgets": [], "pincodes": [], "has_branch": False, "has_pincode": False, "has_budget": False,
+                "workflow_branches": {}, "workflow_total": 0}
     try:
         table = _get_table()
         base = _required_filter(table)
@@ -330,16 +331,26 @@ def spin_filter_options(ids: set[str] | None = None) -> dict:
             for p, n in rows:
                 merged[p] = merged.get(p, 0) + n
             pincodes = [{"value": p, "count": n} for p, n in sorted(merged.items(), key=lambda kv: (-kv[1], kv[0]))][:1000]
+        branch_counts: dict[str, int] = {}
+        if branch_expr is not None:
+            query = select(branch_expr.label("b"), func.count()).select_from(table).where(*base).group_by(literal_column("1"))
+            with read_engine.connect() as conn:
+                branch_counts = {str(b): n for b, n in conn.execute(query).all() if b not in (None, "")}
+        with read_engine.connect() as conn:
+            workflow_total = conn.execute(select(func.count()).select_from(table).where(*base)).scalar_one()
         return {
             "budgets": budgets,
             "pincodes": pincodes,
             "has_branch": branch_expr is not None,
             "has_pincode": pin_expr is not None,
             "has_budget": budget_expr is not None,
+            "workflow_branches": branch_counts,           # branch id -> workflow leads (merged with CRM leads below)
+            "workflow_total": workflow_total,
         }
     except Exception:  # noqa: BLE001
         logger.warning("spin-leads: filter options unavailable", exc_info=True)
-        return {"budgets": [], "pincodes": [], "has_branch": False, "has_pincode": False, "has_budget": False}
+        return {"budgets": [], "pincodes": [], "has_branch": False, "has_pincode": False, "has_budget": False,
+                "workflow_branches": {}, "workflow_total": 0}
 
 
 def spin_branch_counts() -> dict[str, int]:
@@ -620,11 +631,43 @@ def filters_for(db, viewer, f: SpinFilters) -> dict:
 
 @router.get("/filter-options")
 def spin_leads_filter_options(viewer: LeadViewer, db: DbSession):
-    """Budget values (with counts) for the filter dropdown, and which filters this data supports.
-    Vendor users get the values of their own leads only."""
+    """Values for the filter dropdowns, with counts over the leads the viewer may see (vendor
+    users: their own): budgets and pincodes (workflow leads), branches, origins, interests, and
+    vendors (admins only). Also which filters this data supports (has_*)."""
+    from app.services import crm_spin_leads
+    from app.services.branches import branches_by_id
+    from app.services.stores import store_for
+
+    visible = access.visible_keys(db, viewer, "spin")
     if viewer.is_admin:
-        return response_cache.get(("spin", "filter-options"), spin_filter_options, fresh=600, stale=3600)
-    return spin_filter_options(access.visible_keys(db, viewer, "spin"))
+        base = response_cache.get(("spin", "filter-options"), spin_filter_options, fresh=600, stale=3600)
+    else:
+        base = spin_filter_options({k for k in visible if not k.startswith("crm-")})
+    crm = [lead for lead in crm_spin_leads.active(db) if visible is None or lead.lead_key in visible]
+
+    branch_counts = dict(base.get("workflow_branches", {}))
+    for lead in crm:
+        if lead.branch_id is not None:
+            branch_counts[str(lead.branch_id)] = branch_counts.get(str(lead.branch_id), 0) + 1
+    known = list(branches_by_id(db).values())
+    branches = []
+    for branch_id, n in branch_counts.items():
+        store = store_for(branch_id, known)
+        branches.append({"id": branch_id, "name": store["name"] if store else None, "count": n})
+    branches.sort(key=lambda b: (-b["count"], str(b["name"] or b["id"]).lower()))
+
+    origins = [{"value": "workflow", "count": base.get("workflow_total", 0)}] + [
+        {"value": o, "count": sum(1 for lead in crm if lead.origin == o)} for o in ("added", "imported")
+    ]
+    keys = visible if visible is not None else set(access.assignments(db, "spin"))
+    out = {k: v for k, v in base.items() if not k.startswith("workflow_")}
+    return {
+        **out,
+        "branches": branches,
+        "origins": origins,
+        "interests": lead_filters.interest_options(db, "spin", keys),
+        "vendors": lead_filters.vendor_options(db, viewer),
+    }
 
 
 @router.get("")

@@ -201,6 +201,40 @@ class SheetListFiltersTest(ApiTestBase, unittest.TestCase):
                             self.assertEqual(exported, [i["phone_display"] for i in listed["items"]])   # same rows, same order
                             self.assertEqual(stats["total"], listed["total"])
 
+    # ── Filter options ──
+    def test_filter_options_are_scoped_to_the_viewer(self):
+        def options(url, who="admin"):
+            with self.logged_in(who):
+                resp = self.client.get(f"{API}{url}/filter-options")
+            self.assertEqual(resp.status_code, 200, resp.text)
+            return resp.json()
+
+        def as_map(items):
+            return {i["value"]: i["count"] for i in items}
+
+        wa = options("/whatsapp-leads")
+        self.assertEqual(as_map(wa["countries"]), {"UAE": 2, "United Kingdom": 1})
+        self.assertEqual(as_map(wa["origins"]), {"sheet": 2, "added": 1, "imported": 0})
+        self.assertEqual(as_map(wa["interests"])["interested"], 1)
+        self.assertEqual(as_map(wa["interests"])["not_set"], 2)
+        self.assertEqual([v["name"] for v in wa["vendors"]], ["RJ", "Phodeo", "OHP"])
+        self.assertEqual(options("/whatsapp-leads", "phodeo"),
+                         {"countries": [], "origins": [{"value": o, "count": 0} for o in ("sheet", "added", "imported")],
+                          "interests": [{"value": i, "count": 0} for i in
+                                        ("interested", "not_interested", "other", "follow_up", "not_set")],
+                          "vendors": []})
+        wd = options("/wedding-leads")
+        self.assertEqual(as_map(wd["cities"]), {"Hyderabad": 1, "Bangalore": 1, "Mysore": 1})    # cleaned
+        self.assertEqual(as_map(wd["occasions"]), {"Wedding": 1, "Birthday": 1})
+        self.assertEqual(as_map(wd["shared_with"]), {"RJ": 1, "__none__": 2})
+        rj = options("/wedding-leads", "rj")
+        self.assertEqual(as_map(rj["cities"]), {"Bangalore": 1})
+        self.assertEqual(rj["vendors"], [])
+        wp = options("/wedding-plans", "phodeo")
+        self.assertEqual(as_map(wp["cities"]), {"Udaipur": 1, "Hyderabad": 1})
+        self.assertEqual(as_map(wp["last_steps"]), {"pdf": 1})
+        self.assertEqual(as_map(wp["origins"]), {"sheet": 1, "added": 1, "imported": 0})
+
     # ── Validation ──
     def test_validation_errors(self):
         cases = [
@@ -318,6 +352,25 @@ class SpinListFiltersTest(ApiTestBase, unittest.TestCase):
         resp = self.client.get(f"{API}/spin-leads", params={"origin": "sheet"})
         self.assertEqual(resp.status_code, 400)
         self.assertIn("doesn't exist for Spin leads", resp.json()["detail"])
+
+    def test_spin_filter_options(self):
+        def options(who="admin"):
+            with self.logged_in(who):
+                resp = self.client.get(f"{API}/spin-leads/filter-options")
+            self.assertEqual(resp.status_code, 200, resp.text)
+            return resp.json()
+
+        admin = options()
+        # Without a real workflow database only the CRM part is counted here (the real-data check covers PostgreSQL)
+        self.assertEqual({b["name"]: b["count"] for b in admin["branches"]}, {"Jayanagar": 1})
+        self.assertEqual({o["value"]: o["count"] for o in admin["origins"]}, {"workflow": 0, "added": 0, "imported": 1})
+        self.assertEqual({i["value"]: i["count"] for i in admin["interests"]}["interested"], 1)      # 701
+        self.assertEqual({i["value"]: i["count"] for i in admin["interests"]}["not_set"], 3)
+        self.assertEqual(len(admin["vendors"]), 3)
+        phodeo = options("phodeo")
+        self.assertEqual({i["value"]: i["count"] for i in phodeo["interests"]}["not_set"], 2)        # 702 + CRM lead
+        self.assertEqual(phodeo["vendors"], [])
+        self.assertEqual(options("rj")["branches"], [])                                             # 701's branch is a workflow count
 
 if __name__ == "__main__":
     unittest.main()
