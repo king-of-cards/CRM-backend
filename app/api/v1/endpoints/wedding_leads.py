@@ -11,9 +11,9 @@ from fastapi import APIRouter, Query
 from sqlalchemy import and_, false, func, or_
 from sqlmodel import col, select
 
-from app.api.deps import DbSession, LeadViewer
+from app.api.deps import DbSession, LeadViewer, OptionalPeriod
 from app.models.wedding_lead import WeddingLead
-from app.services import access, lead_crm
+from app.services import access, lead_crm, periods
 
 router = APIRouter(prefix="/wedding-leads", tags=["wedding-leads"])
 
@@ -72,8 +72,9 @@ def list_wedding_leads(
     hide_repeats: bool = False,
     sort: Literal["submitted_at", "event_date", "budget_amount", "name", "city"] = "submitted_at",
     order: Literal["asc", "desc"] = "desc",
+    period: OptionalPeriod = None,
 ):
-    filters = build_filters(search, occasion, shared_with, hide_repeats, access.visible_keys(db, viewer, "wedding"))
+    filters = build_filters(search, occasion, shared_with, hide_repeats, access.visible_keys(db, viewer, "wedding"), period)
     total = db.exec(select(func.count()).select_from(WeddingLead).where(*filters)).one()
     rows = db.exec(
         select(WeddingLead).where(*filters).order_by(*ordering(sort, order))
@@ -83,10 +84,15 @@ def list_wedding_leads(
 
 
 # ── Shared with the export (GET /crm-leads/wedding/export) ──────────────
-def build_filters(search: str | None, occasion: str | None, shared_with: str | None, hide_repeats: bool, keys: set[str] | None = None) -> list:
+def build_filters(search: str | None, occasion: str | None, shared_with: str | None, hide_repeats: bool, keys: set[str] | None = None,
+                  period: periods.Period | None = None) -> list:
     """Archived and removed rows (is_deleted) are never listed or exported.
     keys: the lead keys the viewer may see (None = all, for admins)."""
     filters = [WeddingLead.is_deleted == False]  # noqa: E712
+    if period is not None:
+        # Arrived in the period (IST days): submitted_at is stored in UTC
+        start, end = period.utc_bounds()
+        filters += [WeddingLead.submitted_at >= start, WeddingLead.submitted_at < end]
     if keys is not None:
         filters.append(col(WeddingLead.sheet_key).in_(keys) if keys else false())
     if occasion:

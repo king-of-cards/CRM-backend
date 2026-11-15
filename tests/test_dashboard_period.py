@@ -172,6 +172,34 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
         admin = self.overview(date_from="2026-11-01", date_to="2026-11-16")
         self.assertEqual(admin["new_in_period"]["wedding"], 2)
 
+    # ── The lists the Dashboard also calls: optional period, no filter by default ──
+    def list_keys(self, url, key="lead_key", **params) -> set[str]:
+        resp = self.client.get(f"{API}{url}", params={"page_size": 200, **params})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        return {str(i[key]) for i in resp.json()["items"]}
+
+    def test_list_endpoints_take_an_optional_period(self):
+        # No dates: no filter (the list pages are unchanged)
+        self.assertEqual(self.list_keys("/whatsapp-leads"), {"WA_1530", "WA_1600", "WA_NODATE"})
+        # IST day boundaries on the arrival column
+        self.assertEqual(self.list_keys("/whatsapp-leads", date_from="2026-11-15", date_to="2026-11-15"), {"WA_1530"})
+        self.assertEqual(self.list_keys("/whatsapp-leads", date_from="2026-11-16"), {"WA_1600"})
+        self.assertEqual(self.list_keys("/wedding-leads", date_from="2026-11-01", date_to="2026-11-16"), {"WD_10", "WD_05"})
+        self.assertEqual(self.list_keys("/wedding-plans", key="plan_id", date_from="2026-11-14", date_to="2026-11-14"),
+                         {"WP_14"})                                       # updated_in_sheet_at
+        self.assertEqual(self.list_keys("/wedding-plans", key="plan_id", date_from="2026-01-01", date_to="2026-01-01"),
+                         set())                                           # not first_seen_at
+        # Spin: workflow created_at (PostgreSQL) and CRM-added leads, together
+        everything = self.list_keys("/spin-leads", key="id")
+        self.assertEqual(len(everything), 2)                             # workflow 101 + the added lead
+        added = next(k for k in everything if k.startswith("crm-"))
+        self.assertEqual(self.list_keys("/spin-leads", key="id", date_from="2026-11-01", date_to="2026-11-01"), {"101"})
+        self.assertEqual(self.list_keys("/spin-leads", key="id", date_from="2026-11-12", date_to="2026-11-12"), {added})
+        # The same validation as the dashboard
+        resp = self.client.get(f"{API}/wedding-leads", params={"date_from": "2026-11-17"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("can't be in the future", resp.json()["detail"])
+
     def test_validation_errors(self):
         cases = {
             ("2026-11-16", "2026-11-01"): "date_from must be on or before date_to",

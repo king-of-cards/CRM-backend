@@ -26,7 +26,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import NoSuchTableError, SQLAlchemyError
 
-from app.api.deps import DbSession, LeadViewer
+from app.api.deps import DbSession, LeadViewer, OptionalPeriod
 from app.core import response_cache
 from app.core.config import settings
 from app.db.session import read_engine
@@ -488,6 +488,13 @@ def list_spin_leads(
         conditions.append(pk_text.in_(ids) if ids else false())
     if flt.get("ids_not_in"):
         conditions.append(pk_text.not_in([str(i) for i in flt["ids_not_in"]]))
+    if flt.get("created_from") is not None:
+        # Arrival date in a period: created_at is stored in UTC without a time zone
+        created_col = next((table.c[c] for c in ("created_at", "createdAt", "created") if c in table.c), None)
+        if created_col is None:
+            conditions.append(false())
+        else:
+            conditions += [created_col >= flt["created_from"], created_col < flt["created_to"]]
     if flt.get("vendor"):
         v = flt["vendor"]
         # 1) the lead's branch belongs to this vendor
@@ -673,8 +680,13 @@ def spin_leads_endpoint(
     converted: Literal["yes", "no"] | None = None,
     quoted_op: Literal["eq", "ne", "gt", "gte", "lt", "lte", "set", "unset"] | None = None,
     quoted_value: int | None = Query(None, ge=0),
+    period: OptionalPeriod = None,
 ):
     filters = viewer_filters(db, viewer, pincode, budget, vendor_id, interest, converted, quoted_op, quoted_value)
+    if period is not None:
+        # Only leads created in the period (date_from / date_to, IST days); no dates = no filter
+        start, end = period.utc_bounds()
+        filters["created_from"], filters["created_to"] = start.replace(tzinfo=None), end.replace(tzinfo=None)
     data = merged_page(db, (page - 1) * page_size, page_size, search, sort, order, branch, filters)
     return {**data, "page": page, "page_size": page_size}
 

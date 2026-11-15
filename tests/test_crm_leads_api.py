@@ -106,6 +106,8 @@ def fake_list_spin_leads(_admin=None, page=1, page_size=50, search=None, sort=No
     rows = WORKFLOW_ROWS
     if filters and filters.get("ids_in") is not None:
         rows = [r for r in rows if str(r["id"]) in {str(i) for i in filters["ids_in"]}]
+    if filters and filters.get("created_from") is not None:      # created_at in [from, to), naive UTC
+        rows = [r for r in rows if filters["created_from"] <= datetime.fromisoformat(r["created_at"]) < filters["created_to"]]
     return {"columns": WORKFLOW_COLUMNS, "items": [dict(r) for r in rows[start:start + count]], "total": len(rows),
             "page": page, "page_size": page_size, "branch_column": "branch_id"}
 

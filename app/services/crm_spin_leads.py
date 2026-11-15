@@ -104,6 +104,10 @@ def _matches(lead: CrmSpinLead, search: str, branch: str | None, flt: dict) -> b
         return False
     if flt.get("ids_not_in") and lead.lead_key in {str(i) for i in flt["ids_not_in"]}:
         return False
+    if flt.get("created_from") is not None:          # arrival in a period (naive UTC bounds)
+        created = lead.created_at.replace(tzinfo=None) if lead.created_at else None
+        if created is None or not (flt["created_from"] <= created < flt["created_to"]):
+            return False
     if flt.get("vendor") and not _matches_vendor(lead, flt["vendor"]):
         return False
     return True

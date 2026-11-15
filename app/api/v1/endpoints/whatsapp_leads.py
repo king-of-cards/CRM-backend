@@ -10,9 +10,9 @@ from fastapi import APIRouter, Query
 from sqlalchemy import and_, false, func, or_
 from sqlmodel import col, select
 
-from app.api.deps import DbSession, LeadViewer
+from app.api.deps import DbSession, LeadViewer, OptionalPeriod
 from app.models.whatsapp_lead import WhatsAppLead
-from app.services import access, lead_crm
+from app.services import access, lead_crm, periods
 
 router = APIRouter(prefix="/whatsapp-leads", tags=["whatsapp-leads"])
 
@@ -60,8 +60,9 @@ def list_whatsapp_leads(
     country: str | None = Query(None, max_length=100),
     sort: Literal["submitted_at", "event_date", "country", "phone", "first_seen_at"] = "submitted_at",
     order: Literal["asc", "desc"] = "desc",
+    period: OptionalPeriod = None,
 ):
-    filters = build_filters(search, country, access.visible_keys(db, viewer, "whatsapp"))
+    filters = build_filters(search, country, access.visible_keys(db, viewer, "whatsapp"), period)
     total = db.exec(select(func.count()).select_from(WhatsAppLead).where(*filters)).one()
     rows = db.exec(
         select(WhatsAppLead).where(*filters).order_by(*ordering(sort, order))
@@ -71,10 +72,15 @@ def list_whatsapp_leads(
 
 
 # ── Shared with the export (GET /crm-leads/whatsapp/export) ─────────────
-def build_filters(search: str | None, country: str | None, keys: set[str] | None = None) -> list:
+def build_filters(search: str | None, country: str | None, keys: set[str] | None = None,
+                  period: periods.Period | None = None) -> list:
     """Archived and removed rows (is_deleted) are never listed or exported.
     keys: the lead keys the viewer may see (None = all, for admins)."""
     filters = [WhatsAppLead.is_deleted == False]  # noqa: E712
+    if period is not None:
+        # Arrived in the period (IST days): submitted_at is stored in UTC
+        start, end = period.utc_bounds()
+        filters += [WhatsAppLead.submitted_at >= start, WhatsAppLead.submitted_at < end]
     if keys is not None:
         filters.append(col(WhatsAppLead.sheet_key).in_(keys) if keys else false())
     if country:

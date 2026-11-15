@@ -11,9 +11,9 @@ from fastapi import APIRouter, Query
 from sqlalchemy import and_, false, func, or_
 from sqlmodel import col, select
 
-from app.api.deps import DbSession, LeadViewer
+from app.api.deps import DbSession, LeadViewer, OptionalPeriod
 from app.models.wedding_plan import WeddingPlan
-from app.services import access, lead_crm
+from app.services import access, lead_crm, periods
 
 router = APIRouter(prefix="/wedding-plans", tags=["wedding-plans"])
 
@@ -90,8 +90,9 @@ def list_wedding_plans(
     last_step: str | None = Query(None, max_length=50),
     sort: Literal["updated", "wedding_date", "total_budget", "total_guests", "plan_estimate", "name"] = "updated",
     order: Literal["asc", "desc"] = "desc",
+    period: OptionalPeriod = None,
 ):
-    filters = build_filters(search, shared_with, fits_budget, last_step, access.visible_keys(db, viewer, "wedding_planner"))
+    filters = build_filters(search, shared_with, fits_budget, last_step, access.visible_keys(db, viewer, "wedding_planner"), period)
     total = db.exec(select(func.count()).select_from(WeddingPlan).where(*filters)).one()
     rows = db.exec(
         select(WeddingPlan).where(*filters).order_by(*ordering(sort, order))
@@ -101,10 +102,15 @@ def list_wedding_plans(
 
 
 # ── Shared with the export (GET /crm-leads/wedding_planner/export) ──────
-def build_filters(search: str | None, shared_with: str | None, fits_budget: bool | None, last_step: str | None, keys: set[str] | None = None) -> list:
+def build_filters(search: str | None, shared_with: str | None, fits_budget: bool | None, last_step: str | None, keys: set[str] | None = None,
+                  period: periods.Period | None = None) -> list:
     """Archived and removed rows (is_deleted) are never listed or exported.
     keys: the lead keys the viewer may see (None = all, for admins)."""
     filters = [WeddingPlan.is_deleted == False]  # noqa: E712
+    if period is not None:
+        # Arrived in the period (IST days): updated_in_sheet_at is stored in UTC
+        start, end = period.utc_bounds()
+        filters += [WeddingPlan.updated_in_sheet_at >= start, WeddingPlan.updated_in_sheet_at < end]
     if keys is not None:
         filters.append(col(WeddingPlan.plan_id).in_(keys) if keys else false())
     if shared_with == NOT_SHARED:
