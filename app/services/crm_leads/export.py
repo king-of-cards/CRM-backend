@@ -18,33 +18,12 @@ from typing import Any
 
 from app.services import phones
 from app.services.lead_crm import assigned_label
+from app.services.stores import pincode_area, store_for
 
 Col = tuple[str, Callable[[dict], Any], str]   # (header, getter, kind: text | phone | date | datetime | money | int | yesno)
 
 INTEREST_LABELS = {"interested": "Interested", "not_interested": "Not interested", "other": "Others",
                    "follow_up": "Follow up"}
-
-# Rough area of an Indian pincode (first 3 digits), as the spin screen shows it
-PINCODE_AREAS = {
-    560: "Bangalore", 561: "Bangalore Rural", 562: "Bangalore Rural", 563: "Kolar", 570: "Mysore", 571: "Mysore",
-    572: "Tumkur", 573: "Hassan", 574: "Dakshina Kannada", 575: "Mangalore", 576: "Udupi", 577: "Shimoga / Chitradurga",
-    580: "Hubballi-Dharwad", 581: "Uttara Kannada / Haveri", 582: "Gadag", 583: "Ballari", 584: "Raichur",
-    585: "Kalaburagi / Bidar", 586: "Vijayapura", 587: "Bagalkot", 590: "Belagavi", 591: "Belagavi",
-    500: "Hyderabad", 501: "Ranga Reddy", 502: "Sangareddy / Medak", 503: "Nizamabad", 504: "Adilabad",
-    505: "Karimnagar", 506: "Warangal", 507: "Khammam", 508: "Nalgonda", 509: "Mahabubnagar",
-    515: "Anantapur", 516: "Kadapa", 517: "Chittoor / Tirupati", 518: "Kurnool", 520: "Vijayawada", 521: "Krishna",
-    522: "Guntur", 523: "Prakasam", 524: "Nellore", 530: "Visakhapatnam", 531: "Visakhapatnam", 532: "Srikakulam",
-    533: "East Godavari", 534: "West Godavari", 535: "Vizianagaram",
-    600: "Chennai", 601: "Chennai region", 603: "Chengalpattu", 625: "Madurai", 641: "Coimbatore", 620: "Tiruchirappalli",
-    682: "Kochi", 695: "Thiruvananthapuram", 673: "Kozhikode", 400: "Mumbai", 411: "Pune", 110: "Delhi",
-    700: "Kolkata", 380: "Ahmedabad", 302: "Jaipur", 226: "Lucknow", 201: "Noida / Ghaziabad", 122: "Gurugram",
-}
-
-
-def pincode_area(pin: Any) -> str | None:
-    digits = re.sub(r"\D", "", str(pin or ""))
-    return PINCODE_AREAS.get(int(digits[:3])) if len(digits) == 6 else None
-
 
 def to_datetime(value: Any) -> datetime | None:
     if not value:
@@ -185,26 +164,35 @@ def _spin_budget(value: Any, meta: dict | None) -> Any:
     return text
 
 
-def spin_columns(columns_meta: list[dict]) -> list[Col]:
+def spin_columns(columns_meta: list[dict], branches: list[dict] | None = None) -> list[Col]:
+    """branches: the Branches page's branches ({id, name, code, city}); the 12 built-in stores
+    fill in the rest, exactly like the spin screen. Unknown branch ids give empty cells."""
     f = spin_fields(columns_meta)
 
     def val(item: dict, field: str) -> Any:
         meta = f[field]
         return item.get(meta["name"]) if meta else None
 
+    def store(item: dict) -> dict:
+        branch_id = (item.get("branch") or {}).get("id")
+        return store_for(branch_id, branches) or {}
+
+    def branch_code(item: dict) -> str | None:
+        s = store(item)
+        return " · ".join(p for p in (s.get("code"), s.get("city")) if p) or None      # HYB-007 · Hyderabad
+
     def location(item: dict) -> str | None:
         pin = str(val(item, "pincode")) if val(item, "pincode") else None
         city = str(val(item, "city")) if val(item, "city") else None
-        branch = item.get("branch") or {}
-        area = city or pincode_area(pin) or (None if pin else branch.get("city"))
-        return " · ".join(p for p in (area, pin) if p) or None
+        area = city or pincode_area(pin) or (None if pin else store(item).get("city"))
+        return " · ".join(p for p in (area, pin) if p) or None                        # Hyderabad · 500084
 
     return [
         ("Lead", lambda i: val(i, "name"), "text"),
         ("Email", lambda i: val(i, "email"), "text"),
         ("Contact", lambda i: e164(val(i, "phone")), "phone"),
-        ("Branch", lambda i: (i.get("branch") or {}).get("name"), "text"),
-        ("Branch code", lambda i: (i.get("branch") or {}).get("code"), "text"),
+        ("Branch", lambda i: store(i).get("name"), "text"),
+        ("Branch code", branch_code, "text"),
         ("Location", location, "text"),
         ("Occasion", lambda i: val(i, "occasion"), "text"),
         ("Event date", lambda i: date_or_text(val(i, "event_date"), val(i, "event_date")), "date"),

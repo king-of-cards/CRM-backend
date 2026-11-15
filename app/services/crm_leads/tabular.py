@@ -304,7 +304,7 @@ _D = date(2026, 12, 20)
 _T = datetime(2026, 11, 14, 5, 0, tzinfo=timezone.utc)        # 14 Nov 2026, 10:30 am IST
 EXAMPLES: dict[str, dict[str, Any]] = {
     "spin": {"Lead": "Asha Rao", "Email": "asha@example.com", "Contact": "+919845012345", "Branch": "Jayanagar",
-             "Branch code": "JNG-004", "Location": "Bangalore · 560011", "Occasion": "Wedding", "Event date": _D,
+             "Branch code": "JNG-004 · Bangalore", "Location": "Bangalore · 560011", "Occasion": "Wedding", "Event date": _D,
              "Budget": "₹10–20", "Assigned to": "Phodeo", "Created": _T},
     "whatsapp": {"Lead": "+971501234567", "Country": "United Arab Emirates", "Event date": _D,
                  "Assigned to": "OHP · auto", "Submitted": _T},

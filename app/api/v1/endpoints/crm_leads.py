@@ -40,7 +40,9 @@ from app.services import access
 from app.services.crm_leads.fields import (
     FIELDS, SOURCE_LABELS, clean_row, from_model, header_map, norm_header, read_only_headers,
 )
+from app.services.branches import branches_by_id
 from app.services.lead_crm import active_vendors
+from app.services.stores import branch_names
 
 router = APIRouter(prefix="/crm-leads", tags=["crm leads (add, import, export)"])
 
@@ -58,7 +60,8 @@ def _file_response(content: bytes, media_type: str, name: str) -> Response:
 
 # ── Fields and template ────────────────────────────────────────────────
 def _branch_names(db) -> list[str]:
-    return [b.name for b in db.exec(select(Branch).order_by(Branch.name))]
+    """Branch names uploads accept: the Branches page's, plus the built-in stores."""
+    return branch_names([{"id": b.id, "name": b.name} for b in db.exec(select(Branch))])
 
 
 @router.get("/{source}/fields")
@@ -260,7 +263,8 @@ def export_spin(
     total = spin_ep.merged_page(db, 0, 0, search, sort, order, branch, filters, use_cache=False)["total"]
     _check_cap(total)
     data = spin_ep.merged_page(db, 0, total, search, sort, order, branch, filters, use_cache=False)
-    return _export("spin", format, export_cols.spin_columns(data["columns"]), data["items"])
+    branches = list(branches_by_id(db).values())       # + the built-in stores, as the screen shows them
+    return _export("spin", format, export_cols.spin_columns(data["columns"], branches), data["items"])
 
 
 # ── Single lead ────────────────────────────────────────────────────────
@@ -279,6 +283,8 @@ def _duplicate_409(duplicate: dict, others: list[str]) -> HTTPException:
 
 @router.post("/{source}", status_code=201)
 def add_lead(source: Source, body: AddBody, user: AdminUser, db: DbSession):
+    if source == "spin":
+        raise HTTPException(405, "Spin leads can only be added by bulk upload", headers={"Allow": "GET"})
     c = clean_row(source, body.values, service.context(db))
     if not c.ok:
         raise HTTPException(422, {"message": "Please fix the highlighted fields.", "errors": c.errors})

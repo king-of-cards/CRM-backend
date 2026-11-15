@@ -92,10 +92,13 @@ def is_sheet_lead(db: Session, source: str, lead_key: str) -> bool:
 def context(db: Session) -> RowContext:
     from app.services.lead_crm import active_vendors
 
+    from app.services.stores import STORES, branch_ids_by_name
+
     branches = list(db.exec(select(Branch)))
     return RowContext(
-        branches_by_name={norm_header(b.name): b.id for b in branches},
-        branch_ids={b.id for b in branches},
+        # The Branches page's names, plus the 12 built-in stores (crm_branches can be empty)
+        branches_by_name=branch_ids_by_name([{"id": b.id, "name": b.name} for b in branches]),
+        branch_ids={b.id for b in branches} | set(STORES),
         vendors_by_name={norm_header(v.name): (v.id, v.name) for v in active_vendors(db)},
     )
 
@@ -214,41 +217,48 @@ def classify(source: str, e164: str, matches: dict[str, list[Match]], exclude_ke
 
 def check_rows(db: Session, source: str, rows: list[tuple[int, dict[str, Any]]]) -> tuple[list[dict], dict, list[Cleaned]]:
     """Validate rows and find duplicates. Returns (row results, counts, cleaned rows).
-    A row is "ok" only if it has no errors and is not a duplicate."""
+
+    Status, in this order (every row gets exactly one):
+      duplicate  the phone matches an existing lead (existing_*), or an earlier row of the file
+                 (in_file); counted as a duplicate even if other fields have errors, which are
+                 still returned for information
+      error      no usable phone, or field errors
+      ok         will be imported"""
     ctx = context(db)
     cleaned = [clean_row(source, raw, ctx, upload=True) for _, raw in rows]
-    matches = lookup(db, {c.phone.e164 for c in cleaned if c.ok and c.phone and c.phone.e164})
+    phone_of = [c.phone.e164 if c.phone is not None and c.phone.e164 else None for c in cleaned]
+    matches = lookup(db, {e for e in phone_of if e})
 
     results: list[dict] = []
     first_row_for: dict[str, int] = {}
     counts = {"total": len(rows), "ok": 0, "errors": 0, "duplicates": 0,
               "duplicates_by_reason": {r: 0 for r in DUPLICATE_REASONS}, "other_source_warnings": 0}
-    for (row_number, raw), c in zip(rows, cleaned):
+    for (row_number, raw), c, e164 in zip(rows, cleaned, phone_of):
         values = json_values(c.values)
         for error in c.errors:      # send back what was written, so the bulk save rejects it again
             values[error["field"]] = as_text(raw.get(error["field"])) or None
         result: dict[str, Any] = {
             "row": row_number, "values": values, "errors": c.errors, "duplicate": None, "warnings": [],
         }
-        if not c.ok:
-            result["status"] = "error"
-            counts["errors"] += 1
-            results.append(result)
-            continue
-        e164 = c.phone.e164
-        duplicate, others = classify(source, e164, matches)
-        if duplicate is None and e164 in first_row_for:
-            duplicate = {"reason": "in_file", "duplicate_of_row": first_row_for[e164]}
-        first_row_for.setdefault(e164, row_number)
+        duplicate, others = None, []
+        if e164:
+            # Existing lead first, then an earlier row of the same file
+            duplicate, others = classify(source, e164, matches)
+            if duplicate is None and e164 in first_row_for:
+                duplicate = {"reason": "in_file", "duplicate_of_row": first_row_for[e164]}
+            first_row_for.setdefault(e164, row_number)
+            result["phone_e164"] = e164
         if others:
             result["warnings"].append({"type": "other_source", "sources": others})
             counts["other_source_warnings"] += 1
-        result["phone_e164"] = e164
         if duplicate:
             result["duplicate"] = duplicate
             result["status"] = "duplicate"
             counts["duplicates"] += 1
             counts["duplicates_by_reason"][duplicate["reason"]] += 1
+        elif not c.ok:
+            result["status"] = "error"
+            counts["errors"] += 1
         else:
             result["status"] = "ok"
             counts["ok"] += 1

@@ -411,7 +411,7 @@ Checks an uploaded file and returns every row with its errors and duplicate stat
 | Field | Meaning |
 |---|---|
 | `row` | Row number in the file. |
-| `status` | `ok` (will be imported), `error` (has field errors), or `duplicate` (phone already exists; will be skipped). |
+| `status` | `duplicate` (the phone matches an existing lead or an earlier row of the file; skipped), else `error` (no usable phone, or field errors), else `ok` (will be imported). A duplicate stays a duplicate even if other fields have errors; those errors are still listed, for information. |
 | `values` | Every field of the source (abbreviated above). Values are cleaned, in upload formats: dates `20 Dec 2026`, date-times `14 Nov 2026, 10:30 am` (IST), numbers, booleans, branch as id, `assigned_to` as `Phodeo` / `Phodeo · auto` / `Unassigned`. A field that has an error keeps the text as written. Send these to `POST /import` unchanged, or after the user fixes them. |
 | `errors` | `[{field, message}]`, empty when the row is valid. |
 | `duplicate` | `null`, or a duplicate object. See [Duplicates](#4-duplicates). |
@@ -547,7 +547,7 @@ order, the CRM columns, then the trailing column), with an example row:
 
 | Lead | Email | Contact | Branch | Branch code | Location | Occasion | Event date | Budget | Assigned to | Interest | Quoted amount | Quoted date | Converted | Created |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| Asha Rao | asha@example.com | +919845012345 | Jayanagar | JNG-004 | Bangalore · 560011 | Wedding | 20 Dec 2026 | ₹10–20 | Phodeo | Interested | ₹45,000 | 20 Nov 2026 | No | 14 Nov 2026, 10:30 am |
+| Asha Rao | asha@example.com | +919845012345 | Jayanagar | JNG-004 · Bangalore | Bangalore · 560011 | Wedding | 20 Dec 2026 | ₹10–20 | Phodeo | Interested | ₹45,000 | 20 Nov 2026 | No | 14 Nov 2026, 10:30 am |
 
 **whatsapp**
 
@@ -568,9 +568,12 @@ order, the CRM columns, then the trailing column), with an example row:
 | Meera | Bride | meera@example.com | +919845010004 | 20 Dec 2027 | Udaipur | 300 | 120 | ₹25,00,000 | 20L–30L | ₹23,10,000 | Yes | OHP · auto | Interested | ₹24,00,000 | 20 Nov 2026 | No | 14 Nov 2026, 10:30 am | pdf |
 
 Notes:
-- Spin: Location is the area (the lead's city, else the area of its pincode, else the branch's
-  city) and the pincode; Occasion, Event date and Budget come from the same fields the screen
-  uses (occasion type, occasion date, budget per card).
+- Spin: Branch is the branch name (`Hyderabad - Kondhapur`), Branch code is code and city
+  (`HYB-007 · Hyderabad`), and Location is the area (the lead's city, else the area of its
+  pincode, else the branch's city) and the pincode (`Hyderabad · 500084`). Branches come from the
+  Branches page, else the 12 built-in stores the screen also uses; an unknown branch id leaves
+  these cells empty. Occasion, Event date and Budget come from the same fields the screen uses
+  (occasion type, occasion date, budget per card). Uploads accept the same branch names.
 - Planner: Wedding date is the first day of celebrations, or the wedding month as text
   (`December 2027`) when there's no date.
 - Lead is the name only (empty when there is none), so a re-upload never saves a phone or Plan ID
@@ -607,7 +610,8 @@ and the date/date-time texts), plus `DD-MM-YYYY`.
 
 ### `POST /crm-leads/{source}`
 
-Adds one lead (`origin = added`).
+Adds one lead (`origin = added`). Not for spin: `POST /crm-leads/spin` answers
+`405 {"detail": "Spin leads can only be added by bulk upload"}`.
 
 **Request (JSON)**
 
@@ -723,7 +727,10 @@ either one twice is harmless.
 
 Duplicates are found on the normalised phone, within the same source. Each row (or add) gets
 at most one `duplicate` object. When several apply, the first match in this order wins:
-`existing_sheet`/`existing_workflow`, then `existing_added`, then `in_file`.
+`existing_sheet`/`existing_workflow`, then `existing_added`, then `in_file`. In uploads a
+duplicate wins over field errors: order **existing > in_file > errors** (a row with a usable phone
+that repeats an existing lead or an earlier row is counted as a duplicate even if other fields
+have errors).
 
 | `reason` | When | Extra fields |
 |---|---|---|
