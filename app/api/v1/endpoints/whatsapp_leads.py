@@ -1,18 +1,19 @@
 """WhatsApp leads copied from the Google Sheet (admin only). Reads from MySQL only: fast.
 
-GET /whatsapp-leads         list with search, country filter, sort and pages
-GET /whatsapp-leads/stats   numbers for dashboard cards
+GET /whatsapp-leads         list with filters (see app/services/lead_filters.py + country), sort, pages
+GET /whatsapp-leads/stats   numbers for the header, over the same filtered leads
 """
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Literal
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, Query
-from sqlalchemy import and_, false, func, or_
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import and_, false, func
 from sqlmodel import col, select
 
-from app.api.deps import DbSession, LeadViewer, OptionalPeriod
+from app.api.deps import DbSession, LeadViewer, common_filter_params
 from app.models.whatsapp_lead import WhatsAppLead
-from app.services import access, lead_crm, periods
+from app.services import lead_crm, lead_filters
 
 router = APIRouter(prefix="/whatsapp-leads", tags=["whatsapp-leads"])
 
@@ -50,19 +51,34 @@ def _out(lead: WhatsAppLead) -> dict:
     }
 
 
+@dataclass
+class WhatsAppFilters:
+    common: lead_filters.CommonFilters
+    country: str | None = None
+
+
+def whatsapp_filters(
+    common: Annotated[lead_filters.CommonFilters,
+                      Depends(common_filter_params(lead_filters.SHEET_ORIGINS, "International leads"))],
+    country: str | None = Query(None, max_length=100),
+) -> WhatsAppFilters:
+    return WhatsAppFilters(common, (country or "").strip() or None)
+
+
+Filters = Annotated[WhatsAppFilters, Depends(whatsapp_filters)]
+
+
 @router.get("")
 def list_whatsapp_leads(
     viewer: LeadViewer,
     db: DbSession,
+    f: Filters,
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=200),
-    search: str | None = Query(None, max_length=100),
-    country: str | None = Query(None, max_length=100),
     sort: Literal["submitted_at", "event_date", "country", "phone", "first_seen_at"] = "submitted_at",
     order: Literal["asc", "desc"] = "desc",
-    period: OptionalPeriod = None,
 ):
-    filters = build_filters(search, country, access.visible_keys(db, viewer, "whatsapp"), period)
+    filters = build_filters(db, viewer, f)
     total = db.exec(select(func.count()).select_from(WhatsAppLead).where(*filters)).one()
     rows = db.exec(
         select(WhatsAppLead).where(*filters).order_by(*ordering(sort, order))
@@ -71,29 +87,31 @@ def list_whatsapp_leads(
     return {"items": attach_crm(db, [_out(r) for r in rows]), "total": total, "page": page, "page_size": page_size}
 
 
-# ── Shared with the export (GET /crm-leads/whatsapp/export) ─────────────
-def build_filters(search: str | None, country: str | None, keys: set[str] | None = None,
-                  period: periods.Period | None = None) -> list:
-    """Archived and removed rows (is_deleted) are never listed or exported.
-    keys: the lead keys the viewer may see (None = all, for admins)."""
+# ── Shared by the list, the stats and the export (GET /crm-leads/whatsapp/export) ──
+def build_filters(db, viewer, f: WhatsAppFilters) -> list:
+    """SQL conditions for the leads the viewer may see that match the filters. Archived and
+    removed rows (is_deleted) are never listed, counted or exported."""
+    c = f.common
     filters = [WhatsAppLead.is_deleted == False]  # noqa: E712
-    if period is not None:
-        # Arrived in the period (IST days): submitted_at is stored in UTC
-        start, end = period.utc_bounds()
-        filters += [WhatsAppLead.submitted_at >= start, WhatsAppLead.submitted_at < end]
+    keys = lead_filters.allowed_keys(db, "whatsapp", viewer, c)
     if keys is not None:
         filters.append(col(WhatsAppLead.sheet_key).in_(keys) if keys else false())
-    if country:
-        filters.append(WhatsAppLead.country == country)
-    if search and search.strip():
-        like = f"%{search.strip()}%"
-        filters.append(
-            or_(
-                col(WhatsAppLead.country).like(like),
-                col(WhatsAppLead.phone).like(f"%{''.join(ch for ch in search if ch.isdigit()) or search.strip()}%"),
-                col(WhatsAppLead.event_date_text).like(like),
-            )
-        )
+    if c.period is not None:
+        # Arrived in the period (IST days): submitted_at is stored in UTC
+        start, end = c.period.utc_bounds()
+        filters += [WhatsAppLead.submitted_at >= start, WhatsAppLead.submitted_at < end]
+    if c.event_from is not None:
+        filters.append(WhatsAppLead.event_date >= c.event_from)
+    if c.event_to is not None:
+        filters.append(WhatsAppLead.event_date <= c.event_to)
+    if c.origins:
+        filters.append(col(WhatsAppLead.origin).in_(c.origins))
+    if f.country:
+        filters.append(WhatsAppLead.country == f.country)
+    if c.search:
+        # No name or email in this sheet: phone digits, plus country and the event date text
+        filters.append(lead_filters.search_condition(
+            c.search, [WhatsAppLead.country, WhatsAppLead.event_date_text], WhatsAppLead.phone))
     return filters
 
 
@@ -109,9 +127,9 @@ def attach_crm(db, items: list[dict]) -> list[dict]:
 
 
 @router.get("/stats")
-def whatsapp_lead_stats(viewer: LeadViewer, db: DbSession):
-    # Only the leads the viewer may see (vendors: their own)
-    active = and_(*build_filters(None, None, access.visible_keys(db, viewer, "whatsapp")))
+def whatsapp_lead_stats(viewer: LeadViewer, db: DbSession, f: Filters):
+    """Numbers over the leads the list shows for the same filters (vendors: their own)."""
+    active = and_(*build_filters(db, viewer, f))
     now = datetime.now(timezone.utc)
 
     total = db.exec(select(func.count()).select_from(WhatsAppLead).where(active)).one()

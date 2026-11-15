@@ -1,4 +1,4 @@
-from typing import Annotated
+from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
 import jwt
@@ -77,6 +77,29 @@ def _period(required: bool):
 # Dashboard: the period asked for, or the last 30 days. Lists: a period only if dates are given.
 DashboardPeriod = Annotated[periods.Period, Depends(_period(required=True))]
 OptionalPeriod = Annotated[periods.Period | None, Depends(_period(required=False))]
+
+
+def common_filter_params(allowed_origins: tuple[str, ...], source_label: str):
+    """The common list filters (see app/services/lead_filters.py) as a dependency; each source's
+    list, export and stats endpoints use the same one."""
+    from app.services import lead_filters
+
+    def dependency(
+        period: OptionalPeriod,
+        search: str | None = Query(None, max_length=100, description="Name, phone, email (where the source has them)"),
+        event_from: str | None = Query(None, description="Event date from, YYYY-MM-DD (included)"),
+        event_to: str | None = Query(None, description="Event date to, YYYY-MM-DD (included)"),
+        upcoming_days: int | None = Query(None, description="Event from today to today + N days"),
+        vendor_id: list[int] | None = Query(None, description="Assigned to (repeatable); admins only"),
+        unassigned: bool = Query(False, description="No vendor; admins only"),
+        interest: list[str] | None = Query(None, description="Repeatable: interested, not_interested, other, follow_up, not_set"),
+        converted: Literal["yes", "no"] | None = Query(None),
+        quote: str | None = Query(None, description="has, none, gt:<amount> or lt:<amount>"),
+        origin: list[str] | None = Query(None, description=f"Repeatable: {', '.join(allowed_origins)}"),
+    ):
+        return lead_filters.common_filters(period, search, event_from, event_to, upcoming_days, vendor_id, unassigned,
+                                           interest, converted, quote, origin, allowed_origins, source_label)
+    return dependency
 
 
 def _origin_of(url: str | None) -> str | None:

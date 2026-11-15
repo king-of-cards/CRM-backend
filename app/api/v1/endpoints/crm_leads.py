@@ -196,48 +196,42 @@ def _sheet_export(db, source: str, model, module, filters, sort: str, order: str
 def export_whatsapp(
     viewer: LeadViewer,
     db: DbSession,
+    f: whatsapp_ep.Filters,
     format: Format = "xlsx",
-    search: str | None = Query(None, max_length=100),
-    country: str | None = Query(None, max_length=100),
     sort: Literal["submitted_at", "event_date", "country", "phone", "first_seen_at"] = "submitted_at",
     order: Literal["asc", "desc"] = "desc",
 ):
-    filters = whatsapp_ep.build_filters(search, country, access.visible_keys(db, viewer, "whatsapp"))
-    return _sheet_export(db, "whatsapp", WhatsAppLead, whatsapp_ep, filters, sort, order, format)
+    """Exactly the requesting user's International list: same filters (GET /whatsapp-leads) and sort."""
+    return _sheet_export(db, "whatsapp", WhatsAppLead, whatsapp_ep, whatsapp_ep.build_filters(db, viewer, f),
+                         sort, order, format)
 
 
 @router.get("/wedding/export")
 def export_wedding(
     viewer: LeadViewer,
     db: DbSession,
+    f: wedding_ep.Filters,
     format: Format = "xlsx",
-    search: str | None = Query(None, max_length=100),
-    occasion: str | None = Query(None, max_length=100),
-    shared_with: str | None = Query(None, max_length=200),
-    hide_repeats: bool = False,
     sort: Literal["submitted_at", "event_date", "budget_amount", "name", "city"] = "submitted_at",
     order: Literal["asc", "desc"] = "desc",
 ):
-    filters = wedding_ep.build_filters(search, occasion, shared_with, hide_repeats,
-                                       access.visible_keys(db, viewer, "wedding"))
-    return _sheet_export(db, "wedding", WeddingLead, wedding_ep, filters, sort, order, format)
+    """Exactly the requesting user's Wedding list: same filters (GET /wedding-leads) and sort."""
+    return _sheet_export(db, "wedding", WeddingLead, wedding_ep, wedding_ep.build_filters(db, viewer, f),
+                         sort, order, format)
 
 
 @router.get("/wedding_planner/export")
 def export_wedding_planner(
     viewer: LeadViewer,
     db: DbSession,
+    f: planner_ep.Filters,
     format: Format = "xlsx",
-    search: str | None = Query(None, max_length=100),
-    shared_with: str | None = Query(None, max_length=200),
-    fits_budget: bool | None = None,
-    last_step: str | None = Query(None, max_length=50),
     sort: Literal["updated", "wedding_date", "total_budget", "total_guests", "plan_estimate", "name"] = "updated",
     order: Literal["asc", "desc"] = "desc",
 ):
-    filters = planner_ep.build_filters(search, shared_with, fits_budget, last_step,
-                                       access.visible_keys(db, viewer, "wedding_planner"))
-    return _sheet_export(db, "wedding_planner", WeddingPlan, planner_ep, filters, sort, order, format)
+    """Exactly the requesting user's Wedding planner list: same filters (GET /wedding-plans) and sort."""
+    return _sheet_export(db, "wedding_planner", WeddingPlan, planner_ep, planner_ep.build_filters(db, viewer, f),
+                         sort, order, format)
 
 
 @router.get("/spin/export")

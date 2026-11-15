@@ -1,19 +1,20 @@
 """Wedding & event photography leads copied from the Google Sheet (admin only).
 Reads from MySQL only: fast.
 
-GET /wedding-leads         list with search, filters, sort and pages
-GET /wedding-leads/stats   numbers for dashboard cards and filter options
+GET /wedding-leads         list with filters (app/services/lead_filters.py + wedding ones), sort, pages
+GET /wedding-leads/stats   numbers for the header, over the same filtered leads
 """
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Literal
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, Query
-from sqlalchemy import and_, false, func, or_
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import and_, false, func
 from sqlmodel import col, select
 
-from app.api.deps import DbSession, LeadViewer, OptionalPeriod
+from app.api.deps import DbSession, LeadViewer, common_filter_params
 from app.models.wedding_lead import WeddingLead
-from app.services import access, lead_crm, periods
+from app.services import lead_crm, lead_filters
 
 router = APIRouter(prefix="/wedding-leads", tags=["wedding-leads"])
 
@@ -60,21 +61,46 @@ def _out(lead: WeddingLead) -> dict:
     }
 
 
+@dataclass
+class WeddingFilters:
+    common: lead_filters.CommonFilters
+    occasion: str | None = None
+    shared_with: str | None = None
+    hide_repeats: bool = False
+    city: str | None = None
+    budget_min: int | None = None
+    budget_max: int | None = None
+
+
+def wedding_filters(
+    common: Annotated[lead_filters.CommonFilters,
+                      Depends(common_filter_params(lead_filters.SHEET_ORIGINS, "Wedding leads"))],
+    occasion: str | None = Query(None, max_length=100),
+    shared_with: str | None = Query(None, max_length=200, description=f"Partner name, or {NOT_SHARED} for not shared"),
+    hide_repeats: bool = False,
+    city: str | None = Query(None, max_length=200, description="City contains (case-insensitive)"),
+    budget_min: int | None = Query(None, ge=0, description="Budget at least (rupees)"),
+    budget_max: int | None = Query(None, ge=0, description="Budget at most (rupees)"),
+) -> WeddingFilters:
+    lead_filters.check_range(budget_min, budget_max, "budget")
+    return WeddingFilters(common, occasion or None, shared_with or None, hide_repeats, (city or "").strip() or None,
+                          budget_min, budget_max)
+
+
+Filters = Annotated[WeddingFilters, Depends(wedding_filters)]
+
+
 @router.get("")
 def list_wedding_leads(
     viewer: LeadViewer,
     db: DbSession,
+    f: Filters,
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=200),
-    search: str | None = Query(None, max_length=100),
-    occasion: str | None = Query(None, max_length=100),
-    shared_with: str | None = Query(None, max_length=200, description=f"Partner name, or {NOT_SHARED} for not shared"),
-    hide_repeats: bool = False,
     sort: Literal["submitted_at", "event_date", "budget_amount", "name", "city"] = "submitted_at",
     order: Literal["asc", "desc"] = "desc",
-    period: OptionalPeriod = None,
 ):
-    filters = build_filters(search, occasion, shared_with, hide_repeats, access.visible_keys(db, viewer, "wedding"), period)
+    filters = build_filters(db, viewer, f)
     total = db.exec(select(func.count()).select_from(WeddingLead).where(*filters)).one()
     rows = db.exec(
         select(WeddingLead).where(*filters).order_by(*ordering(sort, order))
@@ -83,39 +109,45 @@ def list_wedding_leads(
     return {"items": attach_crm(db, [_out(r) for r in rows]), "total": total, "page": page, "page_size": page_size}
 
 
-# ── Shared with the export (GET /crm-leads/wedding/export) ──────────────
-def build_filters(search: str | None, occasion: str | None, shared_with: str | None, hide_repeats: bool, keys: set[str] | None = None,
-                  period: periods.Period | None = None) -> list:
-    """Archived and removed rows (is_deleted) are never listed or exported.
-    keys: the lead keys the viewer may see (None = all, for admins)."""
+# ── Shared by the list, the stats and the export (GET /crm-leads/wedding/export) ──
+def build_filters(db, viewer, f: WeddingFilters) -> list:
+    """SQL conditions for the leads the viewer may see that match the filters. Archived and
+    removed rows (is_deleted) are never listed, counted or exported."""
+    c = f.common
     filters = [WeddingLead.is_deleted == False]  # noqa: E712
-    if period is not None:
-        # Arrived in the period (IST days): submitted_at is stored in UTC
-        start, end = period.utc_bounds()
-        filters += [WeddingLead.submitted_at >= start, WeddingLead.submitted_at < end]
+    keys = lead_filters.allowed_keys(db, "wedding", viewer, c)
     if keys is not None:
         filters.append(col(WeddingLead.sheet_key).in_(keys) if keys else false())
-    if occasion:
-        filters.append(WeddingLead.occasion == occasion)
-    if shared_with == NOT_SHARED:
+    if c.period is not None:
+        # Arrived in the period (IST days): submitted_at is stored in UTC
+        start, end = c.period.utc_bounds()
+        filters += [WeddingLead.submitted_at >= start, WeddingLead.submitted_at < end]
+    if c.event_from is not None:
+        filters.append(WeddingLead.event_date >= c.event_from)
+    if c.event_to is not None:
+        filters.append(WeddingLead.event_date <= c.event_to)
+    if c.origins:
+        filters.append(col(WeddingLead.origin).in_(c.origins))
+    if f.occasion:
+        filters.append(WeddingLead.occasion == f.occasion)
+    if f.shared_with == NOT_SHARED:
         filters.append(WeddingLead.shared_with.is_(None))
-    elif shared_with:
-        filters.append(WeddingLead.shared_with == shared_with)
-    if hide_repeats:
+    elif f.shared_with:
+        filters.append(WeddingLead.shared_with == f.shared_with)
+    if f.hide_repeats:
         filters.append(WeddingLead.is_repeat == False)  # noqa: E712
-    if search and search.strip():
-        like = f"%{search.strip()}%"
-        digits = "".join(ch for ch in search if ch.isdigit())
-        conditions = [
-            col(WeddingLead.name).like(like),
-            col(WeddingLead.email).like(like),
-            col(WeddingLead.city).like(like),
-            col(WeddingLead.occasion).like(like),
-            col(WeddingLead.shared_with).like(like),
-        ]
-        if digits:
-            conditions.append(col(WeddingLead.phone).like(f"%{digits}%"))
-        filters.append(or_(*conditions))
+    if f.city:
+        filters.append(lead_filters.contains(WeddingLead.city, f.city))
+    if f.budget_min is not None:
+        filters.append(WeddingLead.budget_amount >= f.budget_min)
+    if f.budget_max is not None:
+        filters.append(WeddingLead.budget_amount <= f.budget_max)
+    if c.search:
+        filters.append(lead_filters.search_condition(
+            c.search,
+            [WeddingLead.name, WeddingLead.email, WeddingLead.city, WeddingLead.occasion, WeddingLead.shared_with],
+            WeddingLead.phone,
+        ))
     return filters
 
 
@@ -137,9 +169,9 @@ def attach_crm(db, items: list[dict]) -> list[dict]:
 
 
 @router.get("/stats")
-def wedding_lead_stats(viewer: LeadViewer, db: DbSession):
-    # Only the leads the viewer may see (vendors: their own)
-    active = and_(*build_filters(None, None, None, None, access.visible_keys(db, viewer, "wedding")))
+def wedding_lead_stats(viewer: LeadViewer, db: DbSession, f: Filters):
+    """Numbers over the leads the list shows for the same filters (vendors: their own)."""
+    active = and_(*build_filters(db, viewer, f))
     now = datetime.now(timezone.utc)
 
     def count(*conditions) -> int:
