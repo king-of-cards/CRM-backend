@@ -25,6 +25,7 @@ per-vendor access rules, and the CRM details endpoint `PUT /leads/{source}/{lead
 6. [Changes to the existing endpoints](#6-changes-to-the-existing-endpoints)
 7. [Limits](#7-limits)
 8. [File downloads: filenames and CORS](#8-file-downloads-filenames-and-cors)
+9. [Dashboard: date filter](#9-dashboard-date-filter)
 
 ---
 
@@ -808,7 +809,7 @@ can't see.
 | `GET /spin-leads/filter-options` | Budgets and pincodes counted over their leads. |
 | `GET /whatsapp-leads`, `/wedding-leads`, `/wedding-plans` | Their leads. |
 | `GET /whatsapp-leads/stats`, `/wedding-leads/stats`, `/wedding-plans/stats` | Numbers over their leads. |
-| `GET /analytics/overview` | Built from their leads only. |
+| `GET /analytics/overview` | Built from their leads only, for the period asked (see [Dashboard](#9-dashboard-date-filter)). |
 | `GET /leads/{source}/{lead_key}/crm`, `PUT …/crm` | See [Access](#5-access-who-sees-and-edits-what). |
 | `GET /crm-leads/{source}/export` | Their list. |
 | `GET /vendors` | Only their own vendor. |
@@ -866,3 +867,76 @@ const url = URL.createObjectURL(await res.blob());
 Object.assign(document.createElement("a"), { href: url, download: name }).click();
 URL.revokeObjectURL(url);
 ```
+
+---
+
+## 9. Dashboard: date filter
+
+`GET /analytics/overview` takes a period. So do the lists the Dashboard also calls
+(`GET /spin-leads`, `/whatsapp-leads`, `/wedding-leads`, `/wedding-plans`), but for those it's
+optional. Admins and vendor users; vendor users only ever get their own leads.
+
+### Parameters
+
+| Query | Format | Meaning |
+|---|---|---|
+| `date_from` | `YYYY-MM-DD` | First day of the period (India calendar day), included |
+| `date_to` | `YYYY-MM-DD` | Last day, included |
+
+- **Defaults:** with neither date, `/analytics/overview` covers the **last 30 days including
+  today**; the four lists apply **no filter** (the list pages are unchanged).
+- **One date** (only `date_from` or only `date_to`): that single day. For a single day you can also
+  send the same date twice.
+- **IST days:** a day runs from 00:00 IST, which is 18:30 UTC the day before. A lead at 23:30 IST
+  on 15 Nov counts on the 15th; one at 00:30 IST on 16 Nov (19:00 UTC on the 15th) counts on the 16th.
+- **400 errors**, with the reason in `detail`:
+
+| Case | `detail` |
+|---|---|
+| Not a valid date | `date_from must be a date like 2026-11-16 (YYYY-MM-DD)` |
+| `date_from` after `date_to` | `date_from must be on or before date_to` |
+| More than 366 days, both ends counted | `The period can be at most 366 days (this one has 367)` |
+| A date after today (IST) | `Dates can't be in the future (today is 2026-11-16 in India)` |
+
+### When a lead "arrives"
+
+| Source | Arrival date |
+|---|---|
+| Spin, workflow | `spin_lead.created_at` |
+| Spin, added/imported | `crm_spin_leads.created_at`: the entry time, or the uploaded "Created" |
+| International, Wedding | `submitted_at`: the sheet's time; for added/imported leads the entry time or the uploaded "Submitted" |
+| Wedding planner | `updated_in_sheet_at`: the sheet's "Last updated"; for added/imported plans the entry time or the uploaded "Updated" |
+
+A planner visitor who continues a plan later moves it to that later day; the sheet has no
+separate "submitted" time. Leads with no arrival time count in the totals, never in a period.
+
+### What each number covers (`/analytics/overview`)
+
+| Field | Screen | Covers |
+|---|---|---|
+| `totals` (per source, `all`) | Total leads, tile counts | Every lead up to `date_to` |
+| `new_in_period` | New in period, tiles' "+N" | Leads that arrived in the period |
+| `previous_period` | Comparison | The same number of days right before `date_from` |
+| `change_pct` | % change | `new_in_period` vs `previous_period`, rounded; `null` when the previous period has 0 |
+| `source_mix` | Source mix, tiles' % bar | `[{source, count, pct}]` of `new_in_period` |
+| `trend` | Lead inflow | `[{date, end, <source counts>}]`: one point per day; for periods over 90 days, 7-day buckets starting at `date_from` (the last may be shorter). `period.granularity` says which |
+| `wedding_budget`, `photography_budget`, `guests`, `budget_fit`, `repeats` | Wedding budgets, Budgets & size | Leads that arrived in the period |
+| `sharing` | Shared with partners, Partners callout | Wedding and planner leads that arrived in the period |
+| `top_cities`, `top_countries`, `occasions`, `partners` | Lists | Leads that arrived in the period |
+| `upcoming_30_days` | Events in 30 days | **Not filtered:** events from today to today + 30, all of the viewer's leads |
+| `upcoming_by_month` | Upcoming events by month | **Not filtered:** months from this month |
+| `needs_attention` | Needs attention | **Not filtered:** `{not_shared, over_budget, total}` over everything still open |
+| `this_week`, `last_week` | (current screen) | **Original meaning**, not the period: the last 7 days vs the 7 before. Kept until the screen uses `new_in_period` / `previous_period`, then removed |
+
+Also in the response:
+- `period`: `{date_from, date_to, days, previous: {date_from, date_to}, granularity: "day" | "week"}`
+- `not_filtered`: `["upcoming_30_days", "upcoming_by_month", "needs_attention"]`
+
+**Caching:** results are cached per viewer and period. Vendor logins of the same vendor share
+their vendor's entry, and `refresh=true` clears the cache.
+
+### The lists (`/spin-leads`, `/whatsapp-leads`, `/wedding-leads`, `/wedding-plans`)
+
+With `date_from` / `date_to`, only leads that arrived in the period are listed and counted, using
+the same arrival dates, IST days and validation as above. Without them, nothing changes. Exports
+don't take a period.
