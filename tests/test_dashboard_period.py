@@ -90,6 +90,7 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
         self.assertEqual(day16["new_in_period"]["whatsapp"], 1)          # 00:30 IST on the 16th
         self.assertEqual(day16["new_in_period"]["spin"], 1)              # 02:00 UTC = 07:30 IST on the 16th
         self.assertEqual(day15["period"], {"date_from": "2026-11-15", "date_to": "2026-11-15", "days": 1,
+                                           "all_time": False,
                                            "previous": {"date_from": "2026-11-14", "date_to": "2026-11-14"},
                                            "granularity": "day"})
 
@@ -192,6 +193,46 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
         self.assertEqual(phodeo["needs_attention"]["not_shared"], 1)
         admin = self.overview(date_from="2026-11-01", date_to="2026-11-16")
         self.assertEqual(admin["new_in_period"]["wedding"], 2)
+
+    # ── All time ──
+    def test_all_time(self):
+        o = self.overview(period="all")
+        # From the earliest arrival (the September plan) to today, monthly points, no comparison
+        self.assertEqual(o["period"], {"date_from": "2026-09-01", "date_to": "2026-11-16", "days": 77, "all_time": True,
+                                       "previous": None, "granularity": "month"})
+        self.assertEqual([(p["date"], p["end"]) for p in o["trend"]],
+                         [("2026-09-01", "2026-09-30"), ("2026-10-01", "2026-10-31"), ("2026-11-01", "2026-11-16")])
+        self.assertIsNone(o["previous_period"])
+        self.assertIsNone(o["change_pct"])
+        self.assertIsNone(o["average_per_day"]["previous"])
+        # Every lead the viewer can see, also the one without an arrival date
+        self.assertEqual(o["totals"], {"spin": 3, "whatsapp": 3, "wedding": 3, "wedding_planner": 2, "all": 11})
+        self.assertEqual(o["average_per_day"]["period"]["all"], round(11 / 77, 1))
+        dated = sum(p[s] for p in o["trend"] for s in ("spin", "whatsapp", "wedding", "wedding_planner"))
+        self.assertEqual(dated, 10)                                  # the undated lead has no month
+        self.assertEqual(o["not_filtered"], [])
+        # The same as the lists without dates (they mean all time)
+        for source, url in (("whatsapp", "/whatsapp-leads"), ("wedding", "/wedding-leads"), ("wedding_planner", "/wedding-plans")):
+            listed = self.client.get(f"{API}{url}", params={"page_size": 1}).json()["total"]
+            self.assertEqual(o["totals"][source], listed, source)
+        # Needs attention and upcoming events over all leads
+        self.assertEqual(o["needs_attention"], {"not_shared": 3, "over_budget": 2, "total": 5})
+        self.assertEqual(o["upcoming_30_days"]["wedding"], 2)
+
+    def test_all_time_vendor_scope_and_errors(self):
+        rj = self.overview("rj", period="all")
+        self.assertEqual(rj["totals"]["wedding"], 2)                  # 5 Nov + October
+        self.assertEqual(rj["period"]["date_from"], "2026-10-01")     # RJ's earliest lead
+        self.assertEqual([p["date"] for p in rj["trend"]], ["2026-10-01", "2026-11-01"])
+        phodeo = self.overview("phodeo", period="all")
+        self.assertEqual(phodeo["totals"]["wedding"], 1)
+        self.assertEqual(self.overview(period="ALL")["period"]["all_time"], True)    # any case
+        for params, message in (({"period": "all", "date_from": "2026-11-01"}, "not both"),
+                                ({"period": "all", "date_to": "2026-11-16"}, "not both"),
+                                ({"period": "last_week"}, 'period must be "all"')):
+            resp = self.client.get(f"{API}/analytics/overview", params=params)
+            self.assertEqual(resp.status_code, 400, params)
+            self.assertIn(message, resp.json()["detail"])
 
     # ── The lists the Dashboard also calls: optional period, no filter by default ──
     def list_keys(self, url, key="lead_key", **params) -> set[str]:

@@ -74,8 +74,27 @@ def _period(required: bool):
     return dependency
 
 
-# Dashboard: the period asked for, or the last 30 days. Lists: a period only if dates are given.
-DashboardPeriod = Annotated[periods.Period, Depends(_period(required=True))]
+def _dashboard_period(
+    period: str | None = Query(None, description='"all" for all time (instead of date_from / date_to)'),
+    date_from: str | None = Query(None, description="First day, YYYY-MM-DD (India time), included"),
+    date_to: str | None = Query(None, description="Last day, YYYY-MM-DD (India time), included"),
+):
+    if period is not None and period.strip():
+        if period.strip().lower() != "all":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                                detail='period must be "all" (or leave it out and send date_from / date_to)')
+        if (date_from or "").strip() or (date_to or "").strip():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                                detail="Use either period=all or date_from / date_to, not both")
+        return periods.ALL_TIME
+    try:
+        return periods.parse_period(date_from, date_to, required=True)
+    except periods.PeriodError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+
+# Dashboard: period=all, the dates asked for, or the last 30 days. Lists: a period only if dates are given.
+DashboardPeriod = Annotated[periods.Period | periods.AllTime, Depends(_dashboard_period)]
 OptionalPeriod = Annotated[periods.Period | None, Depends(_period(required=False))]
 
 

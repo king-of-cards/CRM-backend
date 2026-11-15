@@ -886,6 +886,7 @@ optional. Admins and vendor users; vendor users only ever get their own leads.
 |---|---|---|
 | `date_from` | `YYYY-MM-DD` | First day of the period (India calendar day), included |
 | `date_to` | `YYYY-MM-DD` | Last day, included |
+| `period` | `all` | Dashboard only: **all time**, instead of `date_from` / `date_to` (see below) |
 
 - **Defaults:** with neither date, `/analytics/overview` covers the **last 30 days including
   today**; the four lists apply **no filter** (the list pages are unchanged).
@@ -901,6 +902,22 @@ optional. Admins and vendor users; vendor users only ever get their own leads.
 | `date_from` after `date_to` | `date_from must be on or before date_to` |
 | More than 366 days, both ends counted | `The period can be at most 366 days (this one has 367)` |
 | A date after today (IST) | `Dates can't be in the future (today is 2026-11-16 in India)` |
+| `period=all` with `date_from` or `date_to` | `Use either period=all or date_from / date_to, not both` |
+| `period` other than `all` | `period must be "all" (or leave it out and send date_from / date_to)` |
+
+### All time (`period=all`)
+
+- **What's counted:** every number covers all the leads the viewer can see, including leads with
+  no arrival date.
+- **`period`:** `date_from` is the earliest arrival date among those leads and `date_to` is today.
+  `days` counts both ends, `all_time` is `true`, `previous` is `null`, and `granularity` is `"month"`.
+- **No comparison:** `previous_period`, `change_pct` and `average_per_day.previous` are `null`.
+- **`average_per_day.period`:** leads per day over `days`, from the earliest arrival to today.
+- **`trend`:** one point per calendar month, from the first lead's month to the current month
+  (`{date: YYYY-MM-01, end: last day of the month, or today}`).
+- **Limits:** the 366-day limit doesn't apply. Results are cached per viewer like any other period.
+- **Lists:** they need no parameter for all time. Without `date_from` / `date_to`, the lists,
+  exports and stats already cover every lead, and their totals equal the all-time `totals`.
 
 ### When a lead "arrives"
 
@@ -937,7 +954,7 @@ separate "submitted" time. Leads with no arrival time are never in a period, so 
 | `this_week`, `last_week` | (current screen) | **Original meaning**, not the period: the last 7 days vs the 7 before. Kept until the screen uses `new_in_period` / `previous_period`, then removed |
 
 Also in the response:
-- `period`: `{date_from, date_to, days, previous: {date_from, date_to}, granularity: "day" | "week"}`
+- `period`: `{date_from, date_to, days, all_time, previous: {date_from, date_to} | null, granularity: "day" | "week" | "month"}`
 - `not_filtered`: `[]` (kept for compatibility; every number follows the period)
 
 **Caching:** results are cached per viewer and period. Vendor logins of the same vendor share

@@ -44,6 +44,7 @@ def ist_date(value: Any) -> date | None:
 class Period:
     date_from: date
     date_to: date
+    all_time: bool = False        # "all time": from the earliest arrival to today, monthly points
 
     @property
     def days(self) -> int:
@@ -65,27 +66,57 @@ class Period:
 
     @property
     def granularity(self) -> str:
+        if self.all_time:
+            return "month"
         return "week" if self.days > WEEKLY_AFTER_DAYS else "day"
 
     def buckets(self) -> list[tuple[date, date]]:
-        """Inflow points: one per day, or 7-day buckets from date_from (the last may be shorter)."""
-        step = 7 if self.granularity == "week" else 1
+        """Inflow points: one per day; 7-day buckets from date_from (the last may be shorter) for
+        periods over 90 days; calendar months (from the first month to this one) for all time."""
         out = []
+        if self.granularity == "month":
+            start = self.date_from.replace(day=1)
+            while start <= self.date_to:
+                nxt = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+                out.append((start, min(nxt - timedelta(days=1), self.date_to)))
+                start = nxt
+            return out
+        step = 7 if self.granularity == "week" else 1
         start = self.date_from
         while start <= self.date_to:
             out.append((start, min(start + timedelta(days=step - 1), self.date_to)))
             start += timedelta(days=step)
         return out
 
+    def bucket_start(self, day: date) -> date:
+        """The first day of the inflow point a day belongs to."""
+        if self.granularity == "month":
+            return day.replace(day=1)
+        step = 7 if self.granularity == "week" else 1
+        return self.date_from + timedelta(days=((day - self.date_from).days // step) * step)
+
     def as_dict(self) -> dict:
-        prev = self.previous()
+        prev = None if self.all_time else self.previous()
         return {
             "date_from": self.date_from.isoformat(),
             "date_to": self.date_to.isoformat(),
             "days": self.days,
-            "previous": {"date_from": prev.date_from.isoformat(), "date_to": prev.date_to.isoformat()},
+            "all_time": self.all_time,
+            "previous": {"date_from": prev.date_from.isoformat(), "date_to": prev.date_to.isoformat()} if prev else None,
             "granularity": self.granularity,
         }
+
+
+class AllTime:
+    """period=all on the dashboard: resolved to Period(earliest arrival, today, all_time=True)
+    once the viewer's leads are loaded."""
+
+    def resolve(self, earliest: date | None, today: date | None = None) -> Period:
+        today = today or today_ist()
+        return Period(min(earliest, today) if earliest else today, today, all_time=True)
+
+
+ALL_TIME = AllTime()
 
 
 def default_period(today: date | None = None) -> Period:

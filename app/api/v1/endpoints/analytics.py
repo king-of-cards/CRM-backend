@@ -137,7 +137,8 @@ def _change(new: int, previous: int) -> int | None:
     return round((new - previous) / previous * 100) if previous else None
 
 
-def _build(db: Session, keys: dict[str, set[str]] | None = None, period: periods.Period | None = None) -> dict:
+def _build(db: Session, keys: dict[str, set[str]] | None = None,
+           period: periods.Period | periods.AllTime | None = None) -> dict:
     """keys: {source: lead keys} to limit every number to (a vendor's own leads); None = all.
     period: the dashboard's date range (default: the last 30 days).
 
@@ -147,7 +148,6 @@ def _build(db: Session, keys: dict[str, set[str]] | None = None, period: periods
     Every number covers the leads that arrived in the period; this_week / last_week keep their
     original meaning (last 7 days vs the 7 before) until the screen stops using them."""
     period = period or periods.default_period()
-    previous = period.previous()
     today = periods.today_ist()
     week_start = today - timedelta(days=6)           # this_week / last_week: last 7 days vs the 7 before
     prev_week_start = week_start - timedelta(days=7)
@@ -190,27 +190,36 @@ def _build(db: Session, keys: dict[str, set[str]] | None = None, period: periods
         "wedding_planner": [r[1] for r in wp],
         "spin": [_parse_iso(r.get("occasion_date")) for r in (spin or [])],
     }
-    in_period = period.contains
+    if isinstance(period, periods.AllTime):
+        # All time: every lead the viewer can see (also those without an arrival date); the period
+        # runs from the earliest arrival to today, with monthly inflow points and no comparison
+        known = [d for days in arrival.values() for d in days if d is not None]
+        period = period.resolve(min(known) if known else None, today)
+
+        def in_period(_):
+            return True
+        previous = None
+    else:
+        in_period = period.contains
+        previous = period.previous()
 
     # Every number follows the period: totals are the leads that arrived in it
     new = _counts(arrival, in_period)
-    before = _counts(arrival, previous.contains)
+    before = _counts(arrival, previous.contains) if previous else None
     totals = dict(new)
     if spin is None:
         totals["spin"] = None
     this_week = _counts(arrival, lambda d: d is not None and week_start <= d <= today)
     last_week = _counts(arrival, lambda d: d is not None and prev_week_start <= d < week_start)
 
-    # Inflow: one point per day, or per 7 days for long periods
+    # Inflow: one point per day, per 7 days for long periods, per month for all time
     buckets = period.buckets()
     trend = [{"date": start.isoformat(), "end": end.isoformat(), **dict.fromkeys(SOURCES, 0)} for start, end in buckets]
     first = {start: i for i, (start, _) in enumerate(buckets)}
-    step = 7 if period.granularity == "week" else 1
     for source, days in arrival.items():
         for d in days:
-            if in_period(d):
-                start = period.date_from + timedelta(days=((d - period.date_from).days // step) * step)
-                trend[first[start]][source] += 1
+            if d is not None and period.contains(d):
+                trend[first[period.bucket_start(d)]][source] += 1
 
     # Upcoming events of the leads that arrived in the period (events from today on)
     months = []
@@ -269,7 +278,7 @@ def _build(db: Session, keys: dict[str, set[str]] | None = None, period: periods
 
     known_totals = [v for v in totals.values() if v is not None]
     new_all = sum(new.values())
-    before_all = sum(before.values())
+    before_all = sum(before.values()) if before is not None else None
 
     def per_day(counts: dict[str, int], total: int, days: int) -> dict:
         return {**{s: round(counts[s] / days, 1) for s in SOURCES}, "all": round(total / days, 1)}
@@ -281,11 +290,13 @@ def _build(db: Session, keys: dict[str, set[str]] | None = None, period: periods
         "spin_available": spin is not None,
         "totals": {**totals, "all": sum(known_totals)},
         "new_in_period": {**new, "all": new_all},
-        "previous_period": {**before, "all": before_all},
-        "change_pct": {**{s: _change(new[s], before[s]) for s in SOURCES}, "all": _change(new_all, before_all)},
+        # No comparison for all time
+        "previous_period": {**before, "all": before_all} if before is not None else None,
+        "change_pct": ({**{s: _change(new[s], before[s]) for s in SOURCES}, "all": _change(new_all, before_all)}
+                       if before is not None else None),
         "average_per_day": {
             "period": per_day(new, new_all, period.days),
-            "previous": per_day(before, before_all, previous.days),
+            "previous": per_day(before, before_all, previous.days) if previous else None,
         },
         "source_mix": [
             {"source": s, "count": new[s], "pct": round(new[s] / new_all * 100) if new_all else 0} for s in SOURCES
@@ -319,8 +330,10 @@ def _build(db: Session, keys: dict[str, set[str]] | None = None, period: periods
     }
 
 
-def _cache_key(scope, period: periods.Period) -> tuple:
+def _cache_key(scope, period) -> tuple:
     """Per viewer scope (admin, or the vendor: its logins see the same leads) and per period."""
+    if isinstance(period, periods.AllTime):
+        return ("analytics", "overview", scope, "all", periods.today_ist().isoformat())
     return ("analytics", "overview", scope, period.date_from.isoformat(), period.date_to.isoformat())
 
 
