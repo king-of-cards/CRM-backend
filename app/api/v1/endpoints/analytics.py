@@ -25,6 +25,7 @@ from app.api.deps import DashboardPeriod, DbSession, LeadViewer
 from app.core import response_cache
 from app.services import access, periods
 from app.db.session import engine, read_engine
+from app.models.lead_meta import LeadMeta
 from app.models.wedding_lead import WeddingLead
 from app.models.wedding_plan import WeddingPlan
 from app.models.whatsapp_lead import WhatsAppLead
@@ -131,6 +132,37 @@ def _workflow_spin_rows() -> list[dict] | None:
 # ── Build the overview ─────────────────────────────────────────────────
 def _counts(rows_by_source: dict[str, list], keep) -> dict[str, int]:
     return {s: sum(1 for arrival in rows if keep(arrival)) for s, rows in rows_by_source.items()}
+
+
+def _outcome(metas: list) -> dict:
+    """Numbers over the CRM details of a set of leads (one LeadMeta or None per lead)."""
+    leads = len(metas)
+    converted = sum(1 for m in metas if m is not None and m.converted)
+    quoted = [m.quoted_amount for m in metas if m is not None and m.quoted_amount is not None]
+    return {
+        "leads": leads,
+        "interested": sum(1 for m in metas if m is not None and m.interest == "interested"),
+        "converted": converted,
+        "converted_pct": round(converted / leads * 100, 1) if leads else None,
+        "quoted_count": len(quoted),
+        "quoted_total": sum(quoted),
+    }
+
+
+def _outcomes(db: Session, keys_by_source: dict[str, list[str]], spin_available: bool) -> dict:
+    """{source: outcome, "all": outcome}; spin is None when the workflow database can't be read."""
+    out: dict[str, Any] = {}
+    every: list = []
+    for source in SOURCES:
+        if source == "spin" and not spin_available:
+            out[source] = None
+            continue
+        metas = {m.lead_key: m for m in db.exec(select(LeadMeta).where(LeadMeta.source == source))}
+        per_lead = [metas.get(k) for k in keys_by_source[source]]
+        out[source] = _outcome(per_lead)
+        every += per_lead
+    out["all"] = _outcome(every)
+    return out
 
 
 def _change(new: int, previous: int) -> int | None:
@@ -247,6 +279,15 @@ def _build(db: Session, keys: dict[str, set[str]] | None = None,
     wp_p = [r for r, d in zip(wp, arrival["wedding_planner"]) if in_period(d)]
     spin_p = [r for r, d in zip(spin or [], arrival["spin"]) if in_period(d)]
 
+    # CRM outcomes of the period's leads: crm_lead_meta matched by the same lead keys as the lists
+    period_keys = {
+        "whatsapp": [r[-1] for r in wa_p],
+        "wedding": [r[-1] for r in wd_p],
+        "wedding_planner": [r[-1] for r in wp_p],
+        "spin": [str(r.get("key")) for r in spin_p],
+    }
+    outcomes = _outcomes(db, period_keys, spin_available=spin is not None)
+
     cities = Counter(c for c in (_clean_place(r[2]) for r in wd_p) if c)
     cities.update(c for c in (_clean_place(r[2]) for r in wp_p) if c)
     countries = Counter((r[2] or "").strip() for r in wa_p if r[2])
@@ -307,6 +348,7 @@ def _build(db: Session, keys: dict[str, set[str]] | None = None,
         "trend": trend,
         "upcoming_by_month": [{"month": k, **v} for k, v in upcoming.items()],
         "upcoming_30_days": {**next_30, "all": sum(next_30.values())},
+        "outcomes": outcomes,
         "needs_attention": {
             "not_shared": open_not_shared,
             "over_budget": open_over_budget,

@@ -951,6 +951,7 @@ separate "submitted" time. Leads with no arrival time are never in a period, so 
 | `upcoming_30_days` | Events in 30 days | Leads that arrived in the period whose event is from today to today + 30 |
 | `upcoming_by_month` | Upcoming events by month | Leads that arrived in the period, by event month (from this month) |
 | `needs_attention` | Needs attention | `{not_shared, over_budget, total}` among the leads that arrived in the period |
+| `outcomes` | CRM results per source | `{spin, whatsapp, wedding, wedding_planner, all}`, each `{leads, interested, converted, converted_pct, quoted_count, quoted_total}` over the leads that arrived in the period (all of the viewer's leads for `period=all`). `interested`: interest is "interested". `converted`: converted is yes. `converted_pct`: of `leads`, 1 decimal, `null` with no leads. `quoted_count` / `quoted_total`: leads with a quote, and the sum in rupees. The values come from the CRM details (`crm_lead_meta`) with the same lead keys as the lists, so they equal the list totals for `interest=interested`, `converted=yes` and `quote=has` with the same dates. `spin` is `null` (and left out of `all`) when the workflow database can't be read |
 | `this_week`, `last_week` | (current screen) | **Original meaning**, not the period: the last 7 days vs the 7 before. Kept until the screen uses `new_in_period` / `previous_period`, then removed |
 
 Also in the response:
