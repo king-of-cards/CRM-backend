@@ -26,6 +26,7 @@ per-vendor access rules, and the CRM details endpoint `PUT /leads/{source}/{lead
 7. [Limits](#7-limits)
 8. [File downloads: filenames and CORS](#8-file-downloads-filenames-and-cors)
 9. [Dashboard: date filter](#9-dashboard-date-filter)
+10. [Lead list filters](#10-lead-list-filters)
 
 ---
 
@@ -540,12 +541,15 @@ Admins and vendor users.
 There is one route per source, because each list has its own filters. `format` is
 `xlsx` (default) or `csv` for all of them.
 
-| Route | Other query parameters (same meaning as the list endpoint) |
+| Route | Query parameters |
 |---|---|
-| `GET /crm-leads/spin/export` | `search`, `sort`, `order` (default `asc`), `branch`, `pincode`, `budget`, `vendor_id` (admins only; ignored for vendors), `interest`, `converted`, `quoted_op`, `quoted_value` |
-| `GET /crm-leads/whatsapp/export` | `search`, `country`, `sort` (`submitted_at` default, `event_date`, `country`, `phone`, `first_seen_at`), `order` (default `desc`) |
-| `GET /crm-leads/wedding/export` | `search`, `occasion`, `shared_with`, `hide_repeats`, `sort` (`submitted_at` default, `event_date`, `budget_amount`, `name`, `city`), `order` (default `desc`) |
-| `GET /crm-leads/wedding_planner/export` | `search`, `shared_with`, `fits_budget`, `last_step`, `sort` (`updated` default, `wedding_date`, `total_budget`, `total_guests`, `plan_estimate`, `name`), `order` (default `desc`) |
+| `GET /crm-leads/spin/export` | The `GET /spin-leads` filters (see [Lead list filters](#10-lead-list-filters)), `sort`, `order` (default `asc`) |
+| `GET /crm-leads/whatsapp/export` | The `GET /whatsapp-leads` filters, `sort` (`submitted_at` default, `event_date`, `country`, `phone`, `first_seen_at`), `order` (default `desc`) |
+| `GET /crm-leads/wedding/export` | The `GET /wedding-leads` filters, `sort` (`submitted_at` default, `event_date`, `budget_amount`, `name`, `city`), `order` (default `desc`) |
+| `GET /crm-leads/wedding_planner/export` | The `GET /wedding-plans` filters, `sort` (`updated` default, `wedding_date`, `total_budget`, `total_guests`, `plan_estimate`, `name`), `order` (default `desc`) |
+
+Each export uses exactly the same filter code as its list, so it always contains the list's leads
+in the list's order. The validation errors are the same too.
 
 **Response `200`:** a file with `Content-Disposition: attachment; filename="<source>-leads-YYYY-MM-DD.<ext>"`.
 
@@ -806,7 +810,7 @@ can't see.
 | Endpoint | Vendor users get |
 |---|---|
 | `GET /spin-leads` | Their spin leads (workflow and CRM-added). `vendor_id` is ignored. |
-| `GET /spin-leads/filter-options` | Budgets and pincodes counted over their leads. |
+| `GET /spin-leads/filter-options`, `/whatsapp-leads/filter-options`, `/wedding-leads/filter-options`, `/wedding-plans/filter-options` | Dropdown values counted over their leads; no vendors (see [Lead list filters](#10-lead-list-filters)). |
 | `GET /whatsapp-leads`, `/wedding-leads`, `/wedding-plans` | Their leads. |
 | `GET /whatsapp-leads/stats`, `/wedding-leads/stats`, `/wedding-plans/stats` | Numbers over their leads. |
 | `GET /analytics/overview` | Built from their leads only, for the period asked (see [Dashboard](#9-dashboard-date-filter)). |
@@ -942,5 +946,88 @@ their vendor's entry, and `refresh=true` clears the cache.
 ### The lists (`/spin-leads`, `/whatsapp-leads`, `/wedding-leads`, `/wedding-plans`)
 
 With `date_from` / `date_to`, only leads that arrived in the period are listed and counted, using
-the same arrival dates, IST days and validation as above. Without them, nothing changes. Exports
-don't take a period.
+the same arrival dates, IST days and validation as above. Without them, nothing changes. The
+exports and stats take the same parameters (see [Lead list filters](#10-lead-list-filters)).
+
+---
+
+## 10. Lead list filters
+
+`GET /spin-leads`, `/whatsapp-leads`, `/wedding-leads` and `/wedding-plans` take the parameters
+below. The same parameters work on:
+- each source's export (`GET /crm-leads/{source}/export`);
+- the stats endpoints (`GET /whatsapp-leads/stats`, `/wedding-leads/stats`, `/wedding-plans/stats`),
+  whose numbers are all computed over the filtered leads.
+
+A list, its export and its stats share one filter definition, so for the same parameters the list
+`total`, the export's rows and the stats `total` are always equal. Spin has no stats endpoint; use
+the list's `total`.
+
+**Combining:** different parameters combine with AND; repeated values of one parameter
+(`?interest=interested&interest=not_set`) combine with OR. Vendor users only ever get their own
+leads, whatever they send.
+
+### Parameters
+
+✔ = available for that source.
+
+| Parameter | Spin | International | Wedding | Planner | Meaning |
+|---|---|---|---|---|---|
+| `search` | ✔ | ✔ | ✔ | ✔ | Text match. Name and email where the source has them, and the phone by its digits (`+91 98450` finds `919845…`). Spin: every visible text field. International: phone, country and event-date text. Wedding: name, email, city, occasion, leads shared. Planner: name, email, city, plan ID, traditions, leads shared |
+| `date_from`, `date_to` | ✔ | ✔ | ✔ | ✔ | Arrival date, IST days, inclusive (see [Dashboard](#9-dashboard-date-filter)) |
+| `event_from`, `event_to` | ✔ | ✔ | ✔ | ✔ | Event date, `YYYY-MM-DD`, inclusive. Spin: occasion date. International and Wedding: the event date when it reads as a date (text such as "April 2027" never matches). Planner: wedding date (first day, else the 1st of the month) |
+| `upcoming_days` | ✔ | ✔ | ✔ | ✔ | Event from today (IST) to today + N, N from 1 to 366 |
+| `vendor_id` (repeatable) | ✔ | ✔ | ✔ | ✔ | Assigned to, exactly as the "Assigned to" chip. **Admins only**; ignored for vendor users |
+| `unassigned=true` | ✔ | ✔ | ✔ | ✔ | No vendor. Admins only. With `vendor_id`: either |
+| `interest` (repeatable) | ✔ | ✔ | ✔ | ✔ | `interested`, `not_interested`, `other`, `follow_up`, `not_set` |
+| `converted` | ✔ | ✔ | ✔ | ✔ | `yes` / `no` |
+| `quote` | ✔ | ✔ | ✔ | ✔ | `has`, `none`, `gt:<amount>` (more than), `lt:<amount>` (less than), in rupees |
+| `origin` (repeatable) | `workflow`, `added`, `imported` | `sheet`, `added`, `imported` | same | same | Where the lead came from |
+| `branch` | ✔ | | | | Branch id |
+| `pincode` | ✔ | | | | Pincode starts with |
+| `budget` | ✔ | | | | Exact budget value, e.g. `10-20` |
+| `country` | | ✔ | | | Exact country |
+| `occasion` | | | ✔ | | Exact occasion |
+| `shared_with` | | | ✔ | ✔ | Partner name, or `__none__` for not shared |
+| `hide_repeats=true` | | | ✔ | | Leave out repeat submissions |
+| `fits_budget` | | | | ✔ | `true` / `false` |
+| `last_step` | | | | ✔ | The planner step, e.g. `pdf` |
+| `city` | | | ✔ | ✔ | City contains, ignoring case (`Hyderabad` finds "Shamirpet, Hyderabad"). Planner: wedding city |
+| `budget_min`, `budget_max` | | | ✔ | ✔ | Inclusive, rupees. Wedding: the budget amount; Planner: the total budget |
+| `guests_min`, `guests_max` | | | | ✔ | Inclusive total guests |
+| `page`, `page_size`, `sort`, `order` | ✔ | ✔ | ✔ | ✔ | Paging and sort (lists and exports) |
+
+**Older spin parameters**, still accepted until the frontend switches, then removed:
+`interest=none` (= `not_set`), and `quoted_op` (`set`, `unset`, `eq`, `ne`, `gt`, `gte`, `lt`,
+`lte`) with `quoted_value`. A `quote` parameter wins over them.
+
+### Errors (400)
+
+| Case | `detail` |
+|---|---|
+| Bad `quote` | `quote must be has, none, gt:<amount> or lt:<amount> (e.g. gt:50000)` |
+| `event_from` after `event_to` | `event_from must be on or before event_to` |
+| `upcoming_days` with `event_from` / `event_to` | `Use either upcoming_days or event_from / event_to, not both` |
+| `upcoming_days` outside 1–366 | `upcoming_days must be between 1 and 366` |
+| Event date not `YYYY-MM-DD` | `event_from must be a date like 2026-12-20 (YYYY-MM-DD)` |
+| `origin` not available for the source | `origin 'workflow' doesn't exist for International leads; use sheet, added, imported` |
+| Unknown `interest` | `interest must be one of: interested, not_interested, other, follow_up, not_set` |
+| A minimum above its maximum | `budget_min must not be more than budget_max` (also guests) |
+| Arrival dates | As in [Dashboard](#9-dashboard-date-filter) |
+
+### Filter options (dropdown values)
+
+| Endpoint | Returns |
+|---|---|
+| `GET /spin-leads/filter-options` | `budgets`, `pincodes`, `has_branch` / `has_pincode` / `has_budget` (as before), plus `branches` (`[{id, name, count}]`), `origins`, `interests`, `vendors` |
+| `GET /whatsapp-leads/filter-options` | `countries`, `origins`, `interests`, `vendors` |
+| `GET /wedding-leads/filter-options` | `occasions`, `cities`, `shared_with` (including `__none__`), `origins`, `interests`, `vendors` |
+| `GET /wedding-plans/filter-options` | `cities`, `last_steps`, `shared_with` (including `__none__`), `origins`, `interests`, `vendors` |
+
+- **Format:** values are `[{value, count}]`, most common first. Counts are over all the leads the
+  viewer may see (vendor users: their own), not narrowed by other selected filters.
+- **Cities:** cleaned like the dashboard's Top cities ("Shamirpet, Hyderabad" becomes "Hyderabad"),
+  which suits the `city` "contains" filter.
+- **`interests`:** includes `not_set`.
+- **`vendors`:** `[{id, name}]` of the active vendors for admins; empty for vendor users, since
+  vendor filtering is admin-only.
