@@ -21,7 +21,10 @@ from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 
-from app.services.crm_leads.fields import FIELDS, READ_ONLY_COLUMNS, SOURCE_LABELS, display_date, display_datetime
+from app.models.vendor_to_koc import STATUS_LABELS as UPDATE_LABELS
+from app.services.crm_leads.fields import (
+    FIELDS, READ_ONLY_COLUMNS, SOURCE_LABELS, UPLOAD_CRM_FIELDS, display_date, display_datetime,
+)
 
 IST = timezone(timedelta(hours=5, minutes=30))
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024
@@ -228,8 +231,8 @@ def content_disposition(name: str) -> str:
 # ── Template ───────────────────────────────────────────────────────────
 def template(source: str, fmt: str, branch_names: list[str], vendor_names: list[str]) -> tuple[bytes, str, str]:
     """The export's columns, with one example row in the screen's formats. Read-only columns
-    (Interest, quote, converted, Branch code, Estimate…) are kept so files match the export;
-    they are ignored on upload."""
+    (Quoted date, Branch code, Estimate…) are kept so files match the export; they are ignored
+    on upload. Update, Quoted amount and Conversion amount are read for new leads."""
     from app.services.crm_leads.export import headers as layout_headers
     from app.services.crm_leads.export import kinds as layout_kinds
 
@@ -240,7 +243,7 @@ def template(source: str, fmt: str, branch_names: list[str], vendor_names: list[
         return write_csv(headers, [example], kinds), CSV_TYPE, "csv"
 
     read_only = set(READ_ONLY_COLUMNS[source])
-    defs = {f.label: f for f in FIELDS[source]}
+    defs = {f.label: f for f in (*FIELDS[source], *UPLOAD_CRM_FIELDS)}
     wb = Workbook()
     ws = wb.active
     ws.title = "Leads"
@@ -280,6 +283,7 @@ def template(source: str, fmt: str, branch_names: list[str], vendor_names: list[
         "Branch": branch_names if source == "spin" else [],
         # "<vendor> · auto" isn't offered (Automatic covers it) but uploads still accept it
         "Assigned to": ["Automatic", "Unassigned"] + vendor_names,
+        "Update": [label for label in UPDATE_LABELS.values()],          # Pending first
     }
     col = 0
     for header, values in choices.items():

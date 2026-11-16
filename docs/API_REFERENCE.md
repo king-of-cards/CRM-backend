@@ -57,7 +57,7 @@ details endpoint (`PUT /leads/{source}/{lead_key}/crm`).
 Workflow spin leads keep their numeric id (`101`) and sheet leads keep their sheet key, so a
 `crm-` key never clashes with them.
 
-**CRM fields are separate.** Assigned vendor, interest, converted, quoted date/amount and notes
+**CRM fields are separate.** Assigned vendor, Update, quoted date/amount, conversion amount and notes
 are **not** lead fields. They are stored in `crm_lead_meta` and edited only through
 `PUT /leads/{source}/{lead_key}/crm` (see [Access](#5-access-who-sees-and-edits-what) for who may
 change which field).
@@ -166,7 +166,7 @@ Export columns that are shown but never read back are listed under each source a
 | `assigned_to` | Assigned to | assigned | | assigned to, vendor |
 | `created_at` | Created | datetime | | created at |
 
-Read-only: Branch code, Interest, Quoted amount, Quoted date, Converted.
+Read-only: Branch code, Quoted date. Uploads only: Update, Quoted amount, Conversion amount (see below).
 Extra columns: Pincode (`pincode`), Lead occasion (`occasion`), Bride/Groom name, Bride/Groom
 phone, Event venue, Coverage days, Quantity required, Service, Service types, Service budget,
 Service quantity, Other wedding services. Indian numbers are stored in the workflow's 10-digit
@@ -182,7 +182,7 @@ form; `occasionDate` as `YYYY-MM-DD`.
 | `assigned_to` | Assigned to | assigned | | |
 | `submitted_at` | Submitted | datetime | | submitted at, submission time, timestamp |
 
-Read-only: Interest, Quoted amount, Quoted date, Converted.
+Read-only: Quoted date. Uploads only: Update, Quoted amount, Conversion amount (see below).
 
 ### wedding (Wedding & event photography)
 
@@ -198,7 +198,7 @@ Read-only: Interest, Quoted amount, Quoted date, Converted.
 | `assigned_to` | Assigned to | assigned | | |
 | `submitted_at` | Submitted | datetime | | timestamp, submitted at |
 
-Read-only: Interest, Quoted amount, Quoted date, Converted. `is_repeat` is set automatically
+Read-only: Quoted date. Uploads only: Update, Quoted amount, Conversion amount (see below). `is_repeat` is set automatically
 when the phone already exists in this source.
 
 ### wedding_planner
@@ -218,14 +218,27 @@ when the phone already exists in this source.
 | `assigned_to` | Assigned to | assigned | | |
 | `updated` | Updated | datetime | | last updated |
 
-Read-only: Estimate, Fits budget, Interest, Quoted amount, Quoted date, Converted, Last step.
+Read-only: Estimate, Fits budget, Quoted date, Last step. Uploads only: Update, Quoted amount, Conversion amount (see below).
 Extra columns: Wedding month, First day of celebrations, Wedding type, Family home city, Kind of
 place, Traditions, Food, Alcohol, Budget includes jewellery and outfits, Jewellery and outfits,
 Priority 1–3, Shortlisted vendors, Consent: share plan, Consent: offers on WhatsApp.
 
-**Never taken from uploads or add/edit:** interest, quote, converted, notes (set with
-`PUT /leads/…/crm`), "leads shared", and fields only the planner tool or the workflow fill in.
-Unknown keys in `values` are ignored.
+**Uploads only (new leads):** three CRM columns are read from bulk uploads and saved in
+`crm_lead_meta` with the new lead (like Assigned to). They aren't add/edit form fields; change
+them later with `PUT /leads/…/crm`. Each row's `values` carries them under these keys:
+
+| Key | Label | Accepted | Rules |
+|---|---|---|---|
+| `update_status` | Update | a code (`will_call_back`) or its label (`Will call back`), any case; empty or `Pending` = Pending | Unknown value: row error |
+| `quoted_amount` | Quoted amount | rupees: `150000`, `1,50,000`, `₹1,50,000`, `1.5 lakh` | 0 to 10,00,00,000, else a row error |
+| `conversion_amount` | Conversion amount | same | same |
+
+Duplicates are skipped as before, so an existing lead's CRM details never change through an
+upload. A new lead that is automatic, Pending and without amounts gets no `crm_lead_meta` row.
+
+**Never taken from uploads or add/edit:** quoted date, notes (set with `PUT /leads/…/crm`),
+"leads shared", and fields only the planner tool or the workflow fill in. Unknown keys in
+`values` are ignored.
 
 ---
 
@@ -362,8 +375,9 @@ Checks an uploaded file and returns every row with its errors and duplicate stat
 - The first non-empty row is the header. Empty rows are skipped. Row numbers in the
   response are the row numbers as shown in Excel.
 - Columns are matched to fields by label, key or alias. If two columns match the same
-  field, the first one wins. Read-only export columns (Interest, quote, converted, …) are
+  field, the first one wins. Read-only export columns (Quoted date, Branch code, …) are
   listed in `read_only_columns`; other columns that match no field in `ignored_columns`.
+  Update, Quoted amount and Conversion amount are read (see [Uploads only](#2-fields-per-source)).
 - Admin only.
 
 **Response `200`**
@@ -373,7 +387,7 @@ Checks an uploaded file and returns every row with its errors and duplicate stat
   "source": "spin",
   "columns": { "Phone": "phone", "Name": "name", "Branch": "branch" },
   "ignored_columns": ["Notes from sales"],
-  "read_only_columns": ["Interest", "Quoted amount", "Quoted date", "Converted"],
+  "read_only_columns": ["Branch code", "Quoted date"],
   "rows": [
     {
       "row": 2,
@@ -561,27 +575,27 @@ same columns **without Assigned to**:
 
 **spin**
 
-| Lead | Email | Contact | Branch | Branch code | Location | Occasion | Event date | Budget | Assigned to | Interest | Quoted amount | Quoted date | Converted | Created |
+| Lead | Email | Contact | Branch | Branch code | Location | Occasion | Event date | Budget | Assigned to | Update | Quoted amount | Quoted date | Conversion amount | Created |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| Asha Rao | asha@example.com | +919845012345 | Jayanagar | JNG-004 · Bangalore | Bangalore · 560011 | Wedding | 20 Dec 2026 | ₹10–20 | Phodeo | Interested | ₹45,000 | 20 Nov 2026 | No | 14 Nov 2026, 10:30 am |
+| Asha Rao | asha@example.com | +919845012345 | Jayanagar | JNG-004 · Bangalore | Bangalore · 560011 | Wedding | 20 Dec 2026 | ₹10–20 | Phodeo | Interested | ₹45,000 | 20 Nov 2026 | | 14 Nov 2026, 10:30 am |
 
 **whatsapp**
 
-| Lead | Country | Event date | Assigned to | Interest | Quoted amount | Quoted date | Converted | Submitted |
+| Lead | Country | Event date | Assigned to | Update | Quoted amount | Quoted date | Conversion amount | Submitted |
 |---|---|---|---|---|---|---|---|---|
-| +971501234567 | United Arab Emirates | 20 Dec 2026 | OHP · auto | Others | | | No | 14 Nov 2026, 10:30 am |
+| +971501234567 | United Arab Emirates | 20 Dec 2026 | OHP · auto | Pending | | | | 14 Nov 2026, 10:30 am |
 
 **wedding**
 
-| Lead | Email | Contact | Occasion | Event date | City | Budget | Assigned to | Interest | Quoted amount | Quoted date | Converted | Submitted |
+| Lead | Email | Contact | Occasion | Event date | City | Budget | Assigned to | Update | Quoted amount | Quoted date | Conversion amount | Submitted |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| Ravi Kumar | ravi@example.com | +919845010003 | Wedding | 20 Dec 2026 | Bangalore | ₹1,50,000 | Phodeo · auto | Interested | ₹60,000 | 20 Nov 2026 | Yes | 14 Nov 2026, 10:30 am |
+| Ravi Kumar | ravi@example.com | +919845010003 | Wedding | 20 Dec 2026 | Bangalore | ₹1,50,000 | Phodeo · auto | Converted | ₹60,000 | 20 Nov 2026 | ₹55,000 | 14 Nov 2026, 10:30 am |
 
 **wedding_planner**
 
-| Lead | Role | Email | Contact | Wedding date | Wedding city | Guests | Guests staying | Budget | Budget range | Estimate | Fits budget | Assigned to | Interest | Quoted amount | Quoted date | Converted | Updated | Last step |
+| Lead | Role | Email | Contact | Wedding date | Wedding city | Guests | Guests staying | Budget | Budget range | Estimate | Fits budget | Assigned to | Update | Quoted amount | Quoted date | Conversion amount | Updated | Last step |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| Meera | Bride | meera@example.com | +919845010004 | 20 Dec 2027 | Udaipur | 300 | 120 | ₹25,00,000 | 20L–30L | ₹23,10,000 | Yes | OHP · auto | Interested | ₹24,00,000 | 20 Nov 2026 | No | 14 Nov 2026, 10:30 am | pdf |
+| Meera | Bride | meera@example.com | +919845010004 | 20 Dec 2027 | Udaipur | 300 | 120 | ₹25,00,000 | 20L–30L | ₹23,10,000 | Yes | OHP · auto | Will call back | ₹24,00,000 | 20 Nov 2026 | | 14 Nov 2026, 10:30 am | pdf |
 
 Notes:
 - Spin: Branch is the branch name (`Hyderabad - Kondhapur`), Branch code is code and city
@@ -594,7 +608,9 @@ Notes:
   (`December 2027`) when there's no date.
 - Lead is the name only (empty when there is none), so a re-upload never saves a phone or Plan ID
   as a name. Countdown text ("in 36 days") isn't exported.
-- Interest values: `Interested`, `Not interested`, `Others`, `Follow up` (older leads).
+- Update values: `Pending` (empty), `Converted`, `Not converted`, `Already purchased somewhere else`,
+  `Already purchased with us`, `Will call back`, `Interested`, `Not interested` (the Vendor → KOC labels).
+  They upload back, as do the amounts.
 
 **Formatting**
 
@@ -606,7 +622,7 @@ Notes:
 | Money | Number cells (full rupees) with a ₹ format and Indian grouping → `₹1,50,000` | Plain number: `150000` |
 | Spin budget ranges | Text `₹10–20` | `₹10–20` |
 | Assigned to | The chip text: `Phodeo`, `Phodeo · auto` or `Unassigned`. **Admins only:** vendor logins' exports leave this column out | Same |
-| Converted / Fits budget | `Yes` / `No` | `Yes` / `No` |
+| Fits budget | `Yes` / `No` | `Yes` / `No` |
 | Other text | Always a text cell, never a formula | Values starting with `=`, `+`, `-`, `@`, tab or CR get a leading `'` |
 | Other | Header row bold and frozen | UTF-8 with BOM, comma-separated, CRLF line endings |
 
@@ -792,11 +808,15 @@ can't see.
 
 | Field | Admin | Vendor user of the assigned vendor | Other vendor users |
 |---|---|---|---|
-| `interest` (`interested`, `not_interested`, `other`, `follow_up`), `quoted_amount`, `quoted_date`, `converted` | ✔ | ✔ | **404** |
+| `update_status` (`converted`, `not_converted`, `purchased_elsewhere`, `purchased_with_us`, `will_call_back`, `interested`, `not_interested`; `null` = Pending), `quoted_amount`, `quoted_date`, `conversion_amount` (rupees, 0–100,000,000) | ✔ | ✔ | **404** |
 | `vendor_id` (a vendor = manual; `null` = automatic) | ✔ | **403** `Only an admin can assign leads.` | **404** |
 | `notes` | ✔ | ✔ | **404** |
 
 - `updated_by` records the login that made the last change (admin or vendor).
+- `interest` and `converted` were replaced by `update_status`: sending either answers **422**
+  (`interest was replaced by update_status (…)`), and nothing is saved.
+- The answer (and every list row's `crm` object) has `update_status` and `conversion_amount`;
+  `interest`, `converted` and `converted_at` are gone.
 - Setting `vendor_id` to `null` also switches a lead uploaded as unassigned to automatic
   assignment.
 - A `crm-` key with no matching added/imported lead in `{source}` answers `404` (all sources).
@@ -834,6 +854,12 @@ preview, import, add, get, edit, archive, unarchive), `POST`/`PATCH /vendors`,
 item's `crm` object has `auto_assign` (`false` for leads uploaded unassigned).
 
 ---
+
+**`GET /vendors/stats` (admin):** per vendor `leads`, `pending` and a count for each of the 7
+update values (`converted`, `not_converted`, `purchased_elsewhere`, `purchased_with_us`,
+`will_call_back`, `interested`, `not_interested`), `quoted` / `quoted_value` (leads with a quote and
+their sum), `converted_value` (the sum of conversion amounts), `conversion_rate` (`converted` of
+`leads`, %) and `by_source`. The old `other` and `follow_up` counts are gone.
 
 ## 7. Limits
 
@@ -954,7 +980,7 @@ separate "submitted" time. Leads with no arrival time are never in a period, so 
 | `upcoming_30_days` | Events in 30 days | Leads that arrived in the period whose event is from today to today + 30 |
 | `upcoming_by_month` | Upcoming events by month | Leads that arrived in the period, by event month (from this month) |
 | `needs_attention` | Needs attention | `{not_shared, over_budget, total}` among the leads that arrived in the period |
-| `outcomes` | CRM results per source | `{spin, whatsapp, wedding, wedding_planner, all}`, each `{leads, interested, converted, converted_pct, quoted_count, quoted_total}` over the leads that arrived in the period (all of the viewer's leads for `period=all`). `interested`: interest is "interested". `converted`: converted is yes. `converted_pct`: of `leads`, 1 decimal, `null` with no leads. `quoted_count` / `quoted_total`: leads with a quote, and the sum in rupees. The values come from the CRM details (`crm_lead_meta`) with the same lead keys as the lists, so they equal the list totals for `interest=interested`, `converted=yes` and `quote=has` with the same dates. `spin` is `null` (and left out of `all`) when the workflow database can't be read |
+| `outcomes` | CRM results per source | `{spin, whatsapp, wedding, wedding_planner, all}`, each `{leads, interested, converted, converted_pct, quoted_count, quoted_total}` over the leads that arrived in the period (all of the viewer's leads for `period=all`). `interested` / `converted`: the Update is "interested" / "converted". `converted_pct`: of `leads`, 1 decimal, `null` with no leads. `quoted_count` / `quoted_total`: leads with a quote, and the sum in rupees. The values come from the CRM details (`crm_lead_meta`) with the same lead keys as the lists, so they equal the list totals for `update_status=interested`, `update_status=converted` and `quote=has` with the same dates. `spin` is `null` (and left out of `all`) when the workflow database can't be read |
 | `this_week`, `last_week` | (current screen) | **Original meaning**, not the period: the last 7 days vs the 7 before. Kept until the screen uses `new_in_period` / `previous_period`, then removed |
 
 Also in the response:
@@ -985,7 +1011,7 @@ A list, its export and its stats share one filter definition, so for the same pa
 the list's `total`.
 
 **Combining:** different parameters combine with AND; repeated values of one parameter
-(`?interest=interested&interest=not_set`) combine with OR. Vendor users only ever get their own
+(`?update_status=interested&update_status=pending`) combine with OR. Vendor users only ever get their own
 leads, whatever they send.
 
 ### Parameters
@@ -1000,9 +1026,9 @@ leads, whatever they send.
 | `upcoming_days` | ✔ | ✔ | ✔ | ✔ | Event from today (IST) to today + N, N from 1 to 366 |
 | `vendor_id` (repeatable) | ✔ | ✔ | ✔ | ✔ | Assigned to, exactly as the "Assigned to" chip. **Admins only**; ignored for vendor users |
 | `unassigned=true` | ✔ | ✔ | ✔ | ✔ | No vendor. Admins only. With `vendor_id`: either |
-| `interest` (repeatable) | ✔ | ✔ | ✔ | ✔ | `interested`, `not_interested`, `other`, `follow_up`, `not_set` |
-| `converted` | ✔ | ✔ | ✔ | ✔ | `yes` / `no` |
-| `quote` | ✔ | ✔ | ✔ | ✔ | `has`, `none`, `gt:<amount>` (more than), `lt:<amount>` (less than), in rupees |
+| `update_status` (repeatable) | ✔ | ✔ | ✔ | ✔ | `converted`, `not_converted`, `purchased_elsewhere`, `purchased_with_us`, `will_call_back`, `interested`, `not_interested`, `pending` (no update yet) |
+| `quote` | ✔ | ✔ | ✔ | ✔ | Quoted amount: `has`, `none`, `gt:<amount>` (more than), `lt:<amount>` (less than), in rupees |
+| `conversion` | ✔ | ✔ | ✔ | ✔ | Conversion amount: same values as `quote` |
 | `origin` (repeatable) | `workflow`, `added`, `imported` | `sheet`, `added`, `imported` | same | same | Where the lead came from |
 | `branch` | ✔ | | | | Branch id |
 | `pincode` | ✔ | | | | Pincode starts with |
@@ -1022,13 +1048,14 @@ leads, whatever they send.
 
 | Case | `detail` |
 |---|---|
-| Bad `quote` | `quote must be has, none, gt:<amount> or lt:<amount> (e.g. gt:50000)` |
+| Bad `quote` / `conversion` | `quote must be has, none, gt:<amount> or lt:<amount> (e.g. gt:50000)` (`conversion must be …`) |
+| Bad `update_status` | `update_status must be one of: converted, …, pending` |
+| The old `interest` / `converted` filters | `interest and converted were replaced by update_status (…)` |
 | `event_from` after `event_to` | `event_from must be on or before event_to` |
 | `upcoming_days` with `event_from` / `event_to` | `Use either upcoming_days or event_from / event_to, not both` |
 | `upcoming_days` outside 1–366 | `upcoming_days must be between 1 and 366` |
 | Event date not `YYYY-MM-DD` | `event_from must be a date like 2026-12-20 (YYYY-MM-DD)` |
 | `origin` not available for the source | `origin 'workflow' doesn't exist for International leads; use sheet, added, imported` |
-| Unknown `interest` | `interest must be one of: interested, not_interested, other, follow_up, not_set` |
 | A minimum above its maximum | `budget_min must not be more than budget_max` (also guests) |
 | Arrival dates | As in [Dashboard](#9-dashboard-date-filter) |
 
@@ -1036,16 +1063,16 @@ leads, whatever they send.
 
 | Endpoint | Returns |
 |---|---|
-| `GET /spin-leads/filter-options` | `budgets`, `pincodes`, `has_branch` / `has_pincode` / `has_budget` (as before), plus `branches` (`[{id, name, count}]`), `origins`, `interests`, `vendors` |
-| `GET /whatsapp-leads/filter-options` | `countries`, `origins`, `interests`, `vendors` |
-| `GET /wedding-leads/filter-options` | `occasions`, `cities`, `shared_with` (including `__none__`), `origins`, `interests`, `vendors` |
-| `GET /wedding-plans/filter-options` | `cities`, `last_steps`, `shared_with` (including `__none__`), `origins`, `interests`, `vendors` |
+| `GET /spin-leads/filter-options` | `budgets`, `pincodes`, `has_branch` / `has_pincode` / `has_budget` (as before), plus `branches` (`[{id, name, count}]`), `origins`, `updates`, `vendors` |
+| `GET /whatsapp-leads/filter-options` | `countries`, `origins`, `updates`, `vendors` |
+| `GET /wedding-leads/filter-options` | `occasions`, `cities`, `shared_with` (including `__none__`), `origins`, `updates`, `vendors` |
+| `GET /wedding-plans/filter-options` | `cities`, `last_steps`, `shared_with` (including `__none__`), `origins`, `updates`, `vendors` |
 
 - **Format:** values are `[{value, count}]`, most common first. Counts are over all the leads the
   viewer may see (vendor users: their own), not narrowed by other selected filters.
 - **Cities:** cleaned like the dashboard's Top cities ("Shamirpet, Hyderabad" becomes "Hyderabad"),
   which suits the `city` "contains" filter.
-- **`interests`:** includes `not_set`.
+- **`updates`:** `pending` first, then the 7 update values, each with its count (0 included).
 - **`vendors`:** `[{id, name}]` of the active vendors for admins; empty for vendor users, since
   vendor filtering is admin-only.
 

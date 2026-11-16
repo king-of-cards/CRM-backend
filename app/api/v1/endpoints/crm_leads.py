@@ -13,7 +13,7 @@
 
 source: spin | whatsapp | wedding | wedding_planner. Leads are stored with the sheet rows
 (origin added/imported, which the sheet sync never touches) or, for spin, in crm_spin_leads.
-CRM fields (vendor, interest, quote, converted, notes) are not here: they live in crm_lead_meta
+CRM fields (vendor, update, quote, conversion amount, notes) are not here: they live in crm_lead_meta
 and are edited with PUT /leads/{source}/{lead_key}/crm, using the lead_key returned here.
 """
 from typing import Any, Literal
@@ -37,7 +37,7 @@ from app.models.whatsapp_lead import WhatsAppLead
 from app.services.crm_leads import export as export_cols
 from app.services.crm_leads import service, tabular
 from app.services.crm_leads.fields import (
-    FIELDS, SOURCE_LABELS, clean_row, from_model, header_map, norm_header, read_only_headers,
+    FIELDS, SOURCE_LABELS, UPLOAD_CRM_KEYS, clean_row, from_model, header_map, norm_header, read_only_headers,
 )
 from app.services.branches import branches_by_id
 from app.services.lead_crm import active_vendors
@@ -102,7 +102,7 @@ async def import_preview(
     except tabular.UploadError as exc:
         raise HTTPException(400, str(exc))
 
-    names = header_map(source)
+    names = header_map(source, upload=True)          # + Update, Quoted amount, Conversion amount
     read_only = read_only_headers(source)
     mapping: dict[int, str] = {}
     matched: dict[str, str] = {}
@@ -115,7 +115,7 @@ async def import_preview(
             mapping[i] = key
             matched[header] = key
         elif normalized in read_only:
-            read_only_found.append(header)       # e.g. Interest, Quoted amount: set by vendors, not uploads
+            read_only_found.append(header)       # e.g. Quoted date: shown in exports, not read back
         elif header:
             ignored.append(header)
     if "phone" not in mapping.values():
@@ -159,7 +159,8 @@ def import_rows(source: Source, body: ImportBody, user: AdminUser, db: DbSession
         lead = service.create(db, source, c, ORIGIN_IMPORTED, user.id)
         result["status"] = "imported"
         result["lead_key"] = service.lead_key_of(source, lead)
-        service.save_assignment(db, source, result["lead_key"], c.assignment, user.id, empty_means_unassigned=True)
+        service.save_assignment(db, source, result["lead_key"], c.assignment, user.id, empty_means_unassigned=True,
+                                crm={k: c.values.get(k) for k in UPLOAD_CRM_KEYS})
         imported += 1
     db.commit()
     if imported:

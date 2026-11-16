@@ -1,9 +1,9 @@
 """Who may see and change which lead.
 
-  Admin        sees every lead; assigns vendors; can also change interest, quote, converted, notes.
+  Admin        sees every lead; assigns vendors; can also change update, quote, conversion amount, notes.
   Vendor user  (crm_users.role = vendor, linked to one vendor in crm_vendor_users) sees only the
                leads whose effective assignment is their vendor, in every source; can change
-               interest, quote, converted and notes on those leads; can't assign.
+               update, quote, conversion amount and notes on those leads; can't assign.
   Unassigned   leads are visible to admins only.
 
 The effective assignment is the one shown in "Assigned to" (lead_crm.meta_out): manual, then the

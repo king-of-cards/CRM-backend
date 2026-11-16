@@ -1,4 +1,4 @@
-"""CRM details on any lead: assigned vendor, interest, converted, quote, notes.
+"""CRM details on any lead: assigned vendor, update, quote, conversion amount, notes.
 Admins and vendor users; see save_lead_crm for who may change what.
 
 GET /leads/{source}/{lead_key}/crm   current details
@@ -12,7 +12,7 @@ from datetime import date, datetime, timezone
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlmodel import select
 
 from app.api.deps import DbSession, LeadViewer
@@ -26,15 +26,18 @@ from app.services.crm_leads import service as crm_leads
 router = APIRouter(prefix="/leads", tags=["lead crm"])
 
 Source = Literal["spin", "whatsapp", "wedding", "wedding_planner"]
+MAX_AMOUNT = 100_000_000          # rupees, for quoted_amount and conversion_amount
 
 
 class LeadCrmUpdate(BaseModel):
     # Send only what changes. vendor_id: a vendor's id, or null to go back to automatic.
     vendor_id: int | None = None
-    interest: Literal["interested", "not_interested", "other", "follow_up"] | None = None
-    converted: bool | None = None
+    # The same 7 values as Vendor -> KOC; null = Pending
+    update_status: Literal["converted", "not_converted", "purchased_elsewhere", "purchased_with_us",
+                           "will_call_back", "interested", "not_interested"] | None = None
     quoted_date: date | None = None
-    quoted_amount: int | None = Field(default=None, ge=0, le=100_000_000)
+    quoted_amount: int | None = Field(default=None, ge=0, le=MAX_AMOUNT)
+    conversion_amount: int | None = Field(default=None, ge=0, le=MAX_AMOUNT)
     notes: str | None = Field(default=None, max_length=5000)
 
     # Optional context so the answer can include the automatic (sheet / area) vendor
@@ -42,8 +45,21 @@ class LeadCrmUpdate(BaseModel):
     pincode: str | None = Field(default=None, max_length=20)
     sheet_vendor: str | None = Field(default=None, max_length=100)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _no_old_fields(cls, data):
+        """interest / converted were replaced by update_status: reject them (422), so an old
+        frontend fails visibly instead of saving nothing."""
+        if isinstance(data, dict):
+            old = [f for f in ("interest", "converted") if f in data]
+            if old:
+                raise ValueError(f"{' and '.join(old)} {'was' if len(old) == 1 else 'were'} replaced by "
+                                 "update_status (converted, not_converted, purchased_elsewhere, purchased_with_us, "
+                                 "will_call_back, interested, not_interested or null)")
+        return data
 
-EDITABLE = ("vendor_id", "interest", "converted", "quoted_date", "quoted_amount", "notes")
+
+EDITABLE = ("vendor_id", "update_status", "quoted_date", "quoted_amount", "conversion_amount", "notes")
 
 
 def _answer(db, source: str, lead_key: str, meta: LeadMeta | None, body: LeadCrmUpdate | None = None) -> dict:
@@ -72,8 +88,8 @@ def get_lead_crm(source: Source, lead_key: str, viewer: LeadViewer, db: DbSessio
 @router.put("/{source}/{lead_key}/crm")
 def save_lead_crm(source: Source, lead_key: str, body: LeadCrmUpdate, viewer: LeadViewer, db: DbSession):
     """Who may change what:
-      vendor_id                                                 admins only
-      interest, quoted_amount, quoted_date, converted, notes    admins and the assigned vendor's users
+      vendor_id                                                               admins only
+      update_status, quoted_amount, quoted_date, conversion_amount, notes     admins and the assigned vendor's users
     A vendor user can't see other vendors' or unassigned leads: those answer 404.
     updated_by records who saved."""
     if len(lead_key) > 100:
@@ -99,12 +115,6 @@ def save_lead_crm(source: Source, lead_key: str, body: LeadCrmUpdate, viewer: Le
     meta = _find(db, source, lead_key)
     if meta is None:
         meta = LeadMeta(source=source, lead_key=lead_key, updated_at=now)
-    if "converted" in changes:
-        changes["converted"] = bool(changes["converted"])
-        if changes["converted"] and not meta.converted:
-            meta.converted_at = now
-        elif not changes["converted"]:
-            meta.converted_at = None
     for field, value in changes.items():
         setattr(meta, field, value)
     if "vendor_id" in changes:

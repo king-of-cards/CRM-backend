@@ -16,14 +16,13 @@ from collections.abc import Callable
 from datetime import date, datetime, timezone
 from typing import Any
 
+from app.models.vendor_to_koc import STATUS_LABELS as UPDATE_LABELS   # None -> "Pending"
 from app.services import phones
 from app.services.lead_crm import assigned_label
 from app.services.stores import pincode_area, store_for
 
 Col = tuple[str, Callable[[dict], Any], str]   # (header, getter, kind: text | phone | date | datetime | money | int | yesno)
 
-INTEREST_LABELS = {"interested": "Interested", "not_interested": "Not interested", "other": "Others",
-                   "follow_up": "Follow up"}
 
 def to_datetime(value: Any) -> datetime | None:
     if not value:
@@ -74,10 +73,10 @@ def _g(key: str) -> Callable[[dict], Any]:
 ASSIGNED_HEADER = "Assigned to"         # left out of vendor logins' exports
 CRM_COLUMNS: list[Col] = [
     (ASSIGNED_HEADER, lambda i: assigned_label(i.get("crm")), "text"),
-    ("Interest", lambda i: INTEREST_LABELS.get(_crm(i, "interest"), _crm(i, "interest")), "text"),
+    ("Update", lambda i: UPDATE_LABELS.get(_crm(i, "update_status"), _crm(i, "update_status")), "text"),
     ("Quoted amount", lambda i: _crm(i, "quoted_amount"), "money"),
     ("Quoted date", lambda i: to_date(_crm(i, "quoted_date")), "date"),
-    ("Converted", lambda i: bool(_crm(i, "converted")), "yesno"),
+    ("Conversion amount", lambda i: _crm(i, "conversion_amount"), "money"),
 ]
 
 

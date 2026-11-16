@@ -25,11 +25,16 @@ class LeadMeta(SQLModel, table=True):
     # False = never assigned automatically (sheet / branch / area rules): the lead stays
     # unassigned until an admin picks a vendor. Uploaded rows with an empty "Assigned to".
     auto_assign: bool = Field(default=True, sa_column_kwargs={"server_default": "1"})
-    interest: str | None = Field(default=None, max_length=30, index=True)  # interested | follow_up | not_interested
-    converted: bool = Field(default=False, index=True)
-    converted_at: datetime | None = None
+    # "Update": the same 7 values as Vendor -> KOC (app/models/vendor_to_koc.UpdateStatus); None = Pending
+    update_status: str | None = Field(default=None, max_length=30, index=True)
     quoted_date: date | None = None
     quoted_amount: int | None = None                                         # rupees
+    conversion_amount: int | None = None                                     # rupees
+    # Legacy (replaced by update_status, see migrations/2026-11-16_update_and_amounts.sql): kept in
+    # the table for the rollback; the API never reads them and only writes the insert defaults.
+    interest: str | None = Field(default=None, max_length=30)
+    converted: bool = Field(default=False)
+    converted_at: datetime | None = None
     notes: str | None = Field(default=None, sa_column=Column(Text))
 
     updated_at: datetime

@@ -8,7 +8,8 @@ details, planner details) are accepted as optional extras.
 
 Only the lead's own details are stored on the lead. "Assigned to" is read here but saved in
 crm_lead_meta (a vendor name = manual, "<vendor> · auto" = automatic, empty = unassigned for
-uploads). Interest, quote and converted are never taken from uploads (vendor users set them).
+uploads). Uploads (not the add/edit forms) also read Update, Quoted amount and Conversion amount
+for new leads (UPLOAD_CRM_FIELDS); they are saved in crm_lead_meta too. Quoted date is never read.
 """
 import re
 from dataclasses import dataclass, field
@@ -146,11 +147,23 @@ FIELDS: dict[str, list[FieldDef]] = {
 
 # Columns of the export/template that are shown but never read back from an upload
 READ_ONLY_COLUMNS: dict[str, tuple[str, ...]] = {
-    "spin": ("Branch code", "Interest", "Quoted amount", "Quoted date", "Converted"),
-    "whatsapp": ("Interest", "Quoted amount", "Quoted date", "Converted"),
-    "wedding": ("Interest", "Quoted amount", "Quoted date", "Converted"),
-    "wedding_planner": ("Estimate", "Fits budget", "Interest", "Quoted amount", "Quoted date", "Converted", "Last step"),
+    "spin": ("Branch code", "Quoted date"),
+    "whatsapp": ("Quoted date",),
+    "wedding": ("Quoted date",),
+    "wedding_planner": ("Estimate", "Fits budget", "Quoted date", "Last step"),
 }
+UPDATE_HELP = ("Empty or Pending, Converted, Not converted, Already purchased somewhere else, Already purchased "
+               "with us, Will call back, Interested or Not interested.")
+AMOUNT_HELP = "Rupees, e.g. 150000 or ₹1,50,000 (at most 10,00,00,000)."
+# CRM details an upload may set on NEW leads (saved in crm_lead_meta, like Assigned to). Not in
+# FIELDS: the add/edit forms don't have them (set them with PUT /leads/{source}/{key}/crm).
+UPLOAD_CRM_FIELDS: tuple[FieldDef, ...] = (
+    FieldDef("update_status", "Update", "update", aliases=("updatestatus", "status"), help=UPDATE_HELP),
+    FieldDef("quoted_amount", "Quoted amount", "amount", aliases=("quotedamount", "quote"), help=AMOUNT_HELP),
+    FieldDef("conversion_amount", "Conversion amount", "amount", aliases=("conversionamount",), help=AMOUNT_HELP),
+)
+UPLOAD_CRM_KEYS = tuple(f.key for f in UPLOAD_CRM_FIELDS)
+MAX_AMOUNT = 100_000_000
 VIRTUAL_KEYS = {"assigned_to", "location", "wedding_when"}     # read from uploads, not lead columns
 
 
@@ -158,10 +171,11 @@ def norm_header(text: Any) -> str:
     return re.sub(r"[^a-z0-9]", "", str(text or "").lower())
 
 
-def header_map(source: str) -> dict[str, str]:
-    """Normalised header -> field key (label, key and aliases all accepted)."""
+def header_map(source: str, *, upload: bool = False) -> dict[str, str]:
+    """Normalised header -> field key (label, key and aliases all accepted). upload=True adds
+    Update, Quoted amount and Conversion amount."""
     out: dict[str, str] = {}
-    for f in FIELDS[source]:
+    for f in (*FIELDS[source], *(UPLOAD_CRM_FIELDS if upload else ())):
         for name in (f.label, f.key, *f.aliases):
             out.setdefault(norm_header(name), f.key)
     return out
@@ -306,6 +320,26 @@ def parse_money(value: Any) -> int:
     if amount is None:
         raise Invalid("Not an amount (e.g. 150000 or ₹1,50,000)")
     return parse_int(amount)
+
+
+def parse_update(value: Any) -> str | None:
+    """Update: a code (will_call_back) or its label (Will call back); empty / Pending -> None."""
+    from app.models.vendor_to_koc import STATUS_LABELS
+
+    text = norm_header(as_text(value))
+    if text in ("", "pending"):
+        return None
+    for code, label in STATUS_LABELS.items():
+        if code and text in (norm_header(code), norm_header(label)):
+            return code
+    raise Invalid("Unknown update; use " + ", ".join(l for l in STATUS_LABELS.values()))
+
+
+def parse_amount(value: Any) -> int:
+    amount = parse_money(value)
+    if amount > MAX_AMOUNT:
+        raise Invalid("At most 10,00,00,000")
+    return amount
 
 
 def parse_bool(value: Any) -> bool:
@@ -471,6 +505,15 @@ def clean_row(source: str, raw: dict[str, Any], ctx: RowContext, *, partial: boo
                 values[f.key] = text
         except Invalid as exc:
             errors.append({"field": f.key, "message": str(exc)})
+    if upload:
+        for f in UPLOAD_CRM_FIELDS:                 # CRM details for new leads (crm_lead_meta)
+            if not as_text(raw.get(f.key)):
+                values[f.key] = None
+                continue
+            try:
+                values[f.key] = parse_update(raw[f.key]) if f.type == "update" else parse_amount(raw[f.key])
+            except Invalid as exc:
+                errors.append({"field": f.key, "message": str(exc)})
     return Cleaned(values, errors, phone, phone_input, assignment)
 
 
@@ -504,7 +547,7 @@ def to_model_kwargs(source: str, values: dict[str, Any], phone: phones.Phone | N
         return out
 
     for key, v in values.items():
-        if key in VIRTUAL_KEYS:
+        if key in VIRTUAL_KEYS or key in UPLOAD_CRM_KEYS:     # not lead columns (crm_lead_meta)
             continue
         if key == "phone":
             out["phone"] = phone.digits                        # same display form as the sync

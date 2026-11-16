@@ -7,15 +7,16 @@ Common parameters (every source):
   upcoming_days               event from today to today + N (not with event_from / event_to)
   vendor_id (repeatable)      effective assignment (the "Assigned to" chip); admins only
   unassigned=true             no vendor; admins only (with vendor_id: either)
-  interest (repeatable)       interested | not_interested | other | follow_up | not_set
-  converted                   yes | no
-  quote                       has | none | gt:<amount> | lt:<amount>
+  update_status (repeatable)  converted | not_converted | purchased_elsewhere | purchased_with_us |
+                              will_call_back | interested | not_interested | pending (no update yet)
+  quote                       has | none | gt:<amount> | lt:<amount>      (quoted amount)
+  conversion                  has | none | gt:<amount> | lt:<amount>      (conversion amount)
   origin (repeatable)         spin: workflow | added | imported; others: sheet | added | imported
 
 Different parameters combine with AND, repeated values of one parameter with OR. Vendor users
 only ever get their own leads (vendor_id / unassigned are ignored for them). Errors -> 400.
 
-The CRM filters (vendor, unassigned, interest, converted, quote) become a set of lead keys: from
+The CRM filters (vendor, unassigned, update_status, quote, conversion) become a set of lead keys: from
 the same assignment map vendor visibility uses (access.assignments) and crm_lead_meta.
 """
 import re
@@ -30,7 +31,9 @@ from sqlmodel import Session, col, select
 from app.models.lead_meta import LeadMeta
 from app.services import access, periods
 
-INTEREST_VALUES = ("interested", "not_interested", "other", "follow_up", "not_set")
+UPDATE_VALUES = ("converted", "not_converted", "purchased_elsewhere", "purchased_with_us",
+                 "will_call_back", "interested", "not_interested")
+UPDATE_FILTER_VALUES = (*UPDATE_VALUES, "pending")
 SHEET_ORIGINS = ("sheet", "added", "imported")
 SPIN_ORIGINS = ("workflow", "added", "imported")
 MAX_UPCOMING_DAYS = 366
@@ -49,21 +52,21 @@ class CommonFilters:
     event_to: date | None = None
     vendor_ids: list[int] = field(default_factory=list)
     unassigned: bool = False
-    interests: list[str] = field(default_factory=list)
-    converted: str | None = None                           # yes | no
+    updates: list[str] = field(default_factory=list)       # may contain "pending" (= no update)
     quote: tuple[str, int | None] | None = None            # (op, amount): has / none / gt / lt
+    conversion: tuple[str, int | None] | None = None       # same, on the conversion amount
     origins: list[str] = field(default_factory=list)
 
     @property
     def has_crm_filters(self) -> bool:
-        return bool(self.interests or self.converted or self.quote)
+        return bool(self.updates or self.quote or self.conversion)
 
     @property
     def has_event_filter(self) -> bool:
         return self.event_from is not None or self.event_to is not None
 
 
-def parse_quote(text: str | None) -> tuple[str, int | None] | None:
+def parse_quote(text: str | None, name: str = "quote") -> tuple[str, int | None] | None:
     value = (text or "").strip().lower()
     if not value:
         return None
@@ -71,7 +74,7 @@ def parse_quote(text: str | None) -> tuple[str, int | None] | None:
         return value, None
     m = _QUOTE_RE.match(value)
     if not m:
-        raise bad_request("quote must be has, none, gt:<amount> or lt:<amount> (e.g. gt:50000)")
+        raise bad_request(f"{name} must be has, none, gt:<amount> or lt:<amount> (e.g. gt:50000)")
     return m.group(1), int(m.group(2))
 
 
@@ -95,9 +98,9 @@ def common_filters(
     upcoming_days: int | None,
     vendor_id: list[int] | None,
     unassigned: bool,
-    interest: list[str] | None,
-    converted: str | None,
+    update_status: list[str] | None,
     quote: str | None,
+    conversion: str | None,
     origin: list[str] | None,
     allowed_origins: tuple[str, ...],
     source_label: str,
@@ -114,11 +117,11 @@ def common_filters(
     if start and end and start > end:
         raise bad_request("event_from must be on or before event_to")
 
-    interests = []
-    for value in interest or []:
-        if value not in INTEREST_VALUES:
-            raise bad_request(f"interest must be one of: {', '.join(INTEREST_VALUES)}")
-        interests.append(value)
+    updates = []
+    for value in update_status or []:
+        if value not in UPDATE_FILTER_VALUES:
+            raise bad_request(f"update_status must be one of: {', '.join(UPDATE_FILTER_VALUES)}")
+        updates.append(value)
 
     origins = [o.strip().lower() for o in origin or [] if o.strip()]
     for value in origins:
@@ -132,9 +135,9 @@ def common_filters(
         event_to=end,
         vendor_ids=list(vendor_id or []),
         unassigned=bool(unassigned),
-        interests=interests,
-        converted=converted,
+        updates=updates,
         quote=parse_quote(quote),
+        conversion=parse_quote(conversion, "conversion"),
         origins=origins,
     )
 
@@ -174,13 +177,14 @@ def allowed_keys(db: Session, source: str, viewer, f: CommonFilters) -> set[str]
         def meta_of(key):
             return metas.get(key)
 
-        if f.interests:
-            sets.append({k for k in universe if ((meta_of(k).interest if meta_of(k) else None) or "not_set") in f.interests})
-        if f.converted:
-            want = f.converted == "yes"
-            sets.append({k for k in universe if bool(meta_of(k) and meta_of(k).converted) == want})
+        if f.updates:
+            sets.append({k for k in universe
+                         if ((meta_of(k).update_status if meta_of(k) else None) or "pending") in f.updates})
         if f.quote:
             sets.append({k for k in universe if _quote_matches(meta_of(k).quoted_amount if meta_of(k) else None, f.quote)})
+        if f.conversion:
+            sets.append({k for k in universe
+                         if _quote_matches(meta_of(k).conversion_amount if meta_of(k) else None, f.conversion)})
     if not sets:
         return None
     keys = sets[0]
@@ -206,12 +210,14 @@ def search_condition(text: str, text_columns: list, phone_column) -> Any:
 
 
 # ── Filter options ─────────────────────────────────────────────────────
-def interest_options(db: Session, source: str, keys: set[str]) -> list[dict]:
-    """[{value, count}] over these leads (not_set = no interest yet)."""
-    metas = {m.lead_key: m.interest for m in db.exec(select(LeadMeta).where(LeadMeta.source == source))}
-    counts = dict.fromkeys(INTEREST_VALUES, 0)
+def update_options(db: Session, source: str, keys: set[str]) -> list[dict]:
+    """[{value, count}] over these leads: pending (no update yet), then the 7 update values."""
+    metas = {m.lead_key: m.update_status
+             for m in db.exec(select(LeadMeta).where(LeadMeta.source == source))}
+    counts = dict.fromkeys(("pending", *UPDATE_VALUES), 0)
     for k in keys:
-        counts[metas.get(k) or "not_set"] = counts.get(metas.get(k) or "not_set", 0) + 1
+        value = metas.get(k) or "pending"
+        counts[value] = counts.get(value, 0) + 1
     return [{"value": v, "count": n} for v, n in counts.items()]
 
 

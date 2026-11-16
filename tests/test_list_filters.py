@@ -7,14 +7,14 @@
 
 Fixtures (vendors RJ, Phodeo, OHP):
   International  WA1 UAE, 10 Nov, event 25 Nov (area rules: OHP)
-                 WA2 United Kingdom, 1 Oct, event 1 Mar 2027; manual RJ, interested, quote 60000, converted
+                 WA2 United Kingdom, 1 Oct, event 1 Mar 2027; manual RJ, converted, quote 60000, conversion 55000
                  WA3 added, UAE, 15 Nov, uploaded unassigned
   Wedding        WD1 Asha Rao, "Shamirpet, Hyderabad", Wedding, 50000, 10 Nov, event 30 Nov (OHP)
                  WD2 Ravi, Bangalore, Birthday, 150000, shared RJ, repeat, 1 Nov, event 10 Jan; not interested, quote 20000
                  WD3 imported, Mysore, 14 Nov (OHP)
   Planner        WP1 Meera, Udaipur, 300 guests, 2,500,000, fits, pdf, shared Phodeo, 12 Nov, wedding 5 Dec
                  WP2 Dev, Jaipur, 80 guests, 600,000, over budget, whatsapp, 20 Oct, wedding 1 Feb (OHP)
-                 WP3 added, Hyderabad, 16 Nov; manual Phodeo, converted
+                 WP3 added, Hyderabad, 16 Nov; manual Phodeo, converted (no amounts)
 """
 import io
 import unittest
@@ -72,11 +72,12 @@ class SheetListFiltersTest(ApiTestBase, unittest.TestCase):
                             updated_in_sheet_at=utc(2026, 10, 20), wedding_date=date(2027, 2, 1), **base),
                 WeddingPlan(plan_id="WP3", origin="added", name="Added Plan", city="Hyderabad", phone="919845200003",
                             phone_e164="+919845200003", updated_in_sheet_at=utc(2026, 11, 16), **base),
-                LeadMeta(source="whatsapp", lead_key="WA2", vendor_id=v["rj"], interest="interested", quoted_amount=60000,
-                         converted=True, updated_at=NOW),
+                LeadMeta(source="whatsapp", lead_key="WA2", vendor_id=v["rj"], update_status="converted", quoted_amount=60000,
+                         conversion_amount=55000, updated_at=NOW),
                 LeadMeta(source="whatsapp", lead_key="WA3", auto_assign=False, updated_at=NOW),
-                LeadMeta(source="wedding", lead_key="WD2", interest="not_interested", quoted_amount=20000, updated_at=NOW),
-                LeadMeta(source="wedding_planner", lead_key="WP3", vendor_id=v["phodeo"], converted=True, updated_at=NOW),
+                LeadMeta(source="wedding", lead_key="WD2", update_status="not_interested", quoted_amount=20000, updated_at=NOW),
+                LeadMeta(source="wedding_planner", lead_key="WP3", vendor_id=v["phodeo"], update_status="converted",
+                         updated_at=NOW),
             ])
             s.commit()
 
@@ -109,11 +110,15 @@ class SheetListFiltersTest(ApiTestBase, unittest.TestCase):
         c({"WA1", "WA2"}, vendor_id=[self.vendor_ids["ohp"], self.vendor_ids["rj"]])
         c({"WA3"}, unassigned="true")
         c({"WA2", "WA3"}, vendor_id=self.vendor_ids["rj"], unassigned="true")
-        c({"WA2"}, interest="interested")
-        c({"WA1", "WA3"}, interest="not_set")
-        c({"WA1", "WA2", "WA3"}, interest=["interested", "not_set"])
-        c({"WA2"}, converted="yes")
-        c({"WA1", "WA3"}, converted="no")
+        c({"WA2"}, update_status="converted")
+        c({"WA1", "WA3"}, update_status="pending")
+        c({"WA1", "WA2", "WA3"}, update_status=["converted", "pending"])
+        c(set(), update_status="interested")
+        c({"WA2"}, conversion="has")
+        c({"WA1", "WA3"}, conversion="none")
+        c({"WA2"}, conversion="gt:50000")
+        c(set(), conversion="lt:50000")
+        c({"WA2"}, quote="has", conversion="lt:60000")
         c({"WA2"}, quote="has")
         c({"WA1", "WA3"}, quote="none")
         c({"WA2"}, quote="gt:50000")
@@ -121,7 +126,7 @@ class SheetListFiltersTest(ApiTestBase, unittest.TestCase):
         c({"WA1", "WA2"}, origin="sheet")
         c({"WA3"}, origin="added")
         c({"WA1"}, country="UAE", origin="sheet")           # combination
-        c({"WA1"}, interest="not_set", date_from="2026-11-01", date_to="2026-11-12")
+        c({"WA1"}, update_status="pending", date_from="2026-11-01", date_to="2026-11-12")
 
     # ── Wedding ──
     def test_wedding_filters(self):
@@ -137,7 +142,7 @@ class SheetListFiltersTest(ApiTestBase, unittest.TestCase):
         c({"WD1", "WD3"}, shared_with="__none__")
         c({"WD1", "WD3"}, hide_repeats="true")
         c({"WD1"}, event_from="2026-11-01", event_to="2026-12-31")
-        c({"WD2"}, interest="not_interested")
+        c({"WD2"}, update_status="not_interested")
         c({"WD2"}, quote="lt:30000")
         c({"WD3"}, origin="imported")
         c({"WD2"}, vendor_id=self.vendor_ids["rj"])         # leads shared: RJ
@@ -156,7 +161,8 @@ class SheetListFiltersTest(ApiTestBase, unittest.TestCase):
         c({"WP2"}, last_step="WhatsApp")
         c({"WP1"}, shared_with="Phodeo")
         c({"WP1", "WP3"}, vendor_id=self.vendor_ids["phodeo"])     # sheet + manual
-        c({"WP3"}, converted="yes")
+        c({"WP3"}, update_status="converted")
+        c(set(), update_status="converted", conversion="has")
         c({"WP1"}, event_from="2026-12-01", event_to="2026-12-31")  # wedding date
         c({"WP3"}, origin="added")
         c({"WP1", "WP3"}, date_from="2026-11-10", date_to="2026-11-16")
@@ -176,11 +182,11 @@ class SheetListFiltersTest(ApiTestBase, unittest.TestCase):
     # ── list = export = stats ──
     def test_export_and_stats_match_the_list(self):
         combos = {
-            "whatsapp": [{}, {"country": "UAE"}, {"interest": "not_set", "origin": "sheet"}, {"quote": "has"},
+            "whatsapp": [{}, {"country": "UAE"}, {"update_status": "pending", "origin": "sheet"}, {"quote": "has"}, {"conversion": "has"},
                          {"upcoming_days": 30}, {"vendor_id": self.vendor_ids["ohp"], "date_from": "2026-11-01"}],
             "wedding": [{}, {"city": "hyderabad"}, {"budget_min": 10000, "hide_repeats": "true"},
-                        {"interest": ["not_interested", "not_set"]}, {"search": "ravi"}],
-            "wedding_planner": [{}, {"guests_min": 50}, {"fits_budget": "true"}, {"converted": "yes"},
+                        {"update_status": ["not_interested", "pending"]}, {"search": "ravi"}],
+            "wedding_planner": [{}, {"guests_min": 50}, {"fits_budget": "true"}, {"update_status": "converted"},
                                 {"event_from": "2026-12-01", "event_to": "2027-12-31", "sort": "name", "order": "asc"}],
         }
         stats_url = {"whatsapp": "/whatsapp-leads/stats", "wedding": "/wedding-leads/stats",
@@ -215,13 +221,13 @@ class SheetListFiltersTest(ApiTestBase, unittest.TestCase):
         wa = options("/whatsapp-leads")
         self.assertEqual(as_map(wa["countries"]), {"UAE": 2, "United Kingdom": 1})
         self.assertEqual(as_map(wa["origins"]), {"sheet": 2, "added": 1, "imported": 0})
-        self.assertEqual(as_map(wa["interests"])["interested"], 1)
-        self.assertEqual(as_map(wa["interests"])["not_set"], 2)
+        self.assertEqual({k: n for k, n in as_map(wa["updates"]).items() if n}, {"converted": 1, "pending": 2})
         self.assertEqual([v["name"] for v in wa["vendors"]], ["RJ", "Phodeo", "OHP"])
         self.assertEqual(options("/whatsapp-leads", "phodeo"),
                          {"countries": [], "origins": [{"value": o, "count": 0} for o in ("sheet", "added", "imported")],
-                          "interests": [{"value": i, "count": 0} for i in
-                                        ("interested", "not_interested", "other", "follow_up", "not_set")],
+                          "updates": [{"value": i, "count": 0} for i in
+                                      ("pending", "converted", "not_converted", "purchased_elsewhere",
+                                       "purchased_with_us", "will_call_back", "interested", "not_interested")],
                           "vendors": []})
         wd = options("/wedding-leads")
         self.assertEqual(as_map(wd["cities"]), {"Hyderabad": 1, "Bangalore": 1, "Mysore": 1})    # cleaned
@@ -245,7 +251,10 @@ class SheetListFiltersTest(ApiTestBase, unittest.TestCase):
             ("whatsapp", {"upcoming_days": 0}, "between 1 and 366"),
             ("whatsapp", {"event_from": "20-12-2026"}, "YYYY-MM-DD"),
             ("whatsapp", {"origin": "workflow"}, "doesn't exist for International leads"),
-            ("wedding", {"interest": "maybe"}, "interest must be one of"),
+            ("wedding", {"update_status": "maybe"}, "update_status must be one of"),
+            ("wedding", {"conversion": "lots"}, "conversion must be"),
+            ("wedding", {"interest": "interested"}, "replaced by update_status"),      # the old filters: 400
+            ("whatsapp", {"converted": "yes"}, "replaced by update_status"),
             ("wedding", {"budget_min": 10, "budget_max": 5}, "budget_min must not be more than budget_max"),
             ("wedding_planner", {"guests_min": 10, "guests_max": 5}, "guests_min must not be more than guests_max"),
             ("wedding_planner", {"date_from": "2026-11-17"}, "can't be in the future"),
@@ -289,8 +298,8 @@ class SpinListFiltersTest(ApiTestBase, unittest.TestCase):
                                branch_id=4, created_at=utc(2026, 11, 12), updated_at=NOW,
                                additional_details={"occasionDate": "2026-12-05", "pincode": "560011"})
             s.add(lead)
-            s.add(LeadMeta(source="spin", lead_key="701", interest="interested", quoted_amount=30000, converted=True,
-                           updated_at=NOW))
+            s.add(LeadMeta(source="spin", lead_key="701", update_status="converted", quoted_amount=30000,
+                           conversion_amount=25000, updated_at=NOW))
             s.commit()
             s.refresh(lead)
             self.crm = lead.lead_key
@@ -316,9 +325,9 @@ class SpinListFiltersTest(ApiTestBase, unittest.TestCase):
         c({"702", crm}, vendor_id=v["phodeo"])                         # pincode 560034; Jayanagar branch
         c({"703"}, unassigned="true")
         c({"701", "703"}, vendor_id=v["rj"], unassigned="true")
-        c({"701"}, interest="interested")
-        c({"702", "703", crm}, interest="not_set")
-        c({"701"}, converted="yes")
+        c({"701"}, update_status="converted")
+        c({"702", "703", crm}, update_status="pending")
+        c({"701"}, conversion="lt:30000")
         c({"701"}, quote="gt:20000")
         c({"701"}, quote="has")
         c({"702", "703", crm}, quote="none")
@@ -338,7 +347,7 @@ class SpinListFiltersTest(ApiTestBase, unittest.TestCase):
         self.assertEqual(self.ids("phodeo", vendor_id=self.vendor_ids["rj"]), {"702", self.crm})      # ignored
         self.assertEqual(self.ids("rj", unassigned="true"), {"701"})
         from app.services import phones
-        for who, params in (("admin", {}), ("admin", {"interest": "not_set", "origin": "workflow"}),
+        for who, params in (("admin", {}), ("admin", {"update_status": "pending", "origin": "workflow"}),
                             ("admin", {"upcoming_days": 30}), ("phodeo", {}), ("phodeo", {"date_from": "2026-11-01"})):
             with self.logged_in(who):
                 listed = self.client.get(f"{API}/spin-leads", params={"page_size": 200, **params}).json()["items"]
@@ -351,10 +360,10 @@ class SpinListFiltersTest(ApiTestBase, unittest.TestCase):
         resp = self.client.get(f"{API}/spin-leads", params={"origin": "sheet"})
         self.assertEqual(resp.status_code, 400)
         self.assertIn("doesn't exist for Spin leads", resp.json()["detail"])
-        # The old aliases are gone: interest=none is an unknown value now
-        resp = self.client.get(f"{API}/spin-leads", params={"interest": "none"})
+        # The old interest filter was replaced by update_status
+        resp = self.client.get(f"{API}/spin-leads", params={"interest": "interested"})
         self.assertEqual(resp.status_code, 400)
-        self.assertIn("interest must be one of", resp.json()["detail"])
+        self.assertIn("replaced by update_status", resp.json()["detail"])
 
     def test_spin_filter_options(self):
         def options(who="admin"):
@@ -367,11 +376,11 @@ class SpinListFiltersTest(ApiTestBase, unittest.TestCase):
         # Without a real workflow database only the CRM part is counted here (the real-data check covers PostgreSQL)
         self.assertEqual({b["name"]: b["count"] for b in admin["branches"]}, {"Jayanagar": 1})
         self.assertEqual({o["value"]: o["count"] for o in admin["origins"]}, {"workflow": 0, "added": 0, "imported": 1})
-        self.assertEqual({i["value"]: i["count"] for i in admin["interests"]}["interested"], 1)      # 701
-        self.assertEqual({i["value"]: i["count"] for i in admin["interests"]}["not_set"], 3)
+        self.assertEqual({i["value"]: i["count"] for i in admin["updates"]}["converted"], 1)        # 701
+        self.assertEqual({i["value"]: i["count"] for i in admin["updates"]}["pending"], 3)
         self.assertEqual(len(admin["vendors"]), 3)
         phodeo = options("phodeo")
-        self.assertEqual({i["value"]: i["count"] for i in phodeo["interests"]}["not_set"], 2)        # 702 + CRM lead
+        self.assertEqual({i["value"]: i["count"] for i in phodeo["updates"]}["pending"], 2)          # 702 + CRM lead
         self.assertEqual(phodeo["vendors"], [])
         self.assertEqual(options("rj")["branches"], [])                                             # 701's branch is a workflow count
 

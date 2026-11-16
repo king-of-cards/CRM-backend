@@ -157,7 +157,7 @@ def ordering(sort: str, order: str) -> list:
 
 
 def attach_crm(db, items: list[dict]) -> list[dict]:
-    """Add the CRM details (vendor, interest, quote, converted) from the sidecar table."""
+    """Add the CRM details (vendor, update, quote, conversion amount) from the sidecar table."""
     return lead_crm.attach(
         db,
         "wedding",
@@ -200,7 +200,7 @@ def wedding_lead_stats(viewer: LeadViewer, db: DbSession, f: Filters):
 def wedding_filter_options(viewer: LeadViewer, db: DbSession):
     """Values for the filter dropdowns, with counts over the leads the viewer may see (vendor users:
     their own): occasions, cities (cleaned: "Shamirpet, Hyderabad" -> "Hyderabad", for the contains
-    filter), leads shared, origins, interests, and vendors (admins only)."""
+    filter), leads shared, origins, update counts, and vendors (admins only)."""
     from app.api.v1.endpoints.analytics import _clean_place
 
     visible = access.visible_keys(db, viewer, "wedding")
@@ -213,6 +213,6 @@ def wedding_filter_options(viewer: LeadViewer, db: DbSession):
         "shared_with": lead_filters.counted(r[3] for r in rows) + [
             {"value": NOT_SHARED, "count": sum(1 for r in rows if not r[3])}],
         "origins": [{"value": o, "count": sum(1 for r in rows if r[4] == o)} for o in lead_filters.SHEET_ORIGINS],
-        "interests": lead_filters.interest_options(db, "wedding", {r[0] for r in rows}),
+        "updates": lead_filters.update_options(db, "wedding", {r[0] for r in rows}),
         "vendors": lead_filters.vendor_options(db, viewer),
     }

@@ -122,7 +122,7 @@ def ordering(sort: str, order: str) -> list:
 
 
 def attach_crm(db, items: list[dict]) -> list[dict]:
-    """Add the CRM details (vendor, interest, quote, converted) from the sidecar table."""
+    """Add the CRM details (vendor, update, quote, conversion amount) from the sidecar table."""
     return lead_crm.attach(db, "whatsapp", items, key=lambda i: i["lead_key"], location=lambda i: i["country"])
 
 
@@ -158,13 +158,13 @@ def whatsapp_lead_stats(viewer: LeadViewer, db: DbSession, f: Filters):
 @router.get("/filter-options")
 def whatsapp_filter_options(viewer: LeadViewer, db: DbSession):
     """Values for the filter dropdowns, with counts over the leads the viewer may see (vendor users:
-    their own): countries, origins, interests, and vendors (admins only)."""
+    their own): countries, origins, update counts, and vendors (admins only)."""
     visible = access.visible_keys(db, viewer, "whatsapp")
     query = select(WhatsAppLead.sheet_key, WhatsAppLead.country, WhatsAppLead.origin).where(WhatsAppLead.is_deleted == False)  # noqa: E712
     rows = [r for r in db.exec(query) if visible is None or r[0] in visible]
     return {
         "countries": lead_filters.counted((r[1] or "").strip() for r in rows),
         "origins": [{"value": o, "count": sum(1 for r in rows if r[2] == o)} for o in lead_filters.SHEET_ORIGINS],
-        "interests": lead_filters.interest_options(db, "whatsapp", {r[0] for r in rows}),
+        "updates": lead_filters.update_options(db, "whatsapp", {r[0] for r in rows}),
         "vendors": lead_filters.vendor_options(db, viewer),
     }

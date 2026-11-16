@@ -6,8 +6,9 @@ Each lead row sent to the frontend gets a "crm" object:
     "vendor": {"id": 2, "name": "Phodeo"} | None,
     "vendor_source": "manual" | "sheet" | "branch" | "suggested" | None,
     "suggested_vendor": {...} | None,     # what the area rules say
-    "interest": "interested" | "not_interested" | "other" | "follow_up" | None,
-    "converted": bool, "quoted_date": "2026-11-20" | None, "quoted_amount": 45000 | None,
+    "update_status": "converted" | "not_converted" | "purchased_elsewhere" | "purchased_with_us"
+                     | "will_call_back" | "interested" | "not_interested" | None (Pending),
+    "quoted_date": "2026-11-20" | None, "quoted_amount": 45000 | None, "conversion_amount": int | None,
     "notes": str | None, "updated_at": iso | None,
   }
 
@@ -28,7 +29,6 @@ from app.models.lead_meta import LeadMeta
 from app.models.vendor import Vendor
 
 SOURCES = ("spin", "whatsapp", "wedding", "wedding_planner")
-INTEREST_VALUES = ("interested", "not_interested", "other", "follow_up")
 
 # The three partners and the areas they cover. Created once if the vendors table is empty;
 # after that, edit them on the Vendors page.
@@ -157,11 +157,10 @@ def meta_out(
         "vendor": _vendor_out(vendor),
         "vendor_source": how,
         "suggested_vendor": _vendor_out(suggested),
-        "interest": meta.interest if meta else None,
-        "converted": bool(meta.converted) if meta else False,
-        "converted_at": _iso(meta.converted_at) if meta else None,
+        "update_status": meta.update_status if meta else None,
         "quoted_date": meta.quoted_date.isoformat() if meta and meta.quoted_date else None,
         "quoted_amount": meta.quoted_amount if meta else None,
+        "conversion_amount": meta.conversion_amount if meta else None,
         "notes": meta.notes if meta else None,
         "updated_at": _iso(meta.updated_at) if meta else None,
         "auto_assign": meta.auto_assign is not False if meta else True,

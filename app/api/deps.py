@@ -111,13 +111,20 @@ def common_filter_params(allowed_origins: tuple[str, ...], source_label: str):
         upcoming_days: int | None = Query(None, description="Event from today to today + N days"),
         vendor_id: list[int] | None = Query(None, description="Assigned to (repeatable); admins only"),
         unassigned: bool = Query(False, description="No vendor; admins only"),
-        interest: list[str] | None = Query(None, description="Repeatable: interested, not_interested, other, follow_up, not_set"),
-        converted: Literal["yes", "no"] | None = Query(None),
-        quote: str | None = Query(None, description="has, none, gt:<amount> or lt:<amount>"),
+        update_status: list[str] | None = Query(None, description="Repeatable: converted, not_converted, "
+                                                "purchased_elsewhere, purchased_with_us, will_call_back, interested, "
+                                                "not_interested, pending"),
+        quote: str | None = Query(None, description="Quoted amount: has, none, gt:<amount> or lt:<amount>"),
+        conversion: str | None = Query(None, description="Conversion amount: has, none, gt:<amount> or lt:<amount>"),
         origin: list[str] | None = Query(None, description=f"Repeatable: {', '.join(allowed_origins)}"),
+        interest: list[str] | None = Query(None, include_in_schema=False),      # replaced: 400
+        converted: str | None = Query(None, include_in_schema=False),           # replaced: 400
     ):
+        if interest or converted:
+            raise HTTPException(400, "interest and converted were replaced by update_status "
+                                     "(e.g. update_status=interested or update_status=converted)")
         return lead_filters.common_filters(period, search, event_from, event_to, upcoming_days, vendor_id, unassigned,
-                                           interest, converted, quote, origin, allowed_origins, source_label)
+                                           update_status, quote, conversion, origin, allowed_origins, source_label)
     return dependency
 
 

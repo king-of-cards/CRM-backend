@@ -624,7 +624,7 @@ def filters_for(db, viewer, f: SpinFilters) -> dict:
 @router.get("/filter-options")
 def spin_leads_filter_options(viewer: LeadViewer, db: DbSession):
     """Values for the filter dropdowns, with counts over the leads the viewer may see (vendor
-    users: their own): budgets and pincodes (workflow leads), branches, origins, interests, and
+    users: their own): budgets and pincodes (workflow leads), branches, origins, update counts, and
     vendors (admins only). Also which filters this data supports (has_*)."""
     from app.services import crm_spin_leads
     from app.services.branches import branches_by_id
@@ -657,7 +657,7 @@ def spin_leads_filter_options(viewer: LeadViewer, db: DbSession):
         **out,
         "branches": branches,
         "origins": origins,
-        "interests": lead_filters.interest_options(db, "spin", keys),
+        "updates": lead_filters.update_options(db, "spin", keys),
         "vendors": lead_filters.vendor_options(db, viewer),
     }
 
@@ -707,8 +707,8 @@ def merged_page(db, start: int, length: int, search, sort, order, branch, filter
         {**item, "origin": "workflow"} for item in data["items"]
     ]
 
-    # Sidecar: the workflow database is read-only, so the CRM details (vendor, interest,
-    # quote, converted) come from our own crm_lead_meta table, matched by the lead's id.
+    # Sidecar: the workflow database is read-only, so the CRM details (vendor, update,
+    # quote, conversion amount) come from our own crm_lead_meta table, matched by the lead's id.
     pk = next((c.name for c in _get_table().primary_key.columns), "id")
     pin_key, city_key = _spin_location_keys(data["columns"])
     branch_key = data.get("branch_column")

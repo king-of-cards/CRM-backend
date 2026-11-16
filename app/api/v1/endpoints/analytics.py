@@ -137,11 +137,11 @@ def _counts(rows_by_source: dict[str, list], keep) -> dict[str, int]:
 def _outcome(metas: list) -> dict:
     """Numbers over the CRM details of a set of leads (one LeadMeta or None per lead)."""
     leads = len(metas)
-    converted = sum(1 for m in metas if m is not None and m.converted)
+    converted = sum(1 for m in metas if m is not None and m.update_status == "converted")
     quoted = [m.quoted_amount for m in metas if m is not None and m.quoted_amount is not None]
     return {
         "leads": leads,
-        "interested": sum(1 for m in metas if m is not None and m.interest == "interested"),
+        "interested": sum(1 for m in metas if m is not None and m.update_status == "interested"),
         "converted": converted,
         "converted_pct": round(converted / leads * 100, 1) if leads else None,
         "quoted_count": len(quoted),

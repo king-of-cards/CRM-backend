@@ -45,14 +45,14 @@ WORKFLOW_ROWS = [
 
 HEADERS = {
     "spin": ["Lead", "Email", "Contact", "Branch", "Branch code", "Location", "Occasion", "Event date", "Budget",
-             "Assigned to", "Interest", "Quoted amount", "Quoted date", "Converted", "Created"],
-    "whatsapp": ["Lead", "Country", "Event date", "Assigned to", "Interest", "Quoted amount", "Quoted date",
-                 "Converted", "Submitted"],
-    "wedding": ["Lead", "Email", "Contact", "Occasion", "Event date", "City", "Budget", "Assigned to", "Interest",
-                "Quoted amount", "Quoted date", "Converted", "Submitted"],
+             "Assigned to", "Update", "Quoted amount", "Quoted date", "Conversion amount", "Created"],
+    "whatsapp": ["Lead", "Country", "Event date", "Assigned to", "Update", "Quoted amount", "Quoted date",
+                 "Conversion amount", "Submitted"],
+    "wedding": ["Lead", "Email", "Contact", "Occasion", "Event date", "City", "Budget", "Assigned to", "Update",
+                "Quoted amount", "Quoted date", "Conversion amount", "Submitted"],
     "wedding_planner": ["Lead", "Role", "Email", "Contact", "Wedding date", "Wedding city", "Guests",
                         "Guests staying", "Budget", "Budget range", "Estimate", "Fits budget", "Assigned to",
-                        "Interest", "Quoted amount", "Quoted date", "Converted", "Updated", "Last step"],
+                        "Update", "Quoted amount", "Quoted date", "Conversion amount", "Updated", "Last step"],
 }
 
 
@@ -127,7 +127,7 @@ class VendorAccessTest(ApiTestBase, unittest.TestCase):
             with self.logged_in("phodeo"):
                 self.assertEqual(self.client.get(f"{API}/leads/{source}/{key}/crm").status_code, 404)
             self.assertEqual(self.put_crm("phodeo", source, key, {"notes": "x"}).status_code, 404)
-            self.assertEqual(self.put_crm("phodeo", source, key, {"interest": "interested"}).status_code, 404)
+            self.assertEqual(self.put_crm("phodeo", source, key, {"update_status": "interested"}).status_code, 404)
         for source, key in self.unassigned.items():
             for who in ("phodeo", "rj", "ohp"):
                 with self.logged_in(who):
@@ -147,19 +147,19 @@ class VendorAccessTest(ApiTestBase, unittest.TestCase):
                     self.assertEqual(self.keys(self.list_items(source)), shown, (source, who))
 
     # ── Editing ──
-    def test_assigned_vendor_edits_interest_quote_converted_and_notes(self):
-        body = {"interest": "other", "quoted_amount": 45000, "quoted_date": "2026-11-20", "converted": True}
+    def test_assigned_vendor_edits_update_quote_conversion_and_notes(self):
+        body = {"update_status": "will_call_back", "quoted_amount": 45000, "quoted_date": "2026-11-20",
+                "conversion_amount": 42000}
         resp = self.put_crm("phodeo", "wedding", "WD_PHODEO", body)
         self.assertEqual(resp.status_code, 200, resp.text)
         self.assertEqual(self.put_crm("phodeo", "wedding", "WD_PHODEO", {"notes": "Called"}).status_code, 200)
         with Session(self.engine) as s:
             meta = s.exec(select(LeadMeta).where(LeadMeta.lead_key == "WD_PHODEO")).one()
-            self.assertEqual((meta.interest, meta.quoted_amount, meta.quoted_date, meta.converted, meta.notes),
-                             ("other", 45000, date(2026, 11, 20), True, "Called"))
-            self.assertIsNotNone(meta.converted_at)
+            self.assertEqual((meta.update_status, meta.quoted_amount, meta.quoted_date, meta.conversion_amount, meta.notes),
+                             ("will_call_back", 45000, date(2026, 11, 20), 42000, "Called"))
             self.assertEqual(meta.updated_by, self.users["phodeo"].id)
         # Another vendor: the lead doesn't exist for them
-        self.assertEqual(self.put_crm("rj", "wedding", "WD_PHODEO", {"interest": "interested"}).status_code, 404)
+        self.assertEqual(self.put_crm("rj", "wedding", "WD_PHODEO", {"update_status": "interested"}).status_code, 404)
         self.assertEqual(self.put_crm("rj", "wedding", "WD_PHODEO", {"notes": "x"}).status_code, 404)
         # Admins may edit notes
         self.assertEqual(self.put_crm("admin", "wedding", "WD_PHODEO", {"notes": "Admin note"}).status_code, 200)
@@ -167,24 +167,23 @@ class VendorAccessTest(ApiTestBase, unittest.TestCase):
             self.assertEqual(s.exec(select(LeadMeta).where(LeadMeta.lead_key == "WD_PHODEO")).one().updated_by,
                              self.users["admin"].id)
 
-    def test_admin_can_edit_interest_quote_and_converted(self):
+    def test_admin_can_edit_update_quote_and_conversion(self):
         leads = {"wedding": "WD_PHODEO", "whatsapp": "WA_OHP", "wedding_planner": "WP_OHP", "spin": "102"}
-        body = {"interest": "interested", "quoted_amount": 1000, "quoted_date": "2026-11-20", "converted": True}
+        body = {"update_status": "converted", "quoted_amount": 1000, "quoted_date": "2026-11-20", "conversion_amount": 900}
         for source, key in leads.items():
             resp = self.put_crm("admin", source, key, body)
             self.assertEqual(resp.status_code, 200, (source, resp.text))
             with Session(self.engine) as s:
                 meta = s.exec(select(LeadMeta).where(LeadMeta.source == source, LeadMeta.lead_key == key)).one()
-                self.assertEqual((meta.interest, meta.quoted_amount, meta.quoted_date, meta.converted),
-                                 ("interested", 1000, date(2026, 11, 20), True), source)
-                self.assertIsNotNone(meta.converted_at)
+                self.assertEqual((meta.update_status, meta.quoted_amount, meta.quoted_date, meta.conversion_amount),
+                                 ("converted", 1000, date(2026, 11, 20), 900), source)
                 self.assertEqual(meta.updated_by, self.users["admin"].id, source)       # who changed it
         # The assigned vendor can still change them; updated_by follows the last change
-        resp = self.put_crm("phodeo", "wedding", "WD_PHODEO", {"converted": False})
+        resp = self.put_crm("phodeo", "wedding", "WD_PHODEO", {"update_status": None, "conversion_amount": None})
         self.assertEqual(resp.status_code, 200, resp.text)
         with Session(self.engine) as s:
             meta = s.exec(select(LeadMeta).where(LeadMeta.lead_key == "WD_PHODEO")).one()
-            self.assertEqual((meta.converted, meta.converted_at, meta.updated_by), (False, None, self.users["phodeo"].id))
+            self.assertEqual((meta.update_status, meta.conversion_amount, meta.updated_by), (None, None, self.users["phodeo"].id))
 
     def test_vendor_cannot_assign(self):
         for body in ({"vendor_id": self.vendor_ids["phodeo"]}, {"vendor_id": None}):
@@ -304,7 +303,8 @@ class VendorAccessTest(ApiTestBase, unittest.TestCase):
                 self.assertEqual((counts["errors"], counts["ok"]), (0, 0), [r["errors"] for r in body["rows"] if r["errors"]])
                 self.assertEqual(counts["duplicates"], counts["total"])
                 self.assertEqual(body["ignored_columns"], [])
-                self.assertIn("Interest", body["read_only_columns"])
+                self.assertIn("Quoted date", body["read_only_columns"])
+                self.assertNotIn("Update", body["read_only_columns"])               # read for new leads
         spin = self.client.post(f"{API}/crm-leads/spin/import/preview", files={
             "file": ("e.xlsx", self.client.get(f"{API}/crm-leads/spin/export").content, XLSX)}).json()
         self.assertEqual(spin["counts"]["duplicates_by_reason"],

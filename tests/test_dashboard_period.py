@@ -241,20 +241,20 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
         with Session(self.engine) as s:
             crm_key = s.exec(select(CrmSpinLead)).one().lead_key
             s.add_all([
-                LeadMeta(source="whatsapp", lead_key="WA_1600", interest="interested", converted=True, quoted_amount=40000,
+                LeadMeta(source="whatsapp", lead_key="WA_1600", update_status="converted", quoted_amount=40000,
                          updated_at=NOW),
-                LeadMeta(source="wedding", lead_key="WD_10", converted=True, quoted_amount=50000, updated_at=NOW),
-                LeadMeta(source="wedding", lead_key="WD_OCT", interest="interested", updated_at=NOW),   # October
+                LeadMeta(source="wedding", lead_key="WD_10", update_status="converted", quoted_amount=50000, updated_at=NOW),
+                LeadMeta(source="wedding", lead_key="WD_OCT", update_status="interested", updated_at=NOW),   # October
                 LeadMeta(source="wedding_planner", lead_key="WP_14", quoted_amount=1_000_000, updated_at=NOW),
-                LeadMeta(source="spin", lead_key="501", interest="interested", updated_at=NOW),
-                LeadMeta(source="spin", lead_key=crm_key, converted=True, updated_at=NOW),
+                LeadMeta(source="spin", lead_key="501", update_status="interested", updated_at=NOW),
+                LeadMeta(source="spin", lead_key=crm_key, update_status="converted", updated_at=NOW),
             ])
             s.commit()
 
     def test_outcomes_per_source(self):
         self.add_outcomes()
         o = self.overview(date_from="2026-11-10", date_to="2026-11-16")["outcomes"]
-        self.assertEqual(o["whatsapp"], {"leads": 2, "interested": 1, "converted": 1, "converted_pct": 50.0,
+        self.assertEqual(o["whatsapp"], {"leads": 2, "interested": 0, "converted": 1, "converted_pct": 50.0,
                                          "quoted_count": 1, "quoted_total": 40000})
         self.assertEqual(o["wedding"], {"leads": 1, "interested": 0, "converted": 1, "converted_pct": 100.0,
                                         "quoted_count": 1, "quoted_total": 50000})
@@ -262,7 +262,7 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
                                                 "quoted_count": 1, "quoted_total": 1_000_000})
         self.assertEqual(o["spin"], {"leads": 2, "interested": 1, "converted": 1, "converted_pct": 50.0,
                                      "quoted_count": 0, "quoted_total": 0})
-        self.assertEqual(o["all"], {"leads": 6, "interested": 2, "converted": 3, "converted_pct": 50.0,
+        self.assertEqual(o["all"], {"leads": 6, "interested": 1, "converted": 3, "converted_pct": 50.0,
                                     "quoted_count": 3, "quoted_total": 1_090_000})
         # A period with no leads
         empty = self.overview(date_from="2026-01-01", date_to="2026-01-31")["outcomes"]["all"]
@@ -277,7 +277,8 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
     def test_outcomes_equal_the_filtered_list_totals(self):
         self.add_outcomes()
         lists = {"whatsapp": "/whatsapp-leads", "wedding": "/wedding-leads", "wedding_planner": "/wedding-plans"}
-        filters = {"interested": {"interest": "interested"}, "converted": {"converted": "yes"}, "quoted_count": {"quote": "has"}}
+        filters = {"interested": {"update_status": "interested"}, "converted": {"update_status": "converted"},
+                   "quoted_count": {"quote": "has"}}
         for who in ("admin", "phodeo", "rj"):
             for dates in ({"date_from": "2026-11-01", "date_to": "2026-11-16"}, {}):
                 params = dates or {"period": "all"}

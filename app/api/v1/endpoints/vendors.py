@@ -3,7 +3,7 @@
 GET   /vendors             all vendors with their area rules
 POST  /vendors             add a vendor
 PATCH /vendors/{id}        change a vendor (name, areas, pincodes, priority, contact…)
-GET   /vendors/stats       per vendor: leads, interested, quoted, converted, quoted value
+GET   /vendors/stats       per vendor: leads, counts per update, quoted, converted, conversion value
 """
 import logging
 from collections import defaultdict
@@ -20,6 +20,7 @@ from app.models.vendor import Vendor
 from app.models.wedding_lead import WeddingLead
 from app.models.wedding_plan import WeddingPlan
 from app.models.whatsapp_lead import WhatsAppLead
+from app.services.lead_filters import UPDATE_VALUES
 from app.services import access, lead_crm
 
 logger = logging.getLogger(__name__)
@@ -232,8 +233,8 @@ def _build_stats() -> dict:
         }
 
         blank = lambda: {  # noqa: E731
-            "leads": 0, "interested": 0, "not_interested": 0, "other": 0, "follow_up": 0,
-            "quoted": 0, "quoted_value": 0, "converted": 0, "converted_value": 0,
+            "leads": 0, "pending": 0, **dict.fromkeys(UPDATE_VALUES, 0),
+            "quoted": 0, "quoted_value": 0, "converted_value": 0,
             "by_source": defaultdict(int),
         }
         per_vendor: dict[str, dict] = defaultdict(blank)
@@ -246,14 +247,11 @@ def _build_stats() -> dict:
                 s = per_vendor[info["vendor"]["name"]]
                 s["leads"] += 1
                 s["by_source"][source] += 1
-                if info["interest"] in s:
-                    s[info["interest"]] += 1
+                s[info["update_status"] or "pending"] += 1
                 if info["quoted_amount"] or info["quoted_date"]:
                     s["quoted"] += 1
                     s["quoted_value"] += info["quoted_amount"] or 0
-                if info["converted"]:
-                    s["converted"] += 1
-                    s["converted_value"] += info["quoted_amount"] or 0
+                s["converted_value"] += info["conversion_amount"] or 0      # conversion amounts
 
         vendors = []
         for v in lead_crm.active_vendors(db):

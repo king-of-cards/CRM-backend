@@ -104,22 +104,25 @@ def context(db: Session) -> RowContext:
 
 
 def save_assignment(db: Session, source: str, lead_key: str, assignment, user_id: int | None,
-                    *, empty_means_unassigned: bool) -> None:
-    """"Assigned to" from an upload or a single add -> crm_lead_meta (not committed).
+                    *, empty_means_unassigned: bool, crm: dict[str, Any] | None = None) -> None:
+    """"Assigned to" (and, from uploads, Update / Quoted amount / Conversion amount) of a NEW
+    lead -> crm_lead_meta (not committed).
       manual vendor   vendor_id = that vendor
-      "<vendor> · auto" automatic (nothing stored)
+      "<vendor> · auto" automatic (no vendor stored)
       Unassigned      auto_assign = False: stays unassigned until an admin assigns it
-      empty           uploads: unassigned; single add: automatic"""
+      empty           uploads: unassigned; single add: automatic
+    No row is written when nothing needs storing (automatic, no CRM values)."""
     from app.models.lead_meta import LeadMeta
 
     if assignment is None:
         assignment = ("none", None) if empty_means_unassigned else ("auto", None)
     mode, vendor_id = assignment
-    if mode == "auto":
+    crm = {k: v for k, v in (crm or {}).items() if v is not None}
+    if mode == "auto" and not crm:
         return
     db.add(LeadMeta(
         source=source, lead_key=lead_key, updated_at=_now(), updated_by=user_id,
-        vendor_id=vendor_id if mode == "manual" else None, auto_assign=mode == "manual",
+        vendor_id=vendor_id if mode == "manual" else None, auto_assign=mode != "none", **crm,
     ))
 
 

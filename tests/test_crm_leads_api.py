@@ -286,11 +286,12 @@ class CrmLeadsApiTest(ApiTestBase, unittest.TestCase):
         with Session(self.engine) as s:
             before = s.exec(select(CrmSpinLead)).one().model_dump()
 
-        # 2. Set Interest and Quoted amount from the API: an admin first, then a user of the
+        # 2. Set Update and the amounts from the API: an admin first, then a user of the
         #    assigned vendor (Jayanagar is a Phodeo branch); updated_by is the last one
-        resp = self.put_crm("admin", "spin", key, {"interest": "not_interested", "quoted_amount": 1})
+        resp = self.put_crm("admin", "spin", key, {"update_status": "not_interested", "quoted_amount": 1})
         self.assertEqual(resp.status_code, 200, resp.text)
-        resp = self.put_crm("phodeo", "spin", key, {"interest": "interested", "quoted_amount": 45000})
+        resp = self.put_crm("phodeo", "spin", key, {"update_status": "converted", "quoted_amount": 45000,
+                                                     "conversion_amount": 40000})
         self.assertEqual(resp.status_code, 200, resp.text)
 
         with Session(self.engine) as s:
@@ -298,7 +299,9 @@ class CrmLeadsApiTest(ApiTestBase, unittest.TestCase):
             metas = s.exec(select(LeadMeta)).all()
             self.assertEqual(len(metas), 1)
             self.assertEqual((metas[0].source, metas[0].lead_key), ("spin", key))
-            self.assertEqual((metas[0].interest, metas[0].quoted_amount), ("interested", 45000))
+            self.assertEqual((metas[0].update_status, metas[0].quoted_amount, metas[0].conversion_amount),
+                             ("converted", 45000, 40000))
+            self.assertEqual((metas[0].interest, metas[0].converted), (None, False))   # legacy: never written
             self.assertEqual(metas[0].updated_by, self.users["phodeo"].id)
             # 4. The crm_spin_leads row is unchanged, and that table has no CRM columns at all
             self.assertEqual(s.exec(select(CrmSpinLead)).one().model_dump(), before)
@@ -313,12 +316,15 @@ class CrmLeadsApiTest(ApiTestBase, unittest.TestCase):
         self.assertEqual(data["total"], 2)
         added = next(i for i in data["items"] if i["id"] == key)
         self.assertEqual(added["origin"], "imported")         # spin leads come in by bulk upload
-        self.assertEqual((added["crm"]["interest"], added["crm"]["quoted_amount"]), ("interested", 45000))
+        self.assertEqual((added["crm"]["update_status"], added["crm"]["quoted_amount"], added["crm"]["conversion_amount"]),
+                         ("converted", 45000, 40000))
+        self.assertNotIn("interest", added["crm"])
+        self.assertNotIn("converted", added["crm"])
         self.assertEqual(added["branch"]["name"], "Jayanagar")
         self.assertEqual(added["additional_details.pincode"], "560011")
         workflow = next(i for i in data["items"] if i["id"] == 101)
         self.assertEqual(workflow["origin"], "workflow")
-        self.assertIsNone(workflow["crm"]["interest"])
+        self.assertIsNone(workflow["crm"]["update_status"])
 
     # ── 2. PUT /leads/{source}/{key}/crm and crm- keys ──
     def test_crm_put_404_for_unknown_crm_key_in_every_source(self):
@@ -374,7 +380,7 @@ class CrmLeadsApiTest(ApiTestBase, unittest.TestCase):
 
                 # CRM details (by the assigned vendor), then archive: hidden from list and export,
                 # phone still a duplicate, meta kept
-                resp = self.put_crm(SAMPLE_VENDOR[source], source, key, {"interest": "interested"})
+                resp = self.put_crm(SAMPLE_VENDOR[source], source, key, {"update_status": "interested"})
                 self.assertEqual(resp.status_code, 200, resp.text)
                 exported_before = len(self.export_rows(source))
                 resp = self.client.post(f"{API}/crm-leads/{source}/{key}/archive")
@@ -387,7 +393,7 @@ class CrmLeadsApiTest(ApiTestBase, unittest.TestCase):
                 self.assertTrue(resp.json()["detail"]["duplicate"]["archived"])
                 with Session(self.engine) as s:
                     meta = s.exec(select(LeadMeta).where(LeadMeta.source == source, LeadMeta.lead_key == key)).one()
-                    self.assertEqual(meta.interest, "interested")
+                    self.assertEqual(meta.update_status, "interested")
 
                 # Unarchive: back in the list
                 self.assertEqual(self.client.post(f"{API}/crm-leads/{source}/{key}/unarchive").status_code, 200)
@@ -464,8 +470,8 @@ class CrmLeadsApiTest(ApiTestBase, unittest.TestCase):
         self.assertEqual(wb.sheetnames, ["Leads", "Instructions", "Lists"])
         headers = [c.value for c in wb["Leads"][1]]
         self.assertEqual(headers, ["Lead", "Email", "Contact", "Branch", "Branch code", "Location", "Occasion",
-                                   "Event date", "Budget", "Assigned to", "Interest", "Quoted amount", "Quoted date",
-                                   "Converted", "Created"])
+                                   "Event date", "Budget", "Assigned to", "Update", "Quoted amount", "Quoted date",
+                                   "Conversion amount", "Created"])
         lists = wb["Lists"]
         self.assertEqual([r[0].value for r in lists.iter_rows(min_row=2) if r[0].value],    # Branches page + built-in stores
                          sorted((s["name"] for s in STORES.values()), key=str.lower))
@@ -554,7 +560,7 @@ class CrmLeadsApiTest(ApiTestBase, unittest.TestCase):
         self.assertEqual(workflow[header.index("Budget")].value, "₹10–20")
         self.assertEqual(workflow[header.index("Location")].value, "Bangalore · 560018")
         self.assertEqual(workflow[header.index("Assigned to")].value, "RJ")         # Chamrajpet branch
-        self.assertEqual(workflow[header.index("Converted")].value, "No")
+        self.assertEqual(workflow[header.index("Update")].value, "Pending")
 
     def test_spin_branches_not_in_crm_branches(self):
         """The real database's crm_branches can be empty: exports must still show the screen's
@@ -662,7 +668,7 @@ class CrmLeadsApiTest(ApiTestBase, unittest.TestCase):
         out = self.export_rows("wedding", "csv")
         header = out[0]
         self.assertEqual(header, ["Lead", "Email", "Contact", "Occasion", "Event date", "City", "Budget", "Assigned to",
-                                  "Interest", "Quoted amount", "Quoted date", "Converted", "Submitted"])
+                                  "Update", "Quoted amount", "Quoted date", "Conversion amount", "Submitted"])
         first = next(r for r in out[1:] if r[header.index("Email")] == "x@example.com")
         self.assertEqual(first[header.index("Lead")], "'=cmd|' /C calc'!A0")       # apostrophe: not a formula
         self.assertEqual(first[header.index("Contact")], "'+919845030001")          # text, formula-safe
