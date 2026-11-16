@@ -29,4 +29,4 @@ class Vendor(SQLModel, table=True):
     notes: str | None = Field(default=None, sa_column=Column(Text))
     is_active: bool = True
     created_at: datetime
-    updated_at: datetime
+    updated_at: datetime | None = None   # nullable in crm_vendors (the other backend leaves it empty)

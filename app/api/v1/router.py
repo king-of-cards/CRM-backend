@@ -11,6 +11,7 @@ from app.api.v1.endpoints import (
     sheets,
     spin_leads,
     users,
+    vendor_to_koc,
     vendors,
     wedding_leads,
     wedding_plans,
@@ -32,3 +33,4 @@ api_router.include_router(vendors.router)
 api_router.include_router(branches.router)
 api_router.include_router(lead_crm.router)
 api_router.include_router(crm_leads.router)
+api_router.include_router(vendor_to_koc.router)
