@@ -26,7 +26,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import NoSuchTableError, SQLAlchemyError
 
-from app.api.deps import DbSession, LeadViewer, common_filter_params
+from app.api.deps import DbSession, LeadViewer, PageSize, common_filter_params
 from app.core import response_cache
 from app.core.config import settings
 from app.db.session import read_engine
@@ -691,7 +691,7 @@ def spin_leads_endpoint(
     db: DbSession,
     f: Filters,
     page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=200),
+    page_size: PageSize = 10,
     sort: str | None = Query(None, description="Column name or additional_details.<key>"),
     order: Literal["asc", "desc"] = Query("asc"),
 ):

@@ -4,6 +4,7 @@ from urllib.parse import urlsplit
 import jwt
 from fastapi import Depends, HTTPException, Query, Request, status
 from fastapi.security import OAuth2PasswordBearer
+from pydantic import AfterValidator
 from sqlmodel import Session
 
 from app.core.config import settings
@@ -60,6 +61,18 @@ def get_viewer(user: CurrentUser, db: DbSession) -> Viewer:
 
 # Endpoints that admins and vendor users may call; results are limited to what the viewer may see
 LeadViewer = Annotated[Viewer, Depends(get_viewer)]
+
+# Lead lists: page sizes the screens offer (anything else: 422). Default 10.
+PAGE_SIZES = (10, 25, 50, 100)
+
+
+def _check_page_size(value: int) -> int:
+    if value not in PAGE_SIZES:
+        raise ValueError(f"page_size must be one of {', '.join(map(str, PAGE_SIZES))}")
+    return value
+
+
+PageSize = Annotated[int, Query(description="10, 25, 50 or 100 (default 10)"), AfterValidator(_check_page_size)]
 
 
 def _period(required: bool):

@@ -111,7 +111,7 @@ class VendorAccessTest(ApiTestBase, unittest.TestCase):
                 overview = self.client.get(f"{API}/analytics/overview").json()
                 for source, expected in per_source.items():
                     with self.subTest(who=who, source=source):
-                        resp = self.client.get(f"{API}{base.LIST_URL[source]}", params={"page_size": 200})
+                        resp = self.client.get(f"{API}{base.LIST_URL[source]}", params={"page_size": 100})
                         self.assertEqual(self.keys(resp.json()["items"]), expected)
                         self.assertEqual(resp.json()["total"], len(expected))
                         self.assertEqual(len(self.export_rows(source)) - 1, len(expected))       # minus the header

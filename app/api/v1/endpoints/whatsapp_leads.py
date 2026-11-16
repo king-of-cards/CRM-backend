@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import and_, false, func
 from sqlmodel import col, select
 
-from app.api.deps import DbSession, LeadViewer, common_filter_params
+from app.api.deps import DbSession, LeadViewer, PageSize, common_filter_params
 from app.models.whatsapp_lead import WhatsAppLead
 from app.services import access, kpis, lead_crm, lead_filters
 
@@ -74,7 +74,7 @@ def list_whatsapp_leads(
     db: DbSession,
     f: Filters,
     page: int = Query(1, ge=1),
-    page_size: int = Query(25, ge=1, le=200),
+    page_size: PageSize = 10,
     sort: Literal["submitted_at", "event_date", "country", "phone", "first_seen_at"] = "submitted_at",
     order: Literal["asc", "desc"] = "desc",
 ):

@@ -207,7 +207,7 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
         self.assertEqual(o["not_filtered"], [])
         # The same as the lists without dates (they mean all time)
         for source, url in (("whatsapp", "/whatsapp-leads"), ("wedding", "/wedding-leads"), ("wedding_planner", "/wedding-plans")):
-            listed = self.client.get(f"{API}{url}", params={"page_size": 1}).json()["total"]
+            listed = self.client.get(f"{API}{url}", params={"page_size": 10}).json()["total"]
             self.assertEqual(o["totals"][source], listed, source)
         # Needs attention and upcoming events over all leads
         self.assertEqual(o["needs_attention"], {"not_shared": 3, "over_budget": 2, "total": 5})
@@ -291,7 +291,7 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
                 with self.logged_in(who):
                     for source, url in lists.items():
                         for field, flt in filters.items():
-                            listed = self.client.get(f"{API}{url}", params={"page_size": 1, **dates, **flt}).json()["total"]
+                            listed = self.client.get(f"{API}{url}", params={"page_size": 10, **dates, **flt}).json()["total"]
                             self.assertEqual(outcomes[source][field], listed, (who, dates, source, field))
                     # Each list's stats KPIs (same dates) equal the dashboard's outcomes for that source
                     for source, url in stats_url.items():
@@ -310,7 +310,7 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
 
     # ── The lists the Dashboard also calls: optional period, no filter by default ──
     def list_keys(self, url, key="lead_key", **params) -> set[str]:
-        resp = self.client.get(f"{API}{url}", params={"page_size": 200, **params})
+        resp = self.client.get(f"{API}{url}", params={"page_size": 100, **params})
         self.assertEqual(resp.status_code, 200, resp.text)
         return {str(i[key]) for i in resp.json()["items"]}
 

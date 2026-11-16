@@ -87,7 +87,7 @@ class SheetListFiltersTest(ApiTestBase, unittest.TestCase):
 
     def keys(self, source, who="admin", **params) -> set[str]:
         with self.logged_in(who):
-            resp = self.client.get(f"{API}{LIST[source]}", params={"page_size": 200, **params})
+            resp = self.client.get(f"{API}{LIST[source]}", params={"page_size": 100, **params})
         self.assertEqual(resp.status_code, 200, resp.text)
         body = resp.json()
         self.assertEqual(body["total"], len(body["items"]))
@@ -197,7 +197,7 @@ class SheetListFiltersTest(ApiTestBase, unittest.TestCase):
                 for source, cases in combos.items():
                     for params in cases:
                         with self.subTest(who=who, source=source, params=params):
-                            listed = self.client.get(f"{API}{LIST[source]}", params={"page_size": 200, **params}).json()
+                            listed = self.client.get(f"{API}{LIST[source]}", params={"page_size": 100, **params}).json()
                             stats = self.client.get(f"{API}{stats_url[source]}", params=params).json()
                             resp = self.client.get(f"{API}/crm-leads/{source}/export", params=params)
                             self.assertEqual(resp.status_code, 200, resp.text)
@@ -213,6 +213,24 @@ class SheetListFiltersTest(ApiTestBase, unittest.TestCase):
                                              sum(c["update_status"] == "not_interested" for c in crm))
                             self.assertEqual(stats["kpis"]["quoted_total"], sum(c["quoted_amount"] or 0 for c in crm))
                             self.assertEqual(stats["kpis"]["conversion_total"], sum(c["conversion_amount"] or 0 for c in crm))
+
+    # ── Page sizes ──
+    def test_page_sizes(self):
+        lists = {**{s: url for s, url in LIST.items()}, "spin": "/spin-leads"}
+        for source, url in lists.items():
+            default = self.client.get(f"{API}{url}").json()
+            self.assertEqual(default["page_size"], 10, source)                 # default 10
+            self.assertIn("total", default)
+            for size in (10, 25, 50, 100):
+                resp = self.client.get(f"{API}{url}", params={"page_size": size})
+                self.assertEqual((resp.status_code, resp.json()["page_size"]), (200, size), (source, size))
+            for size in (1, 5, 20, 101, 200, 0):
+                resp = self.client.get(f"{API}{url}", params={"page_size": size})
+                self.assertEqual(resp.status_code, 422, (source, size))
+                self.assertIn("page_size must be one of 10, 25, 50, 100", resp.text)
+        # Paging keeps the total: 3 International leads, page 1 of size 10
+        body = self.client.get(f"{API}/whatsapp-leads", params={"page": 2, "page_size": 10}).json()
+        self.assertEqual((body["total"], body["items"]), (3, []))
 
     # ── Filter options ──
     def test_filter_options_are_scoped_to_the_viewer(self):
@@ -318,7 +336,7 @@ class SpinListFiltersTest(ApiTestBase, unittest.TestCase):
 
     def ids(self, who="admin", **params) -> set[str]:
         with self.logged_in(who):
-            resp = self.client.get(f"{API}/spin-leads", params={"page_size": 200, **params})
+            resp = self.client.get(f"{API}/spin-leads", params={"page_size": 100, **params})
         self.assertEqual(resp.status_code, 200, resp.text)
         body = resp.json()
         self.assertEqual(body["total"], len(body["items"]))
@@ -357,7 +375,7 @@ class SpinListFiltersTest(ApiTestBase, unittest.TestCase):
         for who, params in (("admin", {}), ("admin", {"update_status": "pending", "origin": "workflow"}),
                             ("admin", {"upcoming_days": 30}), ("phodeo", {}), ("phodeo", {"date_from": "2026-11-01"})):
             with self.logged_in(who):
-                listed = self.client.get(f"{API}/spin-leads", params={"page_size": 200, **params}).json()["items"]
+                listed = self.client.get(f"{API}/spin-leads", params={"page_size": 100, **params}).json()["items"]
                 resp = self.client.get(f"{API}/crm-leads/spin/export", params=params)
             self.assertEqual(resp.status_code, 200, resp.text)
             ws = load_workbook(io.BytesIO(resp.content)).active
@@ -377,7 +395,7 @@ class SpinListFiltersTest(ApiTestBase, unittest.TestCase):
                             ("admin", {"date_from": "2026-11-10", "date_to": "2026-11-16"}), ("phodeo", {}),
                             ("rj", {}), ("admin", {"conversion": "has"}), ("admin", {"search": "Spin"})):
             with self.logged_in(who):
-                listed = self.client.get(f"{API}/spin-leads", params={"page_size": 200, **params}).json()
+                listed = self.client.get(f"{API}/spin-leads", params={"page_size": 100, **params}).json()
                 resp = self.client.get(f"{API}/spin-leads/stats", params=params)
             self.assertEqual(resp.status_code, 200, resp.text)
             stats = resp.json()

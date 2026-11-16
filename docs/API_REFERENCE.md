@@ -1070,7 +1070,7 @@ leads, whatever they send.
 | `city` | | | ✔ | ✔ | City contains, ignoring case (`Hyderabad` finds "Shamirpet, Hyderabad"). Planner: wedding city |
 | `budget_min`, `budget_max` | | | ✔ | ✔ | Inclusive, rupees. Wedding: the budget amount; Planner: the total budget |
 | `guests_min`, `guests_max` | | | | ✔ | Inclusive total guests |
-| `page`, `page_size`, `sort`, `order` | ✔ | ✔ | ✔ | ✔ | Paging and sort (lists and exports) |
+| `page`, `page_size`, `sort`, `order` | ✔ | ✔ | ✔ | ✔ | Paging (lists) and sort (lists and exports). `page_size`: 10, 25, 50 or 100, default 10; anything else answers 422 (`page_size must be one of 10, 25, 50, 100`). Responses keep `total` |
 
 ### Errors (400)
 
@@ -1146,7 +1146,7 @@ paths, shapes and rules. Base path: `/api/v1/vendor-to-koc`.
 | `POST /upload/preview` | vendor | `multipart/form-data`: `file` (`.xlsx` / `.csv`, at most 5 MB and 5,000 rows), `sheet_name` (`.xlsx`, default the first sheet). Checked against the login's vendor (a `vendor_id` sent is ignored). Saves nothing. Returns `{rows: [{row, name, date, phone, city, errors, duplicate}], valid_count, invalid_count, duplicate_count}`. File too large: 413 |
 | `POST /leads/bulk` | vendor | `{leads: [{name, date, phone, city}]}` (at most 5,000). Validates each lead again, saves the valid ones, skips duplicates. Returns `{added, duplicates_skipped, failed, errors: [{index, field, message}]}` |
 | `POST /leads` | vendor | One lead: `{name, date, phone, city}`. 201 with the lead; 409 duplicate; 422 field errors |
-| `GET /leads` | all | The list with [the filters below](#filters-list-stats-and-export), `page`, `page_size` (1–100, default 20). Returns `{items (each with sl_no), total, page, page_size, pages}` |
+| `GET /leads` | all | The list with [the filters below](#filters-list-stats-and-export), `page`, `page_size` (10, 25, 50 or 100, default 10; others: 422). Returns `{items (each with sl_no), total, page, page_size, pages}` |
 | `GET /leads/stats` | all | Header numbers over the same filtered leads: `{total, by_source, by_status (incl. pending), follow_ups_due, kpis}` ([KPIs](#kpis-the-same-six-everywhere)); admins also `by_vendor` |
 | `GET /leads/export` | all | The same filtered leads as a file (`format=xlsx` (default) or `csv`), see [Export](#export-1) |
 | `GET /leads/template` | any login | The upload template (`format=xlsx` or `csv`): Name, Date, Phone, City and one example row, dates `DD-MM-YYYY` |

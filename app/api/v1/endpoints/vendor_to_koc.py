@@ -11,7 +11,7 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 
-from app.api.deps import AdminUser, CurrentUser, DbSession, LeadViewer, OptionalPeriod
+from app.api.deps import AdminUser, CurrentUser, DbSession, LeadViewer, OptionalPeriod, PageSize
 from app.crud import vendor_to_koc as crud
 from app.services import vendor_lead_export as lead_export
 from app.models.user import Role, User
@@ -207,7 +207,7 @@ def list_leads(
     scope: LeadViewer,
     query: LeadQueryDep,
     page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
+    page_size: PageSize = 10,
 ):
     return crud.list_leads(db, query.filters, query.sort, query.order, page, page_size,
                            admin=scope.is_admin)

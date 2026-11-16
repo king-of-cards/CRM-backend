@@ -253,7 +253,7 @@ class ApiTestBase:
             return self.client.put(f"{API}/leads/{source}/{key}/crm", json=body)
 
     def list_items(self, source, **params) -> list[dict]:
-        resp = self.client.get(f"{API}{LIST_URL[source]}", params={"page_size": 200, **params})
+        resp = self.client.get(f"{API}{LIST_URL[source]}", params={"page_size": 100, **params})
         self.assertEqual(resp.status_code, 200, resp.text)
         return resp.json()["items"]
 

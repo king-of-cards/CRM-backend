@@ -474,11 +474,16 @@ class ListTests(VendorToKocTestCase):
         self.assertEqual(self.ids_for("search=flat 50"), [])    # digits alone don't match phones
 
     def test_paging_and_sl_no(self):
-        body = self.client.get(f"{BASE}/leads?page=2&page_size=2&sort=lead_date&order=asc",
+        for i in range(9):                                   # 12 leads: two pages of 10
+            self.add_lead(self.other_id, f"910000000{i}")
+        body = self.client.get(f"{BASE}/leads?page=2&page_size=10&sort=lead_date&order=asc",
                                headers=self.admin).json()
-        self.assertEqual((body["total"], body["pages"], body["page"]), (3, 2, 2))
-        self.assertEqual([(i["sl_no"], i["id"]) for i in body["items"]], [(3, self.b)])
-        self.assertEqual(self.client.get(f"{BASE}/leads?page_size=101", headers=self.admin).status_code, 422)
+        self.assertEqual((body["total"], body["pages"], body["page"], body["page_size"]), (12, 2, 2, 10))
+        self.assertEqual([i["sl_no"] for i in body["items"]], [11, 12])
+        default = self.client.get(f"{BASE}/leads", headers=self.admin).json()
+        self.assertEqual((default["page_size"], len(default["items"]), default["total"]), (10, 10, 12))
+        for size in (2, 20, 101, 0):
+            self.assertEqual(self.client.get(f"{BASE}/leads?page_size={size}", headers=self.admin).status_code, 422)
 
 
 # ── Vendors (admin) ─────────────────────────────────────────────────────
