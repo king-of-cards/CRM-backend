@@ -27,6 +27,8 @@ per-vendor access rules, and the CRM details endpoint `PUT /leads/{source}/{lead
 8. [File downloads: filenames and CORS](#8-file-downloads-filenames-and-cors)
 9. [Dashboard: date filter](#9-dashboard-date-filter)
 10. [Lead list filters](#10-lead-list-filters)
+11. [Vendor → KOC](#11-vendor--koc)
+12. [Users and vendor logins](#12-users-and-vendor-logins)
 
 ---
 
@@ -1045,3 +1047,138 @@ leads, whatever they send.
 - **`interests`:** includes `not_set`.
 - **`vendors`:** `[{id, name}]` of the active vendors for admins; empty for vendor users, since
   vendor filtering is admin-only.
+
+---
+
+## 11. Vendor → KOC
+
+Leads that vendors send to KOC: table `crm_vendor_to_koc_leads`, vendors in `crm_vendors`,
+vendor logins linked in `crm_vendor_users`. Ported from the other CRM backend with the same
+paths, shapes and rules. Base path: `/api/v1/vendor-to-koc`.
+
+**Who:**
+- **Admins** see every vendor's leads, and edit the admin fields (`update_status`,
+  `additional_comments`, `follow_up_date`).
+- **Vendor logins** work only with their own vendor's leads. Their vendor comes from the login and
+  is never taken from input: a `vendor_id` they send is ignored. They never see the admin fields:
+  their responses use `VendorLeadRead`, which doesn't contain them. Another vendor's lead answers
+  404.
+- **A vendor login without a vendor:** `403 {"detail": "This login isn't linked to a vendor."}`.
+
+### Lead rules
+
+| Field | Rule |
+|---|---|
+| `phone` | **Required.** A 10-digit Indian mobile number starting with 6–9. `+91`, a 12-digit `91…`, a leading `0`, spaces and dashes are removed. Stored as the 10 digits |
+| `name`, `city` | Optional, at most 100 characters |
+| `date` (the lead's own date) | Optional. Files: a real date, or text `DD-MM-YYYY` (day first). JSON: `YYYY-MM-DD` |
+| Duplicates | One lead per vendor and phone. Duplicates are skipped in bulk and answer 409 for a single add |
+| Template example row | The template's example row, uploaded unchanged, is an error (`"This is the example row from the template; delete it"`) |
+| `update_status` | `null` (pending), `converted`, `not_converted`, `purchased_elsewhere`, `purchased_with_us`, `will_call_back`, `interested`, `not_interested` |
+| `source` | `bulk_upload` or `manual` |
+
+### Endpoints
+
+| Method and path | Who | What |
+|---|---|---|
+| `POST /upload/preview` | all | `multipart/form-data`: `file` (`.xlsx` / `.csv`, at most 5 MB and 5,000 rows), `sheet_name` (`.xlsx`, default the first sheet), `vendor_id` (admins: required; ignored for vendors). Saves nothing. Returns `{rows: [{row, name, date, phone, city, errors, duplicate}], valid_count, invalid_count, duplicate_count}`. File too large: 413 |
+| `POST /leads/bulk` | all | `{vendor_id (admins), leads: [{name, date, phone, city}]}` (at most 5,000). Validates each lead again, saves the valid ones, skips duplicates. Returns `{added, duplicates_skipped, failed, errors: [{index, field, message}]}` |
+| `POST /leads` | all | One lead: `{name, date, phone, city, vendor_id (admins)}`. 201 with the lead; 409 duplicate; 422 field errors |
+| `GET /leads` | all | The list with [the filters below](#filters-list-stats-and-export), `page`, `page_size` (1–100, default 20). Returns `{items (each with sl_no), total, page, page_size, pages}` |
+| `GET /leads/stats` | all | Header numbers over the same filtered leads: `{total, by_source}`; admins also `by_status` (incl. `pending`), `by_vendor`, `follow_ups_due` |
+| `GET /leads/export` | all | The same filtered leads as a file (`format=xlsx` (default) or `csv`), see [Export](#export-1) |
+| `GET /leads/template` | any login | The upload template (`format=xlsx` or `csv`): Name, Date, Phone, City and one example row, dates `DD-MM-YYYY` |
+| `GET /leads/{id}` | all | One lead (another vendor's: 404) |
+| `PATCH /leads/{id}` | admin | Any of `update_status`, `additional_comments` (≤ 5,000), `follow_up_date`. Only the fields sent change; `null` clears one (`update_status: null` = back to pending). Records `status_updated_by` / `status_updated_at` |
+| `GET /vendors` | admin | Every vendor (active and inactive) with `lead_count`: `[{id, name, is_active, lead_count}]` |
+| `POST /vendors` | admin | `{name}`. 409 if the name exists, ignoring case. The vendor gets this CRM's defaults (no areas, not fallback, priority 100); edit them on the Vendors page (`PATCH /api/v1/vendors/{id}`) |
+| `PATCH /vendors/{id}` | admin | `{name?, is_active?}`. 409 on a duplicate name |
+| `PUT /vendors/{vendor_id}/users/{user_id}` | admin | Links an existing vendor login to a vendor, or moves it. Returns `{user_id, vendor_id, vendor_name}`. 400 if the user isn't a vendor login |
+
+**Lead object:**
+- Everyone gets `id, vendor_id, vendor_name, lead_date, name, phone, city, source, created_by,
+  created_at, updated_at`.
+- Admins also get `update_status, additional_comments, follow_up_date, status_updated_by,
+  status_updated_at`.
+
+Vendor use of admin-only filters or sorts (`update_status`, `follow_up_from`, `follow_up_to`,
+`follow_up_due`, `sort=update_status|follow_up_date`) answers
+`422 {"detail": [{"type": "forbidden", "loc": ["query", "<name>"], "msg": "Not available for vendor users"}]}`.
+
+### Filters (list, stats and export)
+
+`GET /leads`, `GET /leads/stats` and `GET /leads/export` share one filter definition. For the
+same parameters, the list `total`, the stats `total` and the export's rows are equal.
+
+| Parameter | Who | Meaning |
+|---|---|---|
+| `search` | all | Name, city or phone (also by its digits: `98450 12345`) |
+| `date_from`, `date_to` | all | **Arrival** (`created_at`), IST days, inclusive. The rules of the other lists: one date = that day, no future dates, at most 366 days (400 otherwise) |
+| `lead_date_from`, `lead_date_to` | all | The lead's own date, inclusive (400 if from is after to) |
+| `vendor_id` (repeatable) | admin; ignored for vendors | |
+| `update_status` (repeatable, incl. `pending`) | admin | |
+| `follow_up_from`, `follow_up_to` | admin | Follow-up date range (400 if from is after to) |
+| `follow_up_due=true` | admin | Follow-up date today or earlier, open leads only (not converted, not converted, purchased elsewhere, purchased with us or not interested) |
+| `city` | all | Contains, ignoring case |
+| `source` (repeatable) | all | `bulk_upload` / `manual` |
+| `sort`, `order` | all | `created_at` (default), `updated_at`, `lead_date`, `name`, `city`, `phone`, `vendor_name`; admins also `update_status`, `follow_up_date`. Empty values last |
+
+### Export
+
+`GET /leads/export?format=xlsx|csv` exports every lead matching the filters, in list order,
+with no paging (50,000 at most; 400 above that).
+
+- **Columns:**
+  - Vendor logins: Sl. No, Date, Name, Phone, City.
+  - Admins: Sl. No, Vendor, Date, Name, Phone, City, Update, Additional comments, Follow-up date,
+    Updated by, Updated at.
+- **Formats**, as this CRM's list screens and the other exports:
+  - dates `13 Dec 2026` (Excel date cells, `dd mmm yyyy`);
+  - date-times `14 Nov 2026, 10:30 am` in IST;
+  - phones `+91XXXXXXXXXX` as text;
+  - Update as readable labels (`Pending`, `Converted`, `Already purchased with us`…).
+- **Formula safety:** text never becomes a formula; in CSV, text starting with `=`, `+`, `-`, `@`
+  gets a leading `'`.
+- **File:** `Content-Disposition: attachment; filename="vendor_to_koc_leads_YYYY-MM-DD.xlsx"`
+  (vendor logins: `<vendor>_leads_…`), with `Cache-Control: no-store`.
+
+### Dashboard: `GET /api/v1/analytics/vendor-to-koc`
+
+The same period rules as `/analytics/overview` ([Dashboard](#9-dashboard-date-filter)):
+`date_from` / `date_to` (IST), `period=all`, the default last 30 days, the previous period, and the
+same 400 errors. A lead's arrival date is its `created_at`. Results are cached per viewer and period.
+
+| Field | Who | Covers |
+|---|---|---|
+| `period` | all | As in the overview (`granularity` day / week / month) |
+| `received` | all | Leads that arrived in the period |
+| `change_pct` | all | `received` vs the previous period; `null` for all time or with 0 before |
+| `average_per_day` | all | `{period, previous}`; `previous` is `null` for all time |
+| `inflow`, `inflow_vendors` | all | Points `{date, end, total, vendors: {"<vendor id>": n}}` plus the vendor legend `[{id, name}]` |
+| `previous_received` | admin | Leads in the previous period |
+| `pending`, `converted`, `converted_pct`, `purchased_with_us` | admin | Over the period's leads (`converted_pct` of `received`, 1 decimal) |
+| `by_status` | admin | `pending` plus every status |
+| `per_vendor` | admin | `[{vendor_id, vendor_name, leads, interested, converted, pending, converted_pct, average_days_to_update}]`. The last field is the average days from `created_at` to `status_updated_at`, over leads with a status |
+| `funnel` | admin | `{received, updated (has a status), engaged (interested, will call back or converted), converted}`; `purchased_with_us` is separate |
+| `top_cities`, `by_source` | admin | Over the period's leads |
+| `latest` | admin | The 6 newest leads of the period (lead objects with admin fields) |
+| `follow_ups_due` | admin | **Not limited to the period:** open leads with a follow-up date today or earlier |
+| `next_follow_ups` | admin | **Not limited to the period:** up to 10 open leads by follow-up date, earliest first, overdue included |
+| `not_filtered` | admin | `["follow_ups_due", "next_follow_ups"]` |
+
+Vendor logins get only `period`, `received`, `change_pct`, `average_per_day`, `inflow` and
+`inflow_vendors` (plus `generated_at`, `today`), over their own leads. The other keys are left out.
+
+---
+
+## 12. Users and vendor logins
+
+- **`POST /api/v1/users`** (admin) accepts `vendor_id` for vendor logins (optional):
+  - with it, the login is linked to that vendor (404 if the vendor doesn't exist);
+  - without it, the login is created unlinked and gets 403 on lead endpoints until it's linked
+    (`PUT /api/v1/vendor-to-koc/vendors/{vendor_id}/users/{user_id}`);
+  - an admin with `vendor_id` gets 422.
+- **`UserRead`** (`POST` / `GET /api/v1/users`, `GET /api/v1/users/{id}`) includes `vendor_id` and
+  `vendor_name` (`null` for admins and unlinked logins). `GET /api/v1/users` orders by id and takes
+  `skip` (≥ 0) and `limit` (1–200).
+- **`GET /api/v1/auth/me`** returns `vendor_id` / `vendor_name` as well as `vendor: {id, name}`.
