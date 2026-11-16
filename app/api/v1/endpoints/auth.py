@@ -11,8 +11,6 @@ from app.core.security import create_access_token
 from app.crud import refresh_token as tokens
 from app.crud import user as crud
 from app.models.user import Token, UserRead
-from app.models.vendor import Vendor
-from app.models.vendor_user import VendorUser
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -110,9 +108,7 @@ class MeRead(UserRead):
 
 @router.get("/me", response_model=MeRead)
 def read_me(current_user: CurrentUser, db: DbSession):
-    vendor = None
-    link = db.get(VendorUser, current_user.id) if current_user.role != "admin" else None
-    if link is not None:
-        v = db.get(Vendor, link.vendor_id)
-        vendor = VendorRef(id=v.id, name=v.name) if v else None
-    return MeRead.model_validate({**current_user.model_dump(), "vendor": vendor})
+    """The login, with vendor_id / vendor_name (as in GET /users) and the same as a vendor object."""
+    me = crud.get_user_read(db, current_user.id)
+    vendor = VendorRef(id=me.vendor_id, name=me.vendor_name) if me.vendor_id is not None else None
+    return MeRead.model_validate({**me.model_dump(), "vendor": vendor})

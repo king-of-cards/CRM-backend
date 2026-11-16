@@ -1,12 +1,14 @@
 import logging
 
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlmodel import Session, select
 
 from app.core.security import (
     DUMMY_HASH, MAX_PASSWORD_LENGTH, hash_password, verify_and_update_password, verify_password,
 )
-from app.models.user import User, UserCreate
+from app.models.user import User, UserCreate, UserRead
+from app.models.vendor import Vendor
+from app.models.vendor_user import VendorUser
 
 logger = logging.getLogger(__name__)
 
@@ -19,11 +21,37 @@ def get_user_by_email(db: Session, email: str) -> User | None:
     return db.exec(select(User).where(User.email == email.strip().lower())).first()
 
 
-def list_users(db: Session, skip: int = 0, limit: int = 100) -> list[User]:
-    return list(db.exec(select(User).offset(skip).limit(limit)).all())
+def _with_vendor():
+    """Users with their vendor link (if any), in one query."""
+    return (
+        select(User, VendorUser.vendor_id, Vendor.name)
+        .outerjoin(VendorUser, VendorUser.user_id == User.id)
+        .outerjoin(Vendor, Vendor.id == VendorUser.vendor_id)
+    )
+
+
+def _to_read(user: User, vendor_id: int | None, vendor_name: str | None) -> UserRead:
+    data = user.model_dump(exclude={"hashed_password"})
+    return UserRead(**data, vendor_id=vendor_id, vendor_name=vendor_name)
+
+
+def get_user_read(db: Session, user_id: int) -> UserRead | None:
+    row = db.exec(_with_vendor().where(User.id == user_id)).first()
+    return _to_read(*row) if row else None
+
+
+def list_users(db: Session, skip: int = 0, limit: int = 100) -> list[UserRead]:
+    rows = db.exec(_with_vendor().order_by(User.id).offset(skip).limit(limit)).all()
+    return [_to_read(*row) for row in rows]
+
+
+class EmailAlreadyRegistered(Exception):
+    """The email is taken (also raised when a parallel request inserted it first)."""
 
 
 def create_user(db: Session, data: UserCreate) -> User:
+    """Creates the user and, when a vendor_id is given (vendor logins), its crm_vendor_users link
+    in one transaction. The caller checks that data.vendor_id exists."""
     user = User(
         name=data.name,
         email=data.email.strip().lower(),
@@ -31,7 +59,15 @@ def create_user(db: Session, data: UserCreate) -> User:
         role=data.role.value,
     )
     db.add(user)
-    db.commit()
+    try:
+        db.flush()                      # assigns user.id
+        if data.vendor_id is not None:
+            db.add(VendorUser(user_id=user.id, vendor_id=data.vendor_id))
+        db.commit()
+    except IntegrityError:
+        # The email is the only unique column of crm_users
+        db.rollback()
+        raise EmailAlreadyRegistered() from None
     db.refresh(user)
     return user
 

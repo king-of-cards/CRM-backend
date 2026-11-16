@@ -481,10 +481,14 @@ class VendorAdminTests(VendorToKocTestCase):
 
 # ── Vendor logins ───────────────────────────────────────────────────────
 class VendorLoginTests(VendorToKocTestCase):
-    @unittest.skip("users: vendor_id / vendor_name come in the next commit")
-    def test_creating_a_vendor_user_requires_vendor_id(self):
+    def test_creating_a_vendor_user_with_an_optional_vendor_id(self):
+        # This backend: vendor_id is optional; without it the login is created unlinked
         body = {"name": "New", "email": "new@example.com", "password": PASSWORD, "role": "vendor"}
-        self.assertEqual(self.client.post("/api/v1/users", headers=self.admin, json=body).status_code, 422)
+        resp = self.client.post("/api/v1/users", headers=self.admin, json={**body, "email": "plain@example.com"})
+        self.assertEqual(resp.status_code, 201, resp.text)
+        self.assertEqual((resp.json()["vendor_id"], resp.json()["vendor_name"]), (None, None))
+        plain = self.headers("plain@example.com")
+        self.assertEqual(self.client.get(f"{BASE}/leads", headers=plain).status_code, 403)   # until linked
         self.assertEqual(self.client.post("/api/v1/users", headers=self.admin,
                                           json={**body, "vendor_id": 999}).status_code, 404)
         resp = self.client.post("/api/v1/users", headers=self.admin, json={**body, "vendor_id": self.phodeo_id})
@@ -495,7 +499,6 @@ class VendorLoginTests(VendorToKocTestCase):
         admin_body = {**body, "email": "a2@example.com", "role": "admin", "vendor_id": self.phodeo_id}
         self.assertEqual(self.client.post("/api/v1/users", headers=self.admin, json=admin_body).status_code, 422)
 
-    @unittest.skip("users: vendor_id / vendor_name come in the next commit")
     def test_users_list_includes_vendor(self):
         users = {u["email"]: u for u in self.client.get("/api/v1/users", headers=self.admin).json()}
         self.assertEqual(users["phodeo@example.com"]["vendor_name"], "Phodeo")

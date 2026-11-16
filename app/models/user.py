@@ -1,7 +1,7 @@
 from datetime import datetime
 from enum import Enum
 
-from pydantic import EmailStr
+from pydantic import EmailStr, model_validator
 from sqlalchemy import Column, DateTime, func
 from sqlmodel import Field, SQLModel
 
@@ -35,6 +35,15 @@ class User(UserBase, table=True):
 class UserCreate(UserBase):
     password: str = Field(min_length=8, max_length=128)
     role: Role = Role.VENDOR
+    # Vendor logins: the vendor to link (optional; without it the login stays unlinked and gets
+    # 403 on lead endpoints until linked). Not allowed for admins.
+    vendor_id: int | None = None
+
+    @model_validator(mode="after")
+    def _vendor_link(self):
+        if self.role == Role.ADMIN and self.vendor_id is not None:
+            raise ValueError("vendor_id is only allowed when role is vendor")
+        return self
 
 
 # Response shape (never includes the password hash)
@@ -43,6 +52,8 @@ class UserRead(UserBase):
     role: str
     is_active: bool
     created_at: datetime
+    vendor_id: int | None = None      # vendor logins only (from crm_vendor_users)
+    vendor_name: str | None = None
 
 
 class Token(SQLModel):
