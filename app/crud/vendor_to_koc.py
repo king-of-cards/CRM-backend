@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 
-from sqlalchemy import case, func, insert, or_
+from sqlalchemy import case, false, func, insert, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
 from sqlmodel import Session, col, select
@@ -115,6 +115,8 @@ class LeadFilters:
     follow_up_due_by: date | None = None     # follow_up_date <= this, open statuses only
     city: str | None = None                  # contains, ignoring case
     sources: list[str] | None = None         # bulk_upload / manual
+    ids_in: set[int] | None = None           # only these lead ids (also_in=yes)
+    ids_not_in: set[int] | None = None       # never these lead ids (also_in=no)
 
 
 def _conditions(f: LeadFilters) -> list:
@@ -157,6 +159,10 @@ def _conditions(f: LeadFilters) -> list:
         conds.append(col(lead.city).ilike(f"%{escaped_city}%", escape=LIKE_ESCAPE))
     if f.sources:
         conds.append(col(lead.source).in_(f.sources))
+    if f.ids_in is not None:
+        conds.append(col(lead.id).in_(sorted(f.ids_in)) if f.ids_in else false())
+    if f.ids_not_in:
+        conds.append(col(lead.id).not_in(sorted(f.ids_not_in)))
     if f.follow_up_from:
         conds.append(col(lead.follow_up_date) >= f.follow_up_from)
     if f.follow_up_to:

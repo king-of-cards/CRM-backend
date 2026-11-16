@@ -14,7 +14,7 @@ from sqlmodel import col, select
 
 from app.api.deps import DbSession, LeadViewer, PageSize, common_filter_params
 from app.models.wedding_plan import WeddingPlan
-from app.services import access, kpis, lead_crm, lead_filters
+from app.services import access, also_in, kpis, lead_crm, lead_filters
 
 router = APIRouter(prefix="/wedding-plans", tags=["wedding-plans"])
 
@@ -129,7 +129,11 @@ def list_wedding_plans(
         select(WeddingPlan).where(*filters).order_by(*ordering(sort, order))
         .offset((page - 1) * page_size).limit(page_size)
     ).all()
-    return {"items": attach_crm(db, [_out(r) for r in rows]), "total": total, "page": page, "page_size": page_size}
+    items = attach_crm(db, [_out(r) for r in rows])
+    keys = [i["plan_id"] for i in items]
+    also_in.attach(db, viewer, "wedding_planner", items, key_of=lambda i: i["plan_id"],
+                   e164_of=also_in.page_phones(db, "wedding_planner", keys))
+    return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
 # ── Shared by the list, the stats and the export (GET /crm-leads/wedding_planner/export) ──

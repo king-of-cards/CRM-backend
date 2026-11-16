@@ -118,7 +118,9 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
         mix = {m["source"]: (m["count"], m["pct"]) for m in o["source_mix"]}
         self.assertEqual(mix["spin"], (2, 33))
         # Period-filtered numbers
-        self.assertEqual(o["sharing"], {"shareable": 2, "shared": 0, "not_shared": 2, "rate": 0})
+        self.assertEqual({k: v for k, v in o["sharing"].items() if k != "by_source"}, {"shareable": 2, "shared": 0, "not_shared": 2, "rate": 0})
+        self.assertEqual(o["sharing"]["by_source"], {"wedding": {"shareable": 1, "not_shared": 1, "shared": 0},
+                                                     "wedding_planner": {"shareable": 1, "not_shared": 1, "shared": 0}})
         self.assertEqual(o["photography_budget"]["count"], 1)
         self.assertEqual(o["budget_fit"], {"over": 1})
         self.assertEqual([c["value"] for c in o["top_cities"]], ["Bangalore", "Udaipur"])
@@ -170,10 +172,13 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
         self.assertEqual(months["2027-01"]["wedding_planner"], 1)          # plan of 14 Nov
         # Not shared and over budget among the period's leads: 10 Nov wedding and the 14 Nov plan;
         # the 14 Nov plan is over budget (the September one isn't in the period)
-        self.assertEqual(nov["needs_attention"], {"not_shared": 2, "over_budget": 1, "total": 3})
+        self.assertEqual({k: v for k, v in nov["needs_attention"].items() if k != "by_source"}, {"not_shared": 2, "over_budget": 1, "total": 3})
+        self.assertEqual(nov["needs_attention"]["by_source"],
+                         {"wedding": {"not_shared": 1, "over_budget": 0, "total": 1},
+                          "wedding_planner": {"not_shared": 1, "over_budget": 1, "total": 2}})
         # A period with no leads: everything is zero
         empty = self.overview(date_from="2026-01-01", date_to="2026-03-31")
-        self.assertEqual(empty["needs_attention"], {"not_shared": 0, "over_budget": 0, "total": 0})
+        self.assertEqual({k: v for k, v in empty["needs_attention"].items() if k != "by_source"}, {"not_shared": 0, "over_budget": 0, "total": 0})
         self.assertTrue(all(m[s] == 0 for m in empty["upcoming_by_month"]
                             for s in ("spin", "whatsapp", "wedding", "wedding_planner")))
         # this_week / last_week keep their original meaning (last 7 days vs the 7 before)
@@ -210,7 +215,12 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
             listed = self.client.get(f"{API}{url}", params={"page_size": 10}).json()["total"]
             self.assertEqual(o["totals"][source], listed, source)
         # Needs attention and upcoming events over all leads
-        self.assertEqual(o["needs_attention"], {"not_shared": 3, "over_budget": 2, "total": 5})
+        self.assertEqual({k: v for k, v in o["needs_attention"].items() if k != "by_source"}, {"not_shared": 3, "over_budget": 2, "total": 5})
+        # The per-source parts add up to the totals (drill-down)
+        parts = o["needs_attention"]["by_source"].values()
+        for key in ("not_shared", "over_budget", "total"):
+            self.assertEqual(sum(p[key] for p in parts), o["needs_attention"][key], key)
+        self.assertEqual(sum(p["not_shared"] for p in o["sharing"]["by_source"].values()), o["sharing"]["not_shared"])
 
     def test_all_time_vendor_scope_and_errors(self):
         rj = self.overview("rj", period="all")

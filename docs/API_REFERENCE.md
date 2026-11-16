@@ -984,7 +984,7 @@ Pending, without amounts); Vendor → KOC from its own columns.
 |---|---|
 | `GET /spin-leads/stats`, `/whatsapp-leads/stats`, `/wedding-leads/stats`, `/wedding-plans/stats` | The list's leads for the same filters (vendor users: their own) |
 | `GET /vendor-to-koc/leads/stats` | The same filtered Vendor → KOC leads (vendors: their own) |
-| `GET /analytics/overview` | `kpis`: every source combined, the period's leads; `outcomes` has the same per source |
+| `GET /analytics/overview` | `kpis`: every source combined, the period's leads. **Drill-down:** `outcomes.<source>` has every KPI per source (`interested`, `not_interested`, `quoted_count` / `quoted_total`, `converted`, `conversion_count` / `conversion_total`), and `sharing.by_source` / `needs_attention.by_source` split those |
 | `GET /analytics/vendor-to-koc` | The period's Vendor → KOC leads (admins: all; vendors: their own) |
 
 ### What each number covers (`/analytics/overview`)
@@ -1002,10 +1002,10 @@ Pending, without amounts); Vendor → KOC from its own columns.
 | `source_mix` | Source mix, tiles' % bar | `[{source, count, pct}]` of `new_in_period` |
 | `trend` | Lead inflow | `[{date, end, <source counts>}]`: one point per day; for periods over 90 days, 7-day buckets starting at `date_from` (the last may be shorter). `period.granularity` says which |
 | `photography_budget`, `guests`, `budget_fit`, `repeats` | Budgets & size | Leads that arrived in the period |
-| `sharing` | Shared with partners, Partners callout | Wedding and planner leads that arrived in the period |
+| `sharing` | Shared with partners, Partners callout | Wedding and planner leads that arrived in the period. `by_source`: `{wedding, wedding_planner}`, each `{shareable, shared, not_shared}` (they add up to the totals) |
 | `top_cities`, `top_countries`, `occasions`, `partners` | Lists | Leads that arrived in the period |
 | `upcoming_by_month` | Upcoming events by month | Leads that arrived in the period, by event month (from this month) |
-| `needs_attention` | Needs attention | `{not_shared, over_budget, total}` among the leads that arrived in the period |
+| `needs_attention` | Needs attention | `{not_shared, over_budget, total}` among the leads that arrived in the period. `by_source`: `{wedding, wedding_planner}`, each `{not_shared, over_budget, total}` (wedding leads have no budget fit, so their `over_budget` is 0) |
 | `outcomes` | CRM results per source | `{spin, whatsapp, wedding, wedding_planner, all}`, each [the six KPIs](#kpis-the-same-six-everywhere) plus `leads` (= `total`, kept for the current screen) over the leads that arrived in the period (all of the viewer's leads for `period=all`). `interested` / `converted`: the Update is "interested" / "converted".  The values come from the CRM details (`crm_lead_meta`) with the same lead keys as the lists, so they equal the list totals for `update_status=interested`, `update_status=not_interested`, `update_status=converted`, `quote=has` and `conversion=has` with the same dates, and each list's stats `kpis`. `spin` is `null` (and left out of `all`) when the workflow database can't be read |
 | Removed | | `average_per_day`, `upcoming_30_days` and `wedding_budget` are no longer returned |
 | `this_week`, `last_week` | (current screen) | **Original meaning**, not the period: the last 7 days vs the 7 before. Kept until the screen uses `new_in_period` / `previous_period`, then removed |
@@ -1058,6 +1058,7 @@ leads, whatever they send.
 | `quote` | ✔ | ✔ | ✔ | ✔ | Quoted amount: `has`, `none`, `gt:<amount>` (more than), `lt:<amount>` (less than), in rupees |
 | `conversion` | ✔ | ✔ | ✔ | ✔ | Conversion amount: same values as `quote` |
 | `origin` (repeatable) | `workflow`, `added`, `imported` | `sheet`, `added`, `imported` | same | same | Where the lead came from |
+| `also_in` | ✔ | ✔ | ✔ | ✔ | `yes` / `no`: the phone also exists in another source or in Vendor → KOC that the viewer may see (see [Cross-source duplicates](#cross-source-duplicates-also_in)); other values: 422 |
 | `branch` | ✔ | | | | Branch id |
 | `pincode` | ✔ | | | | Pincode starts with |
 | `budget` | ✔ | | | | Exact budget value, e.g. `10-20` |
@@ -1086,6 +1087,34 @@ leads, whatever they send.
 | `origin` not available for the source | `origin 'workflow' doesn't exist for International leads; use sheet, added, imported` |
 | A minimum above its maximum | `budget_min must not be more than budget_max` (also guests) |
 | Arrival dates | As in [Dashboard](#9-dashboard-date-filter) |
+
+### Cross-source duplicates (`also_in`)
+
+Every lead in the 5 lists (`GET /spin-leads`, `/whatsapp-leads`, `/wedding-leads`, `/wedding-plans`,
+`/vendor-to-koc/leads`) has `also_in`: the **other** places where the same phone exists.
+
+```json
+"also_in": [
+  {"source": "spin", "count": 1},
+  {"source": "whatsapp", "count": 1},
+  {"source": "vendor_to_koc", "count": 2, "vendors": ["OHP", "Phodeo"]}
+]
+```
+
+- **Places:** `spin` (workflow and CRM spin leads), `whatsapp`, `wedding`, `wedding_planner` and
+  `vendor_to_koc`, always in that order. A lead's own source is never listed (duplicates inside one
+  source are the [duplicate check](#4-duplicates)'s job). Empty list: the phone is nowhere else.
+- **Matching:** by E.164 phone (`phone_e164`; Vendor → KOC's 10-digit numbers as `+91…`).
+  Archived and removed rows count, like the upload duplicate check.
+- **`count`:** how many leads in that place. **`vendors`** (Vendor → KOC, admins only): the names
+  of the vendors who sent that phone.
+- **Vendor logins** only get places they can see themselves: their own leads in the other sources
+  (the same assignment as the lists; archived leads aren't theirs to see) and their own Vendor → KOC
+  leads. Other vendors' and unassigned leads are never counted, and `vendors` is left out.
+- **Cost:** computed per page, one query per source (plus the workflow database for spin).
+- **Filter `also_in=yes|no`** on all 5 lists, their stats and their exports: the same rule over
+  the whole source, so `also_in=yes` rows always have a non-empty `also_in`. If the workflow
+  database can't be read, spin workflow leads are left out of `also_in` (a warning is logged).
 
 ### Filter options (dropdown values)
 
@@ -1180,6 +1209,7 @@ same parameters, the list `total`, the stats `total` and the export's rows are e
 | `follow_up_due=true` | all | Follow-up date today or earlier, open leads only (not converted, not converted, purchased elsewhere, purchased with us or not interested) |
 | `city` | all | Contains, ignoring case |
 | `source` (repeatable) | all | `bulk_upload` / `manual` |
+| `also_in` | all | `yes` / `no`: the phone also exists in one of the 4 sources (vendors: their own leads there); see [Cross-source duplicates](#cross-source-duplicates-also_in). List items carry `also_in` |
 | `sort`, `order` | all | `created_at` (default), `updated_at`, `lead_date`, `name`, `city`, `phone`, `vendor_name`, `update_status`, `follow_up_date`. Empty values last |
 
 ### Export

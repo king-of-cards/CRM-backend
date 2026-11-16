@@ -697,8 +697,19 @@ def spin_leads_endpoint(
 ):
     """Filters: app/services/lead_filters.py (common) + branch, pincode, budget. Vendor users only
     ever get their own leads (vendor_id / unassigned are ignored for them)."""
+    from app.services import also_in, phones
+
     data = merged_page(db, (page - 1) * page_size, page_size, f.common.search, sort, order, f.branch,
                        filters_for(db, viewer, f))
+    pk = next((c.name for c in _get_table().primary_key.columns), "id")
+    keys = [str(i.get(pk)) for i in data["items"]]
+    e164_of = also_in.page_phones(db, "spin", [k for k in keys if k.startswith("crm-")])   # CRM spin leads
+    for item, key in zip(data["items"], keys):                                            # workflow leads
+        if key not in e164_of and item.get("phone"):
+            e164 = phones.normalize(str(item["phone"]), lenient=True).e164
+            if e164:
+                e164_of[key] = e164
+    also_in.attach(db, viewer, "spin", data["items"], key_of=lambda i: i.get(pk), e164_of=e164_of)
     return {**data, "page": page, "page_size": page_size}
 
 

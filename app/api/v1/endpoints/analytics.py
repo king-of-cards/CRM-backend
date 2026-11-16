@@ -296,6 +296,20 @@ def _build(db: Session, keys: dict[str, set[str]] | None = None,
     # Needs attention: among the leads that arrived in the period
     open_not_shared = not_shared
     open_over_budget = sum(1 for r in wp_p if r[5] is False)
+    # Per-source parts (drill-down): wedding and planner leads are the shareable ones
+    share_by_source = {
+        "wedding": {"shareable": len(wd_p), "not_shared": sum(1 for r in wd_p if not r[5])},
+        "wedding_planner": {"shareable": len(wp_p), "not_shared": sum(1 for r in wp_p if not r[7])},
+    }
+    for part in share_by_source.values():
+        part["shared"] = part["shareable"] - part["not_shared"]
+    attention_by_source = {
+        "wedding": {"not_shared": share_by_source["wedding"]["not_shared"], "over_budget": 0},
+        "wedding_planner": {"not_shared": share_by_source["wedding_planner"]["not_shared"],
+                            "over_budget": open_over_budget},
+    }
+    for part in attention_by_source.values():
+        part["total"] = part["not_shared"] + part["over_budget"]
 
     def money(values: list[int]) -> dict:
         return {
@@ -335,6 +349,7 @@ def _build(db: Session, keys: dict[str, set[str]] | None = None,
             "not_shared": open_not_shared,
             "over_budget": open_over_budget,
             "total": open_not_shared + open_over_budget,
+            "by_source": attention_by_source,
         },
         "top_cities": _top(cities),
         "top_countries": _top(countries),
@@ -345,6 +360,7 @@ def _build(db: Session, keys: dict[str, set[str]] | None = None,
             "shared": shareable - not_shared,
             "not_shared": not_shared,
             "rate": round((shareable - not_shared) / shareable * 100) if shareable else None,
+            "by_source": share_by_source,
         },
         "photography_budget": money(photo_budgets),
         "guests": {"average": round(statistics.mean(guests)) if guests else None, "total": sum(guests)},

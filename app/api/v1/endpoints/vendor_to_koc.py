@@ -20,6 +20,7 @@ from app.models.vendor_to_koc import (
     LeadBulkCreate, LeadCreate, LeadUpdate, UpdateStatus, VendorCreate, VendorRead, VendorUpdate, VendorUserLink,
 )
 from app.services import periods
+from app.services import also_in as also_in_service
 from app.services.access import Viewer
 from app.services.vendor_lead_import import (
     MAX_FILE_BYTES, PHONE_RE, ImportFileError, flag_template_example, parse_file_date,
@@ -166,6 +167,7 @@ class LeadQuery:
 
 def lead_query(
     scope: LeadViewer,
+    db: DbSession,
     period: OptionalPeriod,
     search: str | None = Query(None, description="Matches name, phone or city"),
     vendor_id: list[int] | None = Query(None, description="Admins only, repeatable"),
@@ -177,6 +179,8 @@ def lead_query(
     follow_up_due: bool = Query(False, description="Follow-up date today or earlier, open leads"),
     city: str | None = Query(None, max_length=100, description="City contains (case-insensitive)"),
     source: list[Literal["bulk_upload", "manual"]] | None = Query(None, description="Repeatable"),
+    also_in: Literal["yes", "no"] | None = Query(None, description="The phone also exists in one of the 4 "
+                                                 "sources (vendors: their own leads there)"),
     sort: SortField = Query("created_at"),
     order: Literal["asc", "desc"] = Query("desc"),
 ) -> LeadQuery:
@@ -195,6 +199,12 @@ def lead_query(
         follow_up_due_by=periods.today_ist() if follow_up_due else None,
         city=(city or "").strip() or None, sources=source or None,
     )
+    if also_in:
+        found = {int(k) for k in also_in_service.matching_keys(db, scope, also_in_service.VTK)}
+        if also_in == "yes":
+            filters.ids_in = found
+        else:
+            filters.ids_not_in = found
     return LeadQuery(filters=filters, sort=sort, order=order)
 
 
@@ -209,8 +219,10 @@ def list_leads(
     page: int = Query(1, ge=1),
     page_size: PageSize = 10,
 ):
-    return crud.list_leads(db, query.filters, query.sort, query.order, page, page_size,
-                           admin=scope.is_admin)
+    out = crud.list_leads(db, query.filters, query.sort, query.order, page, page_size, admin=scope.is_admin)
+    also_in_service.attach(db, scope, also_in_service.VTK, out["items"], key_of=lambda i: i["id"],
+                           e164_of={str(i["id"]): also_in_service.vtk_e164(i["phone"]) for i in out["items"]})
+    return out
 
 
 # Registered before /leads/{lead_id}, so "export" and "template" aren't read as lead ids.

@@ -13,7 +13,7 @@ from sqlmodel import col, select
 
 from app.api.deps import DbSession, LeadViewer, PageSize, common_filter_params
 from app.models.whatsapp_lead import WhatsAppLead
-from app.services import access, kpis, lead_crm, lead_filters
+from app.services import access, also_in, kpis, lead_crm, lead_filters
 
 router = APIRouter(prefix="/whatsapp-leads", tags=["whatsapp-leads"])
 
@@ -84,7 +84,11 @@ def list_whatsapp_leads(
         select(WhatsAppLead).where(*filters).order_by(*ordering(sort, order))
         .offset((page - 1) * page_size).limit(page_size)
     ).all()
-    return {"items": attach_crm(db, [_out(r) for r in rows]), "total": total, "page": page, "page_size": page_size}
+    items = attach_crm(db, [_out(r) for r in rows])
+    keys = [i["lead_key"] for i in items]
+    also_in.attach(db, viewer, "whatsapp", items, key_of=lambda i: i["lead_key"],
+                   e164_of=also_in.page_phones(db, "whatsapp", keys))
+    return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
 # ── Shared by the list, the stats and the export (GET /crm-leads/whatsapp/export) ──

@@ -47,6 +47,7 @@ from app.models.vendor_user import VendorUser  # noqa: E402
 from app.models.wedding_lead import WeddingLead  # noqa: E402
 from app.models.wedding_plan import WeddingPlan  # noqa: E402
 from app.models.whatsapp_lead import WhatsAppLead  # noqa: E402
+from app.services import also_in  # noqa: E402
 from app.services import branches as branch_service  # noqa: E402
 from app.services import phones  # noqa: E402
 from app.services.crm_leads import service, tabular  # noqa: E402
@@ -127,6 +128,12 @@ def fake_list_spin_leads(_admin=None, page=1, page_size=50, search=None, sort=No
 FAKE_TABLE = Table("spin_lead", MetaData(), Column("id", BigInteger, primary_key=True))
 
 
+def fake_workflow_phone_index():
+    """also_in's whole-source index of workflow phones: {lead id: e164}."""
+    from app.services import phones
+    return {str(r["id"]): phones.normalize(str(r["phone"]), lenient=True).e164 for r in WORKFLOW_ROWS}
+
+
 def fake_workflow_phones(e164s):
     found = {}
     for r in WORKFLOW_ROWS:
@@ -200,6 +207,7 @@ class ApiTestBase:
             mock.patch.object(spin_ep, "_get_table", lambda: FAKE_TABLE),
             mock.patch.object(service, "workflow_phones", fake_workflow_phones),
             mock.patch.object(vendors_ep, "_workflow_spin_rows", fake_workflow_spin_rows),
+            mock.patch.object(also_in, "workflow_phone_index", fake_workflow_phone_index),
         ]
         for p in self.patches:
             p.start()

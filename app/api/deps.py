@@ -130,6 +130,8 @@ def common_filter_params(allowed_origins: tuple[str, ...], source_label: str):
         quote: str | None = Query(None, description="Quoted amount: has, none, gt:<amount> or lt:<amount>"),
         conversion: str | None = Query(None, description="Conversion amount: has, none, gt:<amount> or lt:<amount>"),
         origin: list[str] | None = Query(None, description=f"Repeatable: {', '.join(allowed_origins)}"),
+        also_in: Literal["yes", "no"] | None = Query(None, description="The phone also exists in another source "
+                                                     "or Vendor -> KOC (that you may see)"),
         interest: list[str] | None = Query(None, include_in_schema=False),      # replaced: 400
         converted: str | None = Query(None, include_in_schema=False),           # replaced: 400
     ):
@@ -137,7 +139,8 @@ def common_filter_params(allowed_origins: tuple[str, ...], source_label: str):
             raise HTTPException(400, "interest and converted were replaced by update_status "
                                      "(e.g. update_status=interested or update_status=converted)")
         return lead_filters.common_filters(period, search, event_from, event_to, upcoming_days, vendor_id, unassigned,
-                                           update_status, quote, conversion, origin, allowed_origins, source_label)
+                                           update_status, quote, conversion, origin, allowed_origins, source_label,
+                                           also_in)
     return dependency
 
 
