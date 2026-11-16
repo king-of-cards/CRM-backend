@@ -59,7 +59,7 @@ EXPECTED_PREVIEW = [
     {"row": 8, "name": "Day First", "date": "2026-04-03", "phone": "9876543210", "city": "Goa",
      "errors": [], "duplicate": False},
     {"row": 10, "name": "Bad Date", "date": "2026/01/05", "phone": "7012345678", "city": "Kochi",
-     "errors": [{"field": "date", "message": "Date must be a date or text in DD-MM-YYYY format"}],
+     "errors": [{"field": "date", "message": "Date must be a date, or text like 13-12-2026 or 13 Dec 2026"}],
      "duplicate": False},
 ]
 
@@ -529,6 +529,9 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(parse_file_date("3-4-2026")[0], date(2026, 4, 3))
         self.assertIsNotNone(parse_file_date("31-02-2026")[2])                    # impossible date
         self.assertIsNotNone(parse_file_date("2026-01-05")[2])                    # not DD-MM-YYYY
+        self.assertEqual(parse_file_date("13 Dec 2026")[0], date(2026, 12, 13))   # the export's format
+        self.assertEqual(parse_file_date("5 January 2026")[0], date(2026, 1, 5))
+        self.assertIsNotNone(parse_file_date("Dec 13 2026")[2])                   # month first: no
         self.assertIsNotNone(parse_file_date(45678)[2])                           # bare number
         self.assertEqual(parse_file_date(datetime(2026, 1, 5, 18, 30))[0], date(2026, 1, 5))
 

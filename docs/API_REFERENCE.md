@@ -1069,10 +1069,11 @@ paths, shapes and rules. Base path: `/api/v1/vendor-to-koc`.
 
 | Field | Rule |
 |---|---|
-| `phone` | **Required.** A 10-digit Indian mobile number starting with 6–9. `+91`, a 12-digit `91…`, a leading `0`, spaces and dashes are removed. Stored as the 10 digits |
+| `phone` | **Required.** A 10-digit Indian mobile number starting with 6–9. `+91`, a 12-digit `91…`, a leading `0`, spaces, dashes and a leading `'` (the CSV export's formula guard) are removed. Stored as the 10 digits |
 | `name`, `city` | Optional, at most 100 characters |
-| `date` (the lead's own date) | Optional. Files: a real date, or text `DD-MM-YYYY` (day first). JSON: `YYYY-MM-DD` |
+| `date` (the lead's own date) | Optional. Files: a real date, or text `DD-MM-YYYY` (day first) or `13 Dec 2026` / `13 December 2026` (the export's format). JSON: `YYYY-MM-DD` |
 | Duplicates | One lead per vendor and phone. Duplicates are skipped in bulk and answer 409 for a single add |
+| Exported files | An export (CSV or Excel) uploads back unchanged: Name, Date, Phone and City are read, the other columns ignored, and its rows show as duplicates for the same vendor |
 | Template example row | The template's example row, uploaded unchanged, is an error (`"This is the example row from the template; delete it"`) |
 | `update_status` | `null` (pending), `converted`, `not_converted`, `purchased_elsewhere`, `purchased_with_us`, `will_call_back`, `interested`, `not_interested` |
 | `source` | `bulk_upload` or `manual` |

@@ -168,6 +168,51 @@ class AdminExportTests(ExportTestCase):
         self.assertEqual(self.client.get(f"{BASE}/leads/999", headers=self.admin).status_code, 404)
 
 
+
+class RoundTripTests(ExportTestCase):
+    """An export uploads back unchanged (CSV and Excel): every row is valid and "already exists"."""
+
+    def assert_all_duplicates(self, headers, resp, filename, expected_rows, **form):
+        self.assertEqual(resp.status_code, 200, resp.text)
+        preview = self.preview(headers, resp.content, filename=filename, **form)
+        self.assertEqual(preview.status_code, 200, preview.text)
+        body = preview.json()
+        self.assertEqual((body["valid_count"], body["invalid_count"], body["duplicate_count"]),
+                         (0, 0, expected_rows), body)
+        for row in body["rows"]:
+            self.assertEqual(row["errors"], [], row)
+            self.assertTrue(row["duplicate"], row)
+        return body["rows"]
+
+    def test_vendor_export_uploads_back_as_duplicates(self):
+        for fmt in ("csv", "xlsx"):
+            with self.subTest(fmt=fmt):
+                resp = self.export(self.phodeo, f"format={fmt}&sort=lead_date&order=desc")
+                rows = self.assert_all_duplicates(self.phodeo, resp, f"export.{fmt}", 2)
+                by_phone = {r["phone"]: r for r in rows}
+                self.assertEqual(set(by_phone), {"9000000001", "9000000002"})     # ' and +91 removed
+                self.assertEqual(by_phone["9000000001"]["date"], "2026-01-05")    # "05 Jan 2026"
+                self.assertEqual(by_phone["9000000001"]["city"], "Bengaluru")
+
+    def test_admin_export_uploads_back_for_that_vendor(self):
+        for fmt in ("csv", "xlsx"):
+            with self.subTest(fmt=fmt):
+                resp = self.export(self.admin, f"format={fmt}&vendor_id={self.other_id}")
+                self.assert_all_duplicates(self.admin, resp, f"export.{fmt}", 1, vendor_id=self.other_id)
+
+    def test_export_for_another_vendor_is_new_leads(self):
+        resp = self.export(self.admin, f"format=csv&vendor_id={self.phodeo_id}")
+        body = self.preview(self.admin, resp.content, filename="export.csv", vendor_id=self.other_id).json()
+        self.assertEqual((body["valid_count"], body["invalid_count"], body["duplicate_count"]), (2, 0, 0))
+
+    def test_display_formats_are_cleaned(self):
+        from app.services.vendor_lead_import import clean_phone, parse_file_date
+        self.assertEqual(clean_phone("'+919000000001"), "9000000001")
+        self.assertEqual(clean_phone("+91 90000 00001"), "9000000001")
+        self.assertEqual(parse_file_date("13 Dec 2026")[0], date(2026, 12, 13))
+        self.assertEqual(parse_file_date("13-12-2026")[0], date(2026, 12, 13))
+        self.assertIsNotNone(parse_file_date("31 Feb 2026")[2])
+
 class TemplateTests(VendorToKocTestCase):
     def template(self, headers, query: str = ""):
         resp = self.client.get(f"{TEMPLATE}?{query}", headers=headers)

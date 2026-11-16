@@ -2,10 +2,12 @@
 
 Files (.xlsx / .csv): headings in row 1, matched ignoring case and spaces: Name, Date,
 Phone, City. Every other column (Sl. No, Event date, Status, Comment, ...) is ignored.
-Dates in files: real Excel dates, or text DD-MM-YYYY (always day first, never MM-DD).
+Dates in files: real Excel dates, or text DD-MM-YYYY (always day first, never MM-DD) or
+"13 Dec 2026" / "13 December 2026" (the export's format, so an exported file uploads back).
 Dates in JSON (manual add, bulk save): YYYY-MM-DD.
-Phones: numeric cells (8095852272.0) become text; spaces, dashes, +91 (or 91 when 12
-digits remain) and a leading 0 are removed; the result must be an Indian mobile number.
+Phones: numeric cells (8095852272.0) become text; a leading ' (the CSV export's formula guard),
+spaces, dashes, +91 (or 91 when 12 digits remain) and a leading 0 are removed; the result must be
+an Indian mobile number.
 """
 import csv
 import io
@@ -28,12 +30,13 @@ FIELDS = ("name", "date", "phone", "city")
 
 PHONE_RE = re.compile(r"^[6-9]\d{9}$")
 DAY_FIRST_RE = re.compile(r"^(\d{1,2})-(\d{1,2})-(\d{4})$")
+MONTH_NAME_FORMATS = ("%d %b %Y", "%d %B %Y")          # 13 Dec 2026, 13 December 2026
 ISO_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
 INTEGRAL_TEXT_RE = re.compile(r"^(\d+)\.0+$")
 
 MSG_PHONE_REQUIRED = "Phone is required"
 MSG_PHONE_INVALID = "Phone must be a 10-digit Indian mobile number starting with 6, 7, 8 or 9"
-MSG_DATE_FILE = "Date must be a date or text in DD-MM-YYYY format"
+MSG_DATE_FILE = "Date must be a date, or text like 13-12-2026 or 13 Dec 2026"
 MSG_DATE_JSON = "Date must be in YYYY-MM-DD format"
 MSG_DATE_INVALID = "Date is not a valid calendar date"
 
@@ -91,7 +94,7 @@ def clean_phone(value: Any) -> str | None:
         integral = math.isfinite(value) and value == int(value)
         text = str(int(value)) if integral else str(value)
     else:
-        text = str(value).strip()
+        text = str(value).strip().lstrip("'")     # the CSV export's formula guard
         match = INTEGRAL_TEXT_RE.match(text)      # "8095852272.0" from a CSV export
         if match:
             text = match.group(1)
@@ -128,6 +131,12 @@ def parse_file_date(value: Any) -> tuple[date | None, str | None, str | None]:
             parsed = _date_from(day, month, year)
             if parsed is None:
                 return None, text, MSG_DATE_INVALID
+            return parsed, parsed.isoformat(), None
+        for fmt in MONTH_NAME_FORMATS:                  # the export's display format
+            try:
+                parsed = datetime.strptime(re.sub(r"\s+", " ", text), fmt).date()
+            except ValueError:
+                continue
             return parsed, parsed.isoformat(), None
         return None, text, MSG_DATE_FILE
     return None, clean_text(value), MSG_DATE_FILE   # numbers, times, booleans
