@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Query, status
 
 from app.api.deps import AdminUser, CurrentUser, DbSession
 from app.crud import user as crud
-from app.models.user import Role, UserCreate, UserRead
+from app.models.user import Role, UserCreate, UserRead, UserUpdate
 from app.models.vendor import Vendor
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -32,6 +32,19 @@ def list_users(
 ):
     """Users ordered by id, with their vendor (vendor logins)."""
     return crud.list_users(db, skip, limit)
+
+
+@router.patch("/{user_id}", response_model=UserRead)
+def update_user(user_id: int, payload: UserUpdate, db: DbSession, admin: AdminUser):
+    """Block (is_active false) or unblock a login. Blocking revokes all its sessions (refresh
+    tokens); its access tokens stop working at once. An admin can't block themselves (400)."""
+    user = crud.get_user(db, user_id)
+    if user is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    if user.id == admin.id and not payload.is_active:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "You can't block your own login")
+    crud.set_active(db, user, payload.is_active)
+    return crud.get_user_read(db, user_id)
 
 
 @router.get("/{user_id}", response_model=UserRead)

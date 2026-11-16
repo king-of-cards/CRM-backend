@@ -1183,3 +1183,23 @@ Vendor logins get only `period`, `received`, `change_pct`, `average_per_day`, `i
   `vendor_name` (`null` for admins and unlinked logins). `GET /api/v1/users` orders by id and takes
   `skip` (≥ 0) and `limit` (1–200).
 - **`GET /api/v1/auth/me`** returns `vendor_id` / `vendor_name` as well as `vendor: {id, name}`.
+- **`PATCH /api/v1/users/{id}`** (admin) blocks or unblocks a login: `{"is_active": false|true}`
+  (the only field; anything else, a missing or `null` value answers 422). Returns the `UserRead`.
+  - Blocking revokes all the login's sessions (refresh tokens) at once; its access tokens stop
+    working on the next request, and it can't log in (401 `Incorrect email or password`) or refresh.
+  - Unblocking lets it log in again; sessions revoked by the block stay revoked.
+  - An admin can't block their own login (400 `You can't block your own login`); another admin can
+    be blocked. Unknown user: 404.
+- **`DELETE /api/v1/vendor-to-koc/vendors/{vendor_id}/users/{user_id}`** (admin) unlinks a vendor
+  login from that vendor: 204. The login stays active but gets 403 on lead endpoints until linked
+  again with the `PUT` above. 404 if it isn't linked to that vendor.
+
+### Team page: which endpoint for what
+
+| Need | Endpoint |
+|---|---|
+| List logins with role, `is_active`, `vendor_id` / `vendor_name` | `GET /api/v1/users` |
+| Create a vendor login with its vendor | `POST /api/v1/users` with `role: "vendor"`, `vendor_id` |
+| Link or move a login to a vendor | `PUT /api/v1/vendor-to-koc/vendors/{vendor_id}/users/{user_id}` |
+| Unlink a login | `DELETE /api/v1/vendor-to-koc/vendors/{vendor_id}/users/{user_id}` |
+| Block / unblock | `PATCH /api/v1/users/{id}` with `is_active` |

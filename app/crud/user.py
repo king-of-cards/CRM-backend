@@ -72,6 +72,18 @@ def create_user(db: Session, data: UserCreate) -> User:
     return user
 
 
+def set_active(db: Session, user: User, is_active: bool) -> None:
+    """Block (False) or unblock (True) a login. Blocking also revokes all its sessions, in the
+    same transaction; blocked logins can't log in, refresh, or use an access token."""
+    from app.crud import refresh_token
+
+    user.is_active = is_active
+    db.add(user)
+    if not is_active:
+        refresh_token.revoke_all_for_user(db, user.id)
+    db.commit()
+
+
 def authenticate(db: Session, email: str, password: str) -> User | None:
     """Returns the user if email + password are correct and the account is active."""
     if len(password) > MAX_PASSWORD_LENGTH:

@@ -331,6 +331,16 @@ def update_vendor(db: Session, vendor: Vendor, name: str | None, is_active: bool
     return _commit_vendor(db, vendor)
 
 
+def unlink_user(db: Session, user_id: int, vendor_id: int) -> bool:
+    """Removes the login's link to this vendor. False if it isn't linked to that vendor."""
+    link = db.get(VendorUser, user_id)
+    if link is None or link.vendor_id != vendor_id:
+        return False
+    db.delete(link)
+    db.commit()
+    return True
+
+
 def link_user(db: Session, user_id: int, vendor_id: int) -> None:
     link = db.get(VendorUser, user_id)
     if link is None:

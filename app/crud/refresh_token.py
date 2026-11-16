@@ -159,6 +159,15 @@ def rotate(db: Session, raw: str | None) -> tuple[int, str, IssuedToken]:
     return user_id, role, issued
 
 
+def revoke_all_for_user(db: Session, user_id: int) -> None:
+    """Blocking a login: revoke every session (refresh token) it has. The caller commits."""
+    db.exec(
+        update(RefreshToken)
+        .where(col(RefreshToken.user_id) == user_id, col(RefreshToken.revoked_at).is_(None))
+        .values(revoked_at=utcnow())
+    )
+
+
 def revoke_family_of(db: Session, raw: str | None) -> None:
     """Logout: revoke the whole family of this token, if it exists. Safe to call twice."""
     token = _find_locked(db, raw)

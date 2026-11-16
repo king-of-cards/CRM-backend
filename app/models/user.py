@@ -1,7 +1,7 @@
 from datetime import datetime
 from enum import Enum
 
-from pydantic import EmailStr, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, model_validator
 from sqlalchemy import Column, DateTime, func
 from sqlmodel import Field, SQLModel
 
@@ -54,6 +54,12 @@ class UserRead(UserBase):
     created_at: datetime
     vendor_id: int | None = None      # vendor logins only (from crm_vendor_users)
     vendor_name: str | None = None
+
+
+# Request body for PATCH /users/{id}
+class UserUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")      # unknown fields (role, email...) answer 422
+    is_active: bool     # false = blocked: can't log in; its sessions are revoked
 
 
 class Token(SQLModel):

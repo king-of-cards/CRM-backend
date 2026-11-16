@@ -340,3 +340,13 @@ def link_vendor_user(vendor_id: int, user_id: int, db: DbSession, _admin: AdminU
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "User is not a vendor user")
     crud.link_user(db, user_id, vendor_id)
     return VendorUserLink(user_id=user_id, vendor_id=vendor_id, vendor_name=vendor.name)
+
+
+@router.delete("/vendors/{vendor_id}/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT,
+               response_class=Response)
+def unlink_vendor_user(vendor_id: int, user_id: int, db: DbSession, _admin: AdminUser):
+    """Unlinks a vendor login from this vendor. The login stays (and can still log in) but gets
+    403 on lead endpoints until linked again. 404 if it isn't linked to this vendor."""
+    if not crud.unlink_user(db, user_id, vendor_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "This login isn't linked to this vendor")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

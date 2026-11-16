@@ -5,13 +5,15 @@ import io
 import unittest
 from datetime import date, datetime, timedelta
 
-from tests.base import PASSWORD, AuthTestCase
+from tests.base import ORIGIN, PASSWORD, AuthTestCase
 
 import openpyxl  # noqa: E402
 from sqlmodel import Session, select  # noqa: E402
 
+from app.core.config import settings  # noqa: E402
 from app.core.security import hash_password  # noqa: E402
 from app.crud.vendor_to_koc import utcnow  # noqa: E402
+from app.models.refresh_token import RefreshToken  # noqa: E402
 from app.models.user import User  # noqa: E402
 from app.models.vendor import Vendor  # noqa: E402
 from app.models.vendor_to_koc import ADMIN_ONLY_FIELDS, VendorToKocLead  # noqa: E402
@@ -519,6 +521,73 @@ class VendorLoginTests(VendorToKocTestCase):
         self.assertEqual(self.client.put(f"{BASE}/vendors/999/users/{self.ids['unlinked']}",
                                          headers=self.admin).status_code, 404)
         self.assertEqual(self.client.put(url, headers=self.phodeo).status_code, 403)
+
+
+# ── Team page: block / unblock, unlink ──────────────────────────────────
+class TeamTests(VendorToKocTestCase):
+    def users_url(self, key: str) -> str:
+        return f"/api/v1/users/{self.ids[key]}"
+
+    def refresh(self, raw: str):
+        self.client.cookies.clear()
+        return self.client.post("/api/v1/auth/refresh",
+                                headers={"Origin": ORIGIN, "Cookie": f"{settings.REFRESH_COOKIE_NAME}={raw}"})
+
+    def test_block_revokes_sessions_and_stops_login_then_unblock(self):
+        login = self.login("phodeo@example.com", PASSWORD)
+        raw = login.cookies[settings.REFRESH_COOKIE_NAME]
+        access = {"Authorization": f"Bearer {login.json()['access_token']}"}
+        self.assertEqual(self.client.get(f"{BASE}/leads", headers=access).status_code, 200)
+
+        resp = self.client.patch(self.users_url("phodeo"), headers=self.admin, json={"is_active": False})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual((resp.json()["is_active"], resp.json()["vendor_name"]), (False, "Phodeo"))
+        with Session(self.engine) as s:
+            open_tokens = s.exec(select(RefreshToken).where(RefreshToken.user_id == self.ids["phodeo"],
+                                                            RefreshToken.revoked_at.is_(None))).all()
+        self.assertEqual(open_tokens, [])                                        # every session revoked
+        self.assertEqual(self.refresh(raw).status_code, 401)
+        self.assertEqual(self.client.get(f"{BASE}/leads", headers=access).status_code, 401)   # access token too
+        self.assertEqual(self.login("phodeo@example.com", PASSWORD).status_code, 401)
+        users = {u["email"]: u for u in self.client.get("/api/v1/users", headers=self.admin).json()}
+        self.assertFalse(users["phodeo@example.com"]["is_active"])
+        self.assertTrue(users["other@example.com"]["is_active"])                 # others untouched
+
+        resp = self.client.patch(self.users_url("phodeo"), headers=self.admin, json={"is_active": True})
+        self.assertEqual((resp.status_code, resp.json()["is_active"]), (200, True))
+        self.assertEqual(self.login("phodeo@example.com", PASSWORD).status_code, 200)
+        self.assertEqual(self.refresh(raw).status_code, 401)                     # old sessions stay revoked
+
+    def test_block_rules(self):
+        resp = self.client.patch(self.users_url("admin"), headers=self.admin, json={"is_active": False})
+        self.assertEqual((resp.status_code, resp.json()["detail"]), (400, "You can't block your own login"))
+        self.assertEqual(self.client.patch(self.users_url("admin"), headers=self.admin,
+                                           json={"is_active": True}).status_code, 200)   # no-op is fine
+        self.assertEqual(self.client.patch(self.users_url("other"), headers=self.phodeo,
+                                           json={"is_active": False}).status_code, 403)  # admins only
+        self.assertEqual(self.client.patch("/api/v1/users/999", headers=self.admin,
+                                           json={"is_active": False}).status_code, 404)
+        for body in ({}, {"is_active": None}, {"is_active": False, "role": "admin"}):
+            self.assertEqual(self.client.patch(self.users_url("other"), headers=self.admin,
+                                               json=body).status_code, 422, body)
+        second_admin = self.client.post("/api/v1/users", headers=self.admin, json={
+            "name": "Second", "email": "second@example.com", "password": "password123", "role": "admin"}).json()
+        self.assertEqual(self.client.patch(f"/api/v1/users/{second_admin['id']}", headers=self.admin,
+                                           json={"is_active": False}).status_code, 200)  # another admin: ok
+
+    def test_unlink(self):
+        url = f"{BASE}/vendors/{self.phodeo_id}/users/{self.ids['phodeo']}"
+        self.assertEqual(self.client.delete(url, headers=self.phodeo).status_code, 403)   # admins only
+        wrong = f"{BASE}/vendors/{self.other_id}/users/{self.ids['phodeo']}"
+        self.assertEqual(self.client.delete(wrong, headers=self.admin).status_code, 404)  # other vendor
+        resp = self.client.delete(url, headers=self.admin)
+        self.assertEqual((resp.status_code, resp.content), (204, b""))
+        me = self.client.get(self.users_url("phodeo"), headers=self.admin).json()
+        self.assertEqual((me["vendor_id"], me["vendor_name"], me["is_active"]), (None, None, True))
+        self.assertEqual(self.client.get(f"{BASE}/leads", headers=self.phodeo).status_code, 403)
+        self.assertEqual(self.client.delete(url, headers=self.admin).status_code, 404)    # already unlinked
+        self.assertEqual(self.client.put(url, headers=self.admin).status_code, 200)       # link again
+        self.assertEqual(self.client.get(f"{BASE}/leads", headers=self.phodeo).status_code, 200)
 
 
 # ── Parsing rules ───────────────────────────────────────────────────────
