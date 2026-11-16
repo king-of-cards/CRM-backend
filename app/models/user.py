@@ -9,6 +9,7 @@ from sqlmodel import Field, SQLModel
 class Role(str, Enum):
     ADMIN = "admin"
     VENDOR = "vendor"
+    DHRUVA = "dhruva"       # the Dhruva leads section only (see app/api/v1/endpoints/dhruva.py)
 
 
 # Shared fields: used by the table and by the request/response models
@@ -41,7 +42,7 @@ class UserCreate(UserBase):
 
     @model_validator(mode="after")
     def _vendor_link(self):
-        if self.role == Role.ADMIN and self.vendor_id is not None:
+        if self.role != Role.VENDOR and self.vendor_id is not None:
             raise ValueError("vendor_id is only allowed when role is vendor")
         return self
 

@@ -44,9 +44,15 @@ class NotLinked(Exception):
     """A vendor login without a vendor in crm_vendor_users."""
 
 
+class DhruvaOnly(Exception):
+    """A Dhruva login: it may only use the Dhruva leads section."""
+
+
 def viewer_for(db: Session, user: User) -> Viewer:
     if user.role == Role.ADMIN.value:
         return Viewer(user, None)
+    if user.role == Role.DHRUVA.value:
+        raise DhruvaOnly()
     link = db.get(VendorUser, user.id)
     if link is None:
         raise NotLinked()

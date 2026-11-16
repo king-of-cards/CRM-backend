@@ -11,7 +11,7 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 
-from app.api.deps import AdminUser, CurrentUser, DbSession, LeadViewer, OptionalPeriod, PageSize
+from app.api.deps import AdminUser, DbSession, LeadViewer, NotDhruvaUser, OptionalPeriod, PageSize
 from app.crud import vendor_to_koc as crud
 from app.services import vendor_lead_export as lead_export
 from app.models.user import Role, User
@@ -273,8 +273,9 @@ def lead_stats(db: DbSession, scope: LeadViewer, query: LeadQueryDep):
 @router.get("/leads/template", response_class=Response, responses={200: {
     "description": "Empty upload template: Name, Date, Phone, City and one example row.",
     "content": {lead_export.XLSX_MEDIA_TYPE: {}, "text/csv": {}}}})
-def download_template(_user: CurrentUser, format: Literal["xlsx", "csv"] = Query("xlsx")):
-    """Any logged-in user. Delete the example row before uploading: the preview flags it."""
+def download_template(_user: NotDhruvaUser, format: Literal["xlsx", "csv"] = Query("xlsx")):
+    """Any logged-in user except Dhruva logins. Delete the example row before uploading: the
+    preview flags it."""
     content = lead_export.template_xlsx() if format == "xlsx" else lead_export.template_csv()
     return _download(content, format, "vendor_to_koc_template")
 

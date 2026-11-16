@@ -792,7 +792,7 @@ gets `{"type": "other_source", "sources": [...]}` with the sorted source names (
 
 ## 5. Access: who sees and edits what
 
-**Logins.** An admin (`crm_users.role = admin`) sees every lead. A vendor user
+**Logins.** (Dhruva logins never reach these endpoints: see [Users](#12-users-and-vendor-logins).) An admin (`crm_users.role = admin`) sees every lead. A vendor user
 (`role = vendor`) is linked to one vendor in `crm_vendor_users` and sees **only the leads whose
 assignment is that vendor** (manual, sheet, branch or area rules, the same as the "Assigned to"
 chip), in every source. Unassigned leads are visible to admins only.
@@ -1269,7 +1269,14 @@ lead objects in `next_follow_ups` have no `status_updated_by`. `previous_receive
   - with it, the login is linked to that vendor (404 if the vendor doesn't exist);
   - without it, the login is created unlinked and gets 403 on lead endpoints until it's linked
     (`PUT /api/v1/vendor-to-koc/vendors/{vendor_id}/users/{user_id}`);
-  - an admin with `vendor_id` gets 422.
+  - an admin or Dhruva login with `vendor_id` gets 422.
+- **Dhruva logins** (`role: "dhruva"`, created by admins with `POST /api/v1/users`; several are
+  allowed, no `vendor_id`) only use the Dhruva leads section (`/api/v1/dhruva/*`,
+  `/api/v1/analytics/dhruva`). Every other endpoint answers
+  `403 {"detail": "Dhruva logins can only use the Dhruva leads section."}`: the 4 sources,
+  Vendor → KOC (template too), `/analytics/overview`, `/analytics/vendor-to-koc`, vendors,
+  branches, users, sheets. Still open to them: `/auth/*` (login, refresh, logout, `me`) and
+  `GET /users/{their own id}`. A test walks every route to keep it that way.
 - **`UserRead`** (`POST` / `GET /api/v1/users`, `GET /api/v1/users/{id}`) includes `vendor_id` and
   `vendor_name` (`null` for admins and unlinked logins). `GET /api/v1/users` orders by id and takes
   `skip` (≥ 0) and `limit` (1–200).

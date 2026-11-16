@@ -51,12 +51,39 @@ def require_admin(user: CurrentUser) -> User:
 AdminUser = Annotated[User, Depends(require_admin)]
 
 
+DHRUVA_ONLY = "Dhruva logins can only use the Dhruva leads section."
+
+
 def get_viewer(user: CurrentUser, db: DbSession) -> Viewer:
-    """Admin, or a vendor login linked to its vendor (see app/services/access.py)."""
+    """Admin, or a vendor login linked to its vendor (see app/services/access.py).
+    Dhruva logins: 403 (they only use the Dhruva endpoints)."""
     try:
         return access.viewer_for(db, user)
     except access.NotLinked:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This login isn't linked to a vendor.")
+    except access.DhruvaOnly:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=DHRUVA_ONLY)
+
+
+def require_not_dhruva(user: CurrentUser) -> User:
+    """Any login except Dhruva logins (for endpoints that only need a login)."""
+    if user.role == Role.DHRUVA.value:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=DHRUVA_ONLY)
+    return user
+
+
+NotDhruvaUser = Annotated[User, Depends(require_not_dhruva)]
+
+
+def require_dhruva_section(user: CurrentUser) -> User:
+    """The Dhruva leads section: admins and Dhruva logins (vendor logins: 403)."""
+    if user.role not in (Role.ADMIN.value, Role.DHRUVA.value):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Only admins and Dhruva logins can use the Dhruva leads section.")
+    return user
+
+
+DhruvaSectionUser = Annotated[User, Depends(require_dhruva_section)]
 
 
 # Endpoints that admins and vendor users may call; results are limited to what the viewer may see
