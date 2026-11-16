@@ -5,6 +5,7 @@ from app.api.v1.endpoints import (
     auth,
     branches,
     crm_leads,
+    dhruva,
     health,
     lead_crm,
     read_db,
@@ -34,3 +35,4 @@ api_router.include_router(branches.router)
 api_router.include_router(lead_crm.router)
 api_router.include_router(crm_leads.router)
 api_router.include_router(vendor_to_koc.router)
+api_router.include_router(dhruva.router)

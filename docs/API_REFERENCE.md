@@ -29,6 +29,7 @@ per-vendor access rules, and the CRM details endpoint `PUT /leads/{source}/{lead
 10. [Lead list filters](#10-lead-list-filters)
 11. [Vendor → KOC](#11-vendor--koc)
 12. [Users and vendor logins](#12-users-and-vendor-logins)
+13. [Dhruva leads](#13-dhruva-leads)
 
 ---
 
@@ -1301,3 +1302,92 @@ lead objects in `next_follow_ups` have no `status_updated_by`. `previous_receive
 | Link or move a login to a vendor | `PUT /api/v1/vendor-to-koc/vendors/{vendor_id}/users/{user_id}` |
 | Unlink a login | `DELETE /api/v1/vendor-to-koc/vendors/{vendor_id}/users/{user_id}` |
 | Block / unblock | `PATCH /api/v1/users/{id}` with `is_active` |
+
+---
+
+## 13. Dhruva leads
+
+Leads that Dhruva logins (`role: "dhruva"`, see [Users](#12-users-and-vendor-logins)) add or
+upload. Table `crm_dhruva_leads` (migration `migrations/2026-11-17_dhruva.sql`). Base path:
+`/api/v1/dhruva`.
+
+**Who:**
+
+| | Admins | Dhruva logins | Vendor logins |
+|---|---|---|---|
+| See leads (list, details, stats, export, dashboard) | all | all | 403 |
+| Add, upload | ✔ | ✔ | 403 |
+| Edit basic fields (name, venue, date, phone, alt phone, event type) | ✔ | ✔ (any lead) | 403 |
+| Edit admin fields (`update_status`, `additional_comments`, `quoted_amount`, `conversion_amount`, `follow_up_date`) | ✔ | **403** (read-only) | 403 |
+| Archive / unarchive | ✔ | 403 | 403 |
+
+### Lead object
+
+`id, name, venue, event_date (YYYY-MM-DD or null), event_date_text (as typed), phone, alt_phone,
+phone_e164, alt_phone_e164, event_type, source (manual | bulk_upload), created_by_name, created_at,
+updated_at, archived, update_status (null = Pending), additional_comments, quoted_amount,
+conversion_amount, follow_up_date, status_updated_at, status_updated_by_name`. Admins also get
+`created_by` and `status_updated_by` (user ids).
+
+### Values (upload, add and edit)
+
+| Field | Rule |
+|---|---|
+| `name`, `venue` | Whitespace and line breaks collapsed to single spaces ("Main Palace \n" → "Main Palace"). At most 200 / 300 characters |
+| `event_type` | Trimmed; line breaks become `, ` ("engagement \nwedding" → "engagement, wedding"). At most 200 |
+| `phone`, `alt_phone` | A cell may hold two numbers split by a line break, `,`, `/` or `;`: the first is `phone`, the second `alt_phone`. Excel numbers become text. `nil`, `NA`, `-` or empty = no phone. Indian numbers may skip `+91`; others need their country code. More than two numbers, or a number that isn't valid: error. Stored as written plus E.164 |
+| `date` | Kept as typed (`event_date_text`, spacing collapsed). `event_date` is filled when the text is one clear date: a real Excel date, `DD-MM-YYYY`, `YYYY-MM-DD`, or one day and one month in any order ("Dec 4th", "12th Dec", "Feb 28th, Tentative date", "April 23rd 2027"). **Without a year: the next time that day comes** (today included), counted from the day it's entered, and not recalculated later. Text only (no `event_date`): a month alone ("March"), ranges and choices ("Jan 22nd -24th 2027", "Feb 24&25th 2027", "Dec 5th or 6th", "10th & 11th Feb 2027"), "Nil". An impossible date (`31-02-2026`): error |
+| A lead | Needs a name or a phone. **Without a phone it's allowed** and flagged `no_phone` |
+
+**Duplicates** (archived leads count):
+- with a phone: the phone or alt phone matches an existing lead's phone or alt phone (`existing`),
+  or an earlier row of the same file or request (`in_file`);
+- without a phone: the same name (any case or spacing) and event date (the date when known, else
+  the date text).
+
+### Endpoints
+
+| Method and path | Who | What |
+|---|---|---|
+| `POST /upload/preview` | admin, Dhruva | `multipart/form-data`: `file` (`.xlsx` / `.csv`, ≤ 5 MB, ≤ 5,000 rows), `sheet_name` (`.xlsx`; default the first sheet; matched exactly, else ignoring case and outer spaces). Saves nothing. See below |
+| `POST /leads/bulk` | admin, Dhruva | `{leads: [{name, venue, date, phone, alt_phone, event_type}]}` (≤ 5,000; usually the preview rows' `values`, edited). Checks every lead again, saves the valid ones (`source: bulk_upload`), skips duplicates. Returns `{added, duplicates_skipped, failed, errors: [{index, field, message}], ids}` |
+| `POST /leads` | admin, Dhruva | One lead (same fields, plus `allow_duplicate`). 201 with the lead; 422 `[{field, message}]`; 409 `{message, duplicate}` unless `allow_duplicate: true` |
+| `GET /leads/template` | admin, Dhruva | `format=xlsx` (default) or `csv`: Name, Venue, Date, Phone, Alt phone, Event type and one example row (uploaded unchanged, it's an error: "This is the example row from the template; delete it") |
+| `GET /leads/{id}` | admin, Dhruva | One lead (archived ones too). 404 if unknown |
+| `PATCH /leads/{id}` | admin, Dhruva | Only the fields sent change; `null` clears one. Basic fields: both (the same rules as above; a changed phone is checked for duplicates, 409 unless `allow_duplicate`). Admin fields: admins only; Dhruva logins get `403 "Only admins can change …"` and nothing is saved. Admin fields record `status_updated_by` / `status_updated_at`. Unknown fields: 422 |
+| `POST /leads/{id}/archive`, `/unarchive` | admin | Archived leads leave the list, stats, export and dashboard but still count as duplicates |
+
+**Upload preview response:**
+
+```json
+{
+  "sheet": "Oct - Dec ", "sheets": ["Oct - Dec ", "Dec -March 2027"], "heading_row": 2,
+  "columns": {"Name": "name", "Venue": "venue", "Date": "date", "Contact No": "phone", "Event Type": "event_type"},
+  "ignored_columns": [],
+  "rows": [
+    {"row": 4, "status": "ok", "flags": [], "errors": [], "duplicate": null, "event_date": "2026-12-25",
+     "values": {"name": "Ravi Kumar", "venue": "Main Palace", "date": "dec 25th", "phone": "9800000002",
+                "alt_phone": "9000000002", "event_type": "engagement, wedding"}},
+    {"row": 6, "status": "ok", "flags": ["no_phone"]},
+    {"row": 13, "status": "duplicate", "duplicate": {"reason": "in_file", "duplicate_of_row": 3}},
+    {"row": 16, "status": "error", "errors": [{"field": "phone", "message": "Not a valid phone number"}]}
+  ],
+  "counts": {"total": 13, "valid": 10, "needs_fixing": 1, "duplicates": 2, "no_phone": 3,
+             "duplicates_by_reason": {"in_file": 2, "existing": 0}}
+}
+```
+
+(Rows shortened; every row has all the keys.)
+
+- **Heading row:** found automatically. Title rows above it ("Updated on 12th Nov") and blank rows
+  are skipped: it's the first row, within the first 15, where at least two cells are known headings.
+- **Headings,** ignoring case, spaces and punctuation: `SL NO` / `SLNO` (ignored), `Name`, `Venue`,
+  `Date` / `Event date`, `Contact No` / `MOBILE NO` / `Mobile` / `Phone`, `Alt phone` /
+  `Alternate phone`, `Event Type`. Other columns are listed in `ignored_columns`. The file needs a
+  Name or a phone column (400).
+- **Rows:** empty rows (or rows with only SL NO) are skipped; `row` is the Excel row number.
+  `status`: `ok` (will be saved), `error` (needs fixing: edit `values` and send them to the bulk
+  save), `duplicate` (`duplicate.reason`: `in_file` with `duplicate_of_row`, or `existing` with
+  `lead_id`). `no_phone` rows are `ok` unless something else is wrong.
+- **Errors:** 400 for an unreadable file, a missing sheet (the message lists the sheets) or no
+  heading row; 413 above 5 MB.
