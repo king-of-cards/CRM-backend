@@ -1431,3 +1431,24 @@ or as written when unreadable), Event type, Update (`Pending`, `Converted`, …)
 comments, Follow-up date, Quoted amount, Conversion amount (₹ number cells; CSV plain numbers),
 Received, Updated by (a name), Updated at (IST). Formats and formula safety as the other exports.
 An export uploads back: every row is then a duplicate.
+
+### Dashboard: `GET /api/v1/analytics/dhruva`
+
+Admins and Dhruva logins (read-only; the same numbers); vendor logins: 403. The period rules of
+the other dashboards ([Dashboard](#9-dashboard-date-filter)): `date_from` / `date_to` (IST, at most
+366 days, not in the future), `period=all`, the same 400 errors, **but all time when no dates are
+sent**. A lead's received date is its `created_at` (IST day). Archived leads aren't counted. Every
+number covers the leads received in the period.
+
+| Field | Covers |
+|---|---|
+| `period` | As in the overview (`all_time`, `granularity` day / week / month, `previous`) |
+| `received` | Leads received in the period |
+| `previous_period`, `change_pct` | Leads in the same number of days right before, and the % change; `null` for all time (or with 0 before, `change_pct`) |
+| `kpis` | [The six KPIs](#kpis-the-same-six-everywhere) plus `pending` and `upcoming_30_days` (events from today to today + 30) |
+| `by_event_type` | `[{value, count}]`; "engagement, wedding" counts for both; values lower-case |
+| `top_venues` | Top 10 `[{value, count}]`; spellings that differ only in case or spacing are one venue |
+| `events_by_month` | `[{month: "2026-12", count}]` by event date; `no_event_date`: leads whose date is text only or empty |
+| `inflow` | `[{date, end, total}]` by received date: days, 7-day buckets over 90 days, months for all time |
+| `by_status` | `pending` plus the 7 Update values |
+| `latest` | The 6 newest leads of the period (lead objects) |

@@ -114,27 +114,38 @@ def _period(required: bool):
     return dependency
 
 
-def _dashboard_period(
-    period: str | None = Query(None, description='"all" for all time (instead of date_from / date_to)'),
-    date_from: str | None = Query(None, description="First day, YYYY-MM-DD (India time), included"),
-    date_to: str | None = Query(None, description="Last day, YYYY-MM-DD (India time), included"),
-):
-    if period is not None and period.strip():
-        if period.strip().lower() != "all":
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
-                                detail='period must be "all" (or leave it out and send date_from / date_to)')
-        if (date_from or "").strip() or (date_to or "").strip():
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
-                                detail="Use either period=all or date_from / date_to, not both")
-        return periods.ALL_TIME
-    try:
-        return periods.parse_period(date_from, date_to, required=True)
-    except periods.PeriodError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+def _dashboard_period_dependency(default_all: bool):
+    """period=all, or date_from / date_to; nothing sent: the last 30 days (default_all=False)
+    or all time (default_all=True)."""
+    def dependency(
+        period: str | None = Query(None, description='"all" for all time (instead of date_from / date_to)'),
+        date_from: str | None = Query(None, description="First day, YYYY-MM-DD (India time), included"),
+        date_to: str | None = Query(None, description="Last day, YYYY-MM-DD (India time), included"),
+    ):
+        if period is not None and period.strip():
+            if period.strip().lower() != "all":
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                                    detail='period must be "all" (or leave it out and send date_from / date_to)')
+            if (date_from or "").strip() or (date_to or "").strip():
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                                    detail="Use either period=all or date_from / date_to, not both")
+            return periods.ALL_TIME
+        if default_all and not (date_from or "").strip() and not (date_to or "").strip():
+            return periods.ALL_TIME
+        try:
+            return periods.parse_period(date_from, date_to, required=True)
+        except periods.PeriodError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    return dependency
+
+
+_dashboard_period = _dashboard_period_dependency(default_all=False)
 
 
 # Dashboard: period=all, the dates asked for, or the last 30 days. Lists: a period only if dates are given.
 DashboardPeriod = Annotated[periods.Period | periods.AllTime, Depends(_dashboard_period)]
+# The Dhruva dashboard: the same rules, but all time when no dates are sent
+AllTimeDefaultPeriod = Annotated[periods.Period | periods.AllTime, Depends(_dashboard_period_dependency(True))]
 OptionalPeriod = Annotated[periods.Period | None, Depends(_period(required=False))]
 
 

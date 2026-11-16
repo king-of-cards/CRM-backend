@@ -21,7 +21,7 @@ from fastapi import APIRouter, Query
 from sqlalchemy import select as sa_select
 from sqlmodel import Session, select
 
-from app.api.deps import DashboardPeriod, DbSession, LeadViewer
+from app.api.deps import AllTimeDefaultPeriod, DashboardPeriod, DbSession, DhruvaSectionUser, LeadViewer
 from app.core import response_cache
 from app.services import access, kpis, periods
 from app.db.session import engine, read_engine
@@ -547,3 +547,74 @@ def vendor_to_koc_overview(viewer: LeadViewer, db: DbSession, period: DashboardP
 
     key = ("analytics", "vendor-to-koc", scope) + _cache_key(scope, period)[3:]
     return response_cache.get(key, build, fresh=FRESH_SECONDS, stale=FRESH_SECONDS)
+
+
+# ── Dhruva dashboard ───────────────────────────────────────────────────
+@router.get("/dhruva")
+def dhruva_overview(user: DhruvaSectionUser, db: DbSession, period: AllTimeDefaultPeriod):
+    """Dhruva leads dashboard. The shared period rules, but all time by default; received date =
+    created_at (IST day). Admins and Dhruva logins (read-only); vendor logins: 403."""
+    from app.crud import dhruva as dcrud
+    from app.models.dhruva import DhruvaLead
+    from app.models.user import Role
+    from app.models.vendor_to_koc import UpdateStatus
+
+    today = periods.today_ist()
+    named = db.exec(dcrud.with_names().where(DhruvaLead.is_deleted == False)).all()  # noqa: E712
+    arrival = [periods.ist_date(row.created_at) for row, _, _ in named]
+    if isinstance(period, periods.AllTime):
+        known = [d for d in arrival if d is not None]
+        period = period.resolve(min(known) if known else None, today)
+
+        def in_period(_):
+            return True
+        previous = None
+    else:
+        in_period = period.contains
+        previous = period.previous()
+    current = [(row, c, u) for (row, c, u), d in zip(named, arrival) if in_period(d)]
+    leads = [row for row, _, _ in current]
+    received = len(leads)
+    before = sum(1 for d in arrival if previous.contains(d)) if previous else None
+
+    numbers = kpis.compute(leads)
+    numbers["pending"] = sum(1 for r in leads if r.update_status is None)
+    numbers["upcoming_30_days"] = sum(1 for r in leads if r.event_date is not None
+                                      and today <= r.event_date <= today + timedelta(days=30))
+
+    buckets = period.buckets()
+    first = {start: i for i, (start, _) in enumerate(buckets)}
+    inflow = [{"date": s.isoformat(), "end": e.isoformat(), "total": 0} for s, e in buckets]
+    for row, d in zip(named, arrival):
+        if d is not None and period.contains(d) and in_period(d):
+            inflow[first[period.bucket_start(d)]]["total"] += 1
+
+    types: Counter = Counter()
+    for r in leads:
+        types.update({p.strip().lower() for p in (r.event_type or "").split(",") if p.strip()})
+    venue_names: dict[str, Counter] = {}
+    for r in leads:
+        if r.venue:
+            venue_names.setdefault(" ".join(r.venue.split()).lower(), Counter())[r.venue] += 1
+    venues = sorted(({"value": spellings.most_common(1)[0][0], "count": sum(spellings.values())}
+                     for spellings in venue_names.values()), key=lambda v: (-v["count"], v["value"].lower()))
+    months = Counter(f"{r.event_date.year:04d}-{r.event_date.month:02d}" for r in leads if r.event_date)
+    admin = user.role == Role.ADMIN.value
+    latest = sorted(current, key=lambda t: (t[0].created_at, t[0].id), reverse=True)[:6]
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "today": today.isoformat(),
+        "period": period.as_dict(),
+        "received": received,
+        "previous_period": before,
+        "change_pct": _change(received, before) if before is not None else None,
+        "kpis": numbers,
+        "by_event_type": [{"value": k, "count": n} for k, n in sorted(types.items(), key=lambda kv: (-kv[1], kv[0]))],
+        "top_venues": venues[:10],
+        "events_by_month": [{"month": m, "count": months[m]} for m in sorted(months)],
+        "no_event_date": sum(1 for r in leads if r.event_date is None),
+        "inflow": inflow,
+        "by_status": {"pending": numbers["pending"],
+                      **{s.value: sum(1 for r in leads if r.update_status == s.value) for s in UpdateStatus}},
+        "latest": [dcrud.serialize(*t, admin=admin) for t in latest],
+    }
