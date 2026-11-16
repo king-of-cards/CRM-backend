@@ -1,12 +1,14 @@
 """Cross-source duplicates: where else a lead's phone exists ("also_in").
 
-Places: the 4 sources (spin workflow and CRM spin leads, whatsapp, wedding, wedding_planner) and
-Vendor -> KOC. Phones are compared as E.164 (phone_e164; Vendor -> KOC's 10-digit numbers as
-+91…). Archived and removed rows count (like the upload duplicate check).
+Places: the 4 sources (spin workflow and CRM spin leads, whatsapp, wedding, wedding_planner),
+Vendor -> KOC and Dhruva leads. Phones are compared as E.164 (phone_e164; Vendor -> KOC's
+10-digit numbers as +91…; Dhruva: phone and alt phone). Archived and removed rows count (like
+the upload duplicate check).
 
 Visibility: admins see every place. A vendor login only sees places it can see itself: its own
 leads in the 4 sources (the same assignment map the lists use, app/services/access.py) and its
-own Vendor -> KOC leads. Other vendors' and unassigned leads are never revealed.
+own Vendor -> KOC leads; never Dhruva leads. A Dhruva login sees no other section's leads, so its
+also_in is always empty. Other vendors' and unassigned leads are never revealed.
 
   attach(...)       per list page: one query per source for the page's phones
   matching_keys()   the whole source, for the also_in=yes|no filter (lists, stats, exports)
@@ -15,6 +17,7 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
+from sqlalchemy import or_
 from sqlmodel import Session, col, select
 
 from app.core import response_cache
@@ -24,7 +27,8 @@ logger = logging.getLogger(__name__)
 
 SOURCES = ("spin", "whatsapp", "wedding", "wedding_planner")
 VTK = "vendor_to_koc"
-PLACES = (*SOURCES, VTK)
+DHRUVA = "dhruva"
+PLACES = (*SOURCES, VTK, DHRUVA)
 WORKFLOW_CACHE_SECONDS = 300
 
 
@@ -61,6 +65,8 @@ class _Visibility:
     def sees(self, place: str, key: str, vendor_id: int | None = None) -> bool:
         if self.viewer.is_admin:
             return True
+        if self.viewer.vendor_id is None or place == DHRUVA:
+            return False                     # Dhruva logins: no other section; vendors: never Dhruva
         if place == VTK:
             return vendor_id == self.viewer.vendor_id
         if place not in self._keys:
@@ -94,6 +100,10 @@ def _matches(db: Session, e164s: set[str]) -> list[tuple[str, str, str, int | No
                        .join(Vendor, col(Vendor.id) == VendorToKocLead.vendor_id)
                        .where(col(VendorToKocLead.phone).in_(indian)))
         out += [(VTK, str(i), vtk_e164(p), v, name) for i, p, v, name in rows]
+    from app.models.dhruva import DhruvaLead
+    for lead_id, phone, alt in db.exec(select(DhruvaLead.id, DhruvaLead.phone_e164, DhruvaLead.alt_phone_e164).where(
+            or_(col(DhruvaLead.phone_e164).in_(chunk), col(DhruvaLead.alt_phone_e164).in_(chunk)))):
+        out += [(DHRUVA, str(lead_id), e, None, None) for e in {phone, alt} if e in e164s]
     return out
 
 
@@ -108,22 +118,31 @@ def page_phones(db: Session, source: str, keys: list[str]) -> dict[str, str]:
     return {to_key(k): e for k, e in db.exec(select(key_col, model.phone_e164).where(col(key_col).in_(values))) if e}
 
 
+def _phones_of(value) -> set[str]:
+    if not value:
+        return set()
+    return {value} if isinstance(value, str) else {e for e in value if e}
+
+
 def attach(db: Session, viewer, place: str, items: list[dict], key_of: Callable[[dict], Any],
-           e164_of: dict[str, str]) -> list[dict]:
+           e164_of: dict[str, Any]) -> list[dict]:
     """Add "also_in" to every item: [{source, count[, vendors]}] for the OTHER places where the
-    item's phone exists and the viewer may see it. e164_of: {item key: e164}."""
-    matches = _matches(db, {e for e in e164_of.values() if e})
+    item's phone exists and the viewer may see it. e164_of: {item key: e164, or a set of them
+    (Dhruva: phone and alt phone)}. A lead found by two of the item's phones counts once."""
+    matches = _matches(db, set().union(*(_phones_of(v) for v in e164_of.values())) if e164_of else set())
     by_phone: dict[str, list[tuple]] = {}
     for m in matches:
         by_phone.setdefault(m[2], []).append(m)
     vis = _Visibility(db, viewer)
     for item in items:
         key = str(key_of(item))
-        e164 = e164_of.get(key)
         found: dict[str, dict] = {}
-        for other, other_key, _, vendor_id, vendor_name in by_phone.get(e164, []) if e164 else []:
-            if other == place or not vis.sees(other, other_key, vendor_id):
+        seen: set[tuple[str, str]] = set()
+        hits = [m for e in sorted(_phones_of(e164_of.get(key))) for m in by_phone.get(e, [])]
+        for other, other_key, _, vendor_id, vendor_name in hits:
+            if other == place or (other, other_key) in seen or not vis.sees(other, other_key, vendor_id):
                 continue
+            seen.add((other, other_key))
             entry = found.setdefault(other, {"source": other, "count": 0})
             entry["count"] += 1
             if other == VTK and viewer.is_admin:
@@ -159,17 +178,22 @@ def _workflow_index() -> dict[str, str]:
         return {}
 
 
-def index(db: Session) -> dict[str, dict[str, tuple[str, int | None]]]:
-    """{place: {key: (e164, vendor_id)}} for every lead of every place (vendor_id: Vendor -> KOC)."""
+def index(db: Session) -> dict[str, list[tuple[str, str, int | None]]]:
+    """{place: [(key, e164, vendor_id)]} for every lead of every place (vendor_id: Vendor -> KOC).
+    A Dhruva lead appears once per phone (phone and alt phone)."""
+    from app.models.dhruva import DhruvaLead
     from app.models.vendor_to_koc import VendorToKocLead
 
-    out: dict[str, dict[str, tuple[str, int | None]]] = {}
+    out: dict[str, list[tuple[str, str, int | None]]] = {}
     for source in SOURCES:
         model, key_col, to_key, _ = _key_column(source)
-        out[source] = {to_key(k): (e, None) for k, e in db.exec(select(key_col, model.phone_e164)) if e}
-    out["spin"].update({k: (e, None) for k, e in workflow_phone_index().items()})
-    out[VTK] = {str(i): (vtk_e164(p), v) for i, p, v in
-                db.exec(select(VendorToKocLead.id, VendorToKocLead.phone, VendorToKocLead.vendor_id)) if p}
+        out[source] = [(to_key(k), e, None) for k, e in db.exec(select(key_col, model.phone_e164)) if e]
+    out["spin"] += [(k, e, None) for k, e in workflow_phone_index().items()]
+    out[VTK] = [(str(i), vtk_e164(p), v) for i, p, v in
+                db.exec(select(VendorToKocLead.id, VendorToKocLead.phone, VendorToKocLead.vendor_id)) if p]
+    out[DHRUVA] = [(str(i), e, None) for i, phone, alt in
+                   db.exec(select(DhruvaLead.id, DhruvaLead.phone_e164, DhruvaLead.alt_phone_e164))
+                   for e in {phone, alt} if e]
     return out
 
 
@@ -183,5 +207,5 @@ def matching_keys(db: Session, viewer, place: str) -> set[str]:
     idx = index(db)
     vis = _Visibility(db, viewer)
     elsewhere = {e for other in PLACES if other != place
-                 for key, (e, vendor_id) in idx[other].items() if vis.sees(other, key, vendor_id)}
-    return {key for key, (e, _) in idx[place].items() if e in elsewhere}
+                 for key, e, vendor_id in idx[other] if vis.sees(other, key, vendor_id)}
+    return {key for key, e, _ in idx[place] if e in elsewhere}

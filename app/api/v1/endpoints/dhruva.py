@@ -22,7 +22,9 @@ from app.models.dhruva import ADMIN_FIELDS, DhruvaBulkCreate, DhruvaLeadCreate, 
 from app.models.user import Role
 from app.models.vendor_to_koc import STATUS_LABELS
 from app.services import dhruva_import as parser
+from app.services import also_in as also_in_service
 from app.services import lead_filters, periods
+from app.services.access import Viewer
 from app.services import vendor_lead_export as files
 
 router = APIRouter(prefix="/dhruva", tags=["dhruva leads"])
@@ -36,6 +38,11 @@ TEMPLATE_COLUMNS = [
 
 def is_admin(user) -> bool:
     return user.role == Role.ADMIN.value
+
+
+def viewer_of(user) -> Viewer:
+    """For also_in: admins see every section; a Dhruva login (no vendor) sees none."""
+    return Viewer(user, None)
 
 
 def _status_of(lead: parser.CleanLead, duplicate: dict | None) -> str:
@@ -170,6 +177,8 @@ def list_query(
     follow_up_to: date | None = Query(None),
     follow_up_due: bool = Query(False, description="Follow-up date today or earlier, open leads only"),
     has_phone: Literal["yes", "no"] | None = Query(None),
+    also_in: Literal["yes", "no"] | None = Query(None, description="The phone also exists in another section "
+                                                 "(admins only see them; for Dhruva logins nothing matches)"),
     sort: SortField = Query("created_at"),
     order: Literal["asc", "desc"] = Query("desc"),
 ) -> ListQuery:
@@ -197,6 +206,12 @@ def list_query(
         follow_up_due_by=periods.today_ist() if follow_up_due else None,
         has_phone=None if has_phone is None else has_phone == "yes",
     )
+    if also_in:
+        found = {int(k) for k in also_in_service.matching_keys(db, viewer_of(user), also_in_service.DHRUVA)}
+        if also_in == "yes":
+            filters.ids_in = found
+        else:
+            filters.ids_not_in = found
     return ListQuery(filters, sort, order)
 
 
@@ -207,7 +222,10 @@ ListQueryDep = Annotated[ListQuery, Depends(list_query)]
 def list_leads(db: DbSession, user: DhruvaSectionUser, query: ListQueryDep, page: int = Query(1, ge=1),
                page_size: PageSize = 10):
     """{items (each with sl_no), total, page, page_size, pages}."""
-    return crud.list_page(db, query.filters, query.sort, query.order, page, page_size, admin=is_admin(user))
+    out = crud.list_page(db, query.filters, query.sort, query.order, page, page_size, admin=is_admin(user))
+    also_in_service.attach(db, viewer_of(user), also_in_service.DHRUVA, out["items"], key_of=lambda i: i["id"],
+                           e164_of={str(i["id"]): {i["phone_e164"], i["alt_phone_e164"]} for i in out["items"]})
+    return out
 
 
 @router.get("/leads/stats")

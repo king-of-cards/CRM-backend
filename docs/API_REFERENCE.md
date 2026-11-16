@@ -1091,8 +1091,9 @@ leads, whatever they send.
 
 ### Cross-source duplicates (`also_in`)
 
-Every lead in the 5 lists (`GET /spin-leads`, `/whatsapp-leads`, `/wedding-leads`, `/wedding-plans`,
-`/vendor-to-koc/leads`) has `also_in`: the **other** places where the same phone exists.
+Every lead in the 6 lists (`GET /spin-leads`, `/whatsapp-leads`, `/wedding-leads`, `/wedding-plans`,
+`/vendor-to-koc/leads`, `/dhruva/leads`) has `also_in`: the **other** places where the same phone
+exists.
 
 ```json
 "also_in": [
@@ -1102,18 +1103,24 @@ Every lead in the 5 lists (`GET /spin-leads`, `/whatsapp-leads`, `/wedding-leads
 ]
 ```
 
-- **Places:** `spin` (workflow and CRM spin leads), `whatsapp`, `wedding`, `wedding_planner` and
-  `vendor_to_koc`, always in that order. A lead's own source is never listed (duplicates inside one
+- **Places:** `spin` (workflow and CRM spin leads), `whatsapp`, `wedding`, `wedding_planner`,
+  `vendor_to_koc` and `dhruva`, always in that order. A lead's own source is never listed (duplicates inside one
   source are the [duplicate check](#4-duplicates)'s job). Empty list: the phone is nowhere else.
-- **Matching:** by E.164 phone (`phone_e164`; Vendor → KOC's 10-digit numbers as `+91…`).
-  Archived and removed rows count, like the upload duplicate check.
+- **Matching:** by E.164 phone (`phone_e164`; Vendor → KOC's 10-digit numbers as `+91…`; Dhruva:
+  phone **and** alt phone, so a Dhruva lead is found by either, and a lead found through both of a
+  Dhruva lead's numbers counts once). Archived and removed rows count, like the upload duplicate
+  check.
 - **`count`:** how many leads in that place. **`vendors`** (Vendor → KOC, admins only): the names
   of the vendors who sent that phone.
 - **Vendor logins** only get places they can see themselves: their own leads in the other sources
   (the same assignment as the lists; archived leads aren't theirs to see) and their own Vendor → KOC
-  leads. Other vendors' and unassigned leads are never counted, and `vendors` is left out.
+  leads. Other vendors' and unassigned leads are never counted, and `vendors` is left out. They
+  never see `dhruva`.
+- **Dhruva leads** are shown to admins only: in every other list (`dhruva`) and, on Dhruva leads,
+  every other section. **Dhruva logins** don't see other sections, so their `also_in` is always
+  empty and `also_in=yes` finds nothing.
 - **Cost:** computed per page, one query per source (plus the workflow database for spin).
-- **Filter `also_in=yes|no`** on all 5 lists, their stats and their exports: the same rule over
+- **Filter `also_in=yes|no`** on all 6 lists, their stats and their exports: the same rule over
   the whole source, so `also_in=yes` rows always have a non-empty `also_in`. If the workflow
   database can't be read, spin workflow leads are left out of `also_in` (a warning is logged).
 
@@ -1411,6 +1418,7 @@ left out. Admins and Dhruva logins: all leads; vendor logins: 403.
 | `follow_up_from`, `follow_up_to` | Follow-up date range |
 | `follow_up_due=true` | Follow-up date today or earlier, open leads only (not converted, not converted, purchased elsewhere, purchased with us or not interested) |
 | `has_phone` | `yes` / `no` (no phone and no alt phone) |
+| `also_in` | `yes` / `no`: the phone or alt phone also exists in another section (see [Cross-source duplicates](#cross-source-duplicates-also_in)); admins only see other sections, so for Dhruva logins `yes` finds nothing |
 | `sort`, `order` | `created_at` (default, `desc`), `updated_at`, `event_date`, `name`, `venue`, `event_type`, `update_status`, `follow_up_date`. Empty values last |
 | `page`, `page_size` | List only. `page_size` 10, 25, 50 or 100 (default 10; others 422) |
 
@@ -1420,7 +1428,7 @@ of the other lists. Unknown `update_status` / `sort`: 422.
 
 | Method and path | Returns |
 |---|---|
-| `GET /leads` | `{items (lead objects with sl_no), total, page, page_size, pages}` |
+| `GET /leads` | `{items (lead objects with sl_no and `also_in`), total, page, page_size, pages}` |
 | `GET /leads/stats` | `{total, kpis, by_status (pending + the 7 values), no_phone, follow_ups_due, upcoming_30_days}`; `kpis` is [the same object as the other lists](#kpis-the-same-six-everywhere) |
 | `GET /leads/export` | `format=xlsx` (default) or `csv`, every matching lead in list order (50,000 at most; 400 above). File `dhruva_leads_YYYY-MM-DD.<ext>` |
 | `GET /leads/filter-options` | `{venues, event_types, updates, has_phone, sources}`, each `[{value, count}]` over every listed lead. Venues and event types: spellings that differ only in case or spacing are one value, shown as written most often; an event type like "engagement, wedding" counts for both |

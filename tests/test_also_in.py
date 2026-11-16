@@ -29,6 +29,7 @@ from tests.test_crm_leads_api import API, NOW, ApiTestBase
 PHONE = "+919845100001"
 LISTS = {"spin": "/spin-leads", "whatsapp": "/whatsapp-leads", "wedding": "/wedding-leads",
          "wedding_planner": "/wedding-plans", "vendor_to_koc": "/vendor-to-koc/leads"}
+DHRUVA_LIST = "/dhruva/leads"
 STATS = {"spin": "/spin-leads/stats", "whatsapp": "/whatsapp-leads/stats", "wedding": "/wedding-leads/stats",
          "wedding_planner": "/wedding-plans/stats", "vendor_to_koc": "/vendor-to-koc/leads/stats"}
 EXPORT = {"spin": "/crm-leads/spin/export", "whatsapp": "/crm-leads/whatsapp/export",
@@ -40,7 +41,9 @@ def utc(*args):
     return datetime(*args, tzinfo=timezone.utc)
 
 
-class AlsoInTest(ApiTestBase, unittest.TestCase):
+class AlsoInFixtures(ApiTestBase):
+    """The fixtures and helpers (no tests), shared with the Dhruva also_in tests."""
+
     def setUp(self):
         super().setUp()
         base = {"row_hash": "", "first_seen_at": NOW, "updated_at": NOW, "origin": "sheet"}
@@ -78,12 +81,14 @@ class AlsoInTest(ApiTestBase, unittest.TestCase):
 
     def items(self, place, who="admin", **params) -> list[dict]:
         with self.logged_in(who):
-            resp = self.client.get(f"{API}{LISTS[place]}", params={"page_size": 100, **params})
+            resp = self.client.get(f"{API}{LISTS.get(place, DHRUVA_LIST)}", params={"page_size": 100, **params})
         self.assertEqual(resp.status_code, 200, resp.text)
         return resp.json()["items"]
 
     @staticmethod
     def key(place, item) -> str:
+        if place == "dhruva":
+            return item["name"]
         if place in ("whatsapp", "wedding"):
             return item["lead_key"]
         if place == "wedding_planner":
@@ -93,6 +98,9 @@ class AlsoInTest(ApiTestBase, unittest.TestCase):
     def also(self, place, who="admin", **params) -> dict[str, list]:
         return {self.key(place, i): i["also_in"] for i in self.items(place, who, **params)}
 
+
+
+class AlsoInTest(AlsoInFixtures, unittest.TestCase):
     # ── Admin ──
     def test_admin_sees_every_other_place(self):
         wedding = self.also("wedding")
@@ -173,6 +181,59 @@ class AlsoInTest(ApiTestBase, unittest.TestCase):
     def test_bad_value(self):
         for place in LISTS:
             self.assertEqual(self.client.get(f"{API}{LISTS[place]}", params={"also_in": "maybe"}).status_code, 422, place)
+
+
+
+class DhruvaAlsoInTest(AlsoInFixtures, unittest.TestCase):
+    """Dhruva leads: D1 alt phone = PHONE; D2 phone = PHONE and alt = WD2's phone; D3 unique;
+    D4 archived with PHONE."""
+
+    def setUp(self):
+        super().setUp()
+        from app.models.dhruva import DhruvaLead
+        from app.models.user import User
+        with Session(self.engine, expire_on_commit=False) as s:
+            self.users["dhruva"] = User(name="Dhruva", email="dhruva@example.com", hashed_password="x", role="dhruva")
+            s.add(self.users["dhruva"])
+            s.commit()
+            s.refresh(self.users["dhruva"])
+            base = {"source": "manual", "created_by": self.users["dhruva"].id, "created_at": NOW, "updated_at": NOW}
+            s.add_all([
+                DhruvaLead(name="D1", phone="9000000201", phone_e164="+919000000201", alt_phone="9845100001",
+                           alt_phone_e164=PHONE, **base),
+                DhruvaLead(name="D2", phone="9845100001", phone_e164=PHONE, alt_phone="9845100002",
+                           alt_phone_e164="+919845100002", **base),
+                DhruvaLead(name="D3", phone="9000000203", phone_e164="+919000000203", **base),
+                DhruvaLead(name="D4", phone="9845100001", phone_e164=PHONE, is_deleted=True, **base),
+            ])
+            s.commit()
+
+    def test_admins_see_dhruva_matches_everywhere(self):
+        self.assertIn({"source": "dhruva", "count": 3}, self.also("wedding")["WD1"])          # D1, D2, archived D4
+        self.assertIn({"source": "dhruva", "count": 1}, self.also("wedding")["WD2"])          # D2's alt phone
+        self.assertIn({"source": "dhruva", "count": 3}, self.also("vendor_to_koc")[str(self.vtk["phodeo"])])
+        dhruva = self.also("dhruva")
+        self.assertEqual(dhruva["D2"], [                                                       # both phones, each lead once
+            {"source": "spin", "count": 1}, {"source": "whatsapp", "count": 1}, {"source": "wedding", "count": 3},
+            {"source": "vendor_to_koc", "count": 2, "vendors": ["OHP", "Phodeo"]}])
+        self.assertEqual(dhruva["D1"][2], {"source": "wedding", "count": 2})                   # WD1 + archived WDX
+        self.assertEqual(dhruva["D3"], [])
+        self.assertEqual({self.key("dhruva", i) for i in self.items("dhruva", also_in="yes")}, {"D1", "D2"})
+        self.assertEqual({self.key("dhruva", i) for i in self.items("dhruva", also_in="no")}, {"D3"})
+        with self.logged_in("admin"):
+            stats = self.client.get(f"{API}/dhruva/leads/stats", params={"also_in": "yes"}).json()
+        self.assertEqual(stats["total"], 2)
+
+    def test_vendors_never_see_dhruva_and_dhruva_sees_nothing_else(self):
+        for who, place, key in (("phodeo", "wedding", "WD1"), ("ohp", "whatsapp", "WA1"),
+                                ("phodeo", "vendor_to_koc", str(self.vtk["phodeo"]))):
+            self.assertNotIn("dhruva", str(self.also(place, who)[key]), (who, place))
+        # A vendor's also_in=yes doesn't come from Dhruva leads: WD2's only other copy is D2
+        self.assertNotIn("WD2", {self.key("wedding", i) for i in self.items("wedding", "phodeo", also_in="yes")})
+        dhruva = self.also("dhruva", "dhruva")
+        self.assertEqual(dhruva, {"D1": [], "D2": [], "D3": []})                               # no other section
+        self.assertEqual(self.items("dhruva", "dhruva", also_in="yes"), [])
+        self.assertEqual(len(self.items("dhruva", "dhruva", also_in="no")), 3)
 
 
 if __name__ == "__main__":
