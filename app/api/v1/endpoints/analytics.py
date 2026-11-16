@@ -411,3 +411,133 @@ def analytics_overview(viewer: LeadViewer, db: DbSession, period: DashboardPerio
     keys = {source: access.visible_keys(db, viewer, source) for source in SOURCES}
     return response_cache.get(_cache_key(("vendor", viewer.vendor_id), period), _builder(bind, keys, period),
                               fresh=FRESH_SECONDS, stale=FRESH_SECONDS)
+
+
+# ── Vendor -> KOC dashboard ────────────────────────────────────────────
+def _vtk_build(db: Session, vendor_id: int | None, period, admin: bool) -> dict:
+    """GET /analytics/vendor-to-koc. Arrival date = created_at (IST day). vendor_id: a vendor
+    login's own leads only; admin: every vendor and the admin-only numbers."""
+    from app.crud.vendor_to_koc import serialize
+    from app.models.vendor import Vendor
+    from app.models.vendor_to_koc import CLOSED_STATUSES, LeadSource, UpdateStatus, VendorToKocLead
+
+    today = periods.today_ist()
+    stmt = select(VendorToKocLead, Vendor.name).join(Vendor, Vendor.id == VendorToKocLead.vendor_id)
+    if vendor_id is not None:
+        stmt = stmt.where(VendorToKocLead.vendor_id == vendor_id)
+    rows = db.exec(stmt).all()
+    arrival = [periods.ist_date(lead.created_at) for lead, _ in rows]
+
+    if isinstance(period, periods.AllTime):
+        known = [d for d in arrival if d is not None]
+        period = period.resolve(min(known) if known else None, today)
+
+        def in_period(_):
+            return True
+        previous = None
+    else:
+        in_period = period.contains
+        previous = period.previous()
+
+    current = [(lead, name) for (lead, name), d in zip(rows, arrival) if in_period(d)]
+    received = len(current)
+    before = sum(1 for d in arrival if previous is not None and previous.contains(d)) if previous else None
+
+    # Inflow per vendor: day / week / month points like the overview
+    buckets = period.buckets()
+    first = {start: i for i, (start, _) in enumerate(buckets)}
+    inflow = [{"date": s.isoformat(), "end": e.isoformat(), "total": 0, "vendors": {}} for s, e in buckets]
+    legend: dict[int, str] = {}
+    for (lead, name), d in zip(rows, arrival):
+        if d is not None and period.contains(d) and in_period(d):
+            point = inflow[first[period.bucket_start(d)]]
+            point["total"] += 1
+            point["vendors"][str(lead.vendor_id)] = point["vendors"].get(str(lead.vendor_id), 0) + 1
+            legend[lead.vendor_id] = name
+
+    out = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "today": today.isoformat(),
+        "period": period.as_dict(),
+        "received": received,
+        "change_pct": _change(received, before) if before is not None else None,
+        "average_per_day": {
+            "period": round(received / period.days, 1),
+            "previous": round(before / previous.days, 1) if previous else None,
+        },
+        "inflow": inflow,
+        "inflow_vendors": [{"id": vid, "name": legend[vid]} for vid in sorted(legend, key=lambda v: legend[v].lower())],
+    }
+    if not admin:
+        return out          # vendor logins: received, change, average per day and inflow only
+
+    def is_open(lead) -> bool:
+        return lead.update_status is None or lead.update_status not in CLOSED_STATUSES
+
+    status_of = [lead.update_status for lead, _ in current]
+    converted = status_of.count(UpdateStatus.CONVERTED.value)
+    engaged_statuses = {UpdateStatus.INTERESTED.value, UpdateStatus.WILL_CALL_BACK.value, UpdateStatus.CONVERTED.value}
+
+    per_vendor: dict[int, dict] = {}
+    for lead, name in current:
+        v = per_vendor.setdefault(lead.vendor_id, {"vendor_id": lead.vendor_id, "vendor_name": name, "leads": 0,
+                                                   "interested": 0, "converted": 0, "pending": 0, "_days": []})
+        v["leads"] += 1
+        v["interested"] += lead.update_status == UpdateStatus.INTERESTED.value
+        v["converted"] += lead.update_status == UpdateStatus.CONVERTED.value
+        v["pending"] += lead.update_status is None
+        if lead.update_status is not None and lead.status_updated_at is not None and lead.created_at is not None:
+            created = lead.created_at if lead.created_at.tzinfo else lead.created_at.replace(tzinfo=timezone.utc)
+            updated = lead.status_updated_at if lead.status_updated_at.tzinfo else lead.status_updated_at.replace(tzinfo=timezone.utc)
+            v["_days"].append((updated - created).total_seconds() / 86400)
+    vendors_out = []
+    for v in sorted(per_vendor.values(), key=lambda x: (-x["leads"], x["vendor_name"].lower())):
+        days = v.pop("_days")
+        v["converted_pct"] = round(v["converted"] / v["leads"] * 100, 1) if v["leads"] else None
+        v["average_days_to_update"] = round(sum(days) / len(days), 1) if days else None
+        vendors_out.append(v)
+
+    # Follow-ups (NOT limited to the period): open leads with a follow-up date
+    due = [(lead, name) for lead, name in rows if lead.follow_up_date is not None and is_open(lead)]
+    due.sort(key=lambda pair: (pair[0].follow_up_date, pair[0].id))
+    latest = sorted(current, key=lambda pair: (pair[0].created_at, pair[0].id), reverse=True)[:6]
+
+    out.update({
+        "not_filtered": ["follow_ups_due", "next_follow_ups"],
+        "previous_received": before,
+        "pending": status_of.count(None),
+        "follow_ups_due": sum(1 for lead, _ in due if lead.follow_up_date <= today),
+        "converted": converted,
+        "converted_pct": round(converted / received * 100, 1) if received else None,
+        "purchased_with_us": status_of.count(UpdateStatus.PURCHASED_WITH_US.value),
+        "by_status": {"pending": status_of.count(None), **{s.value: status_of.count(s.value) for s in UpdateStatus}},
+        "per_vendor": vendors_out,
+        "funnel": {
+            "received": received,
+            "updated": sum(1 for s in status_of if s is not None),
+            "engaged": sum(1 for s in status_of if s in engaged_statuses),
+            "converted": converted,
+        },
+        "top_cities": _top(Counter(c for c in (_clean_place(lead.city) for lead, _ in current) if c)),
+        "by_source": {s.value: sum(1 for lead, _ in current if lead.source == s.value) for s in LeadSource},
+        "latest": [serialize(lead, name, admin=True) for lead, name in latest],
+        "next_follow_ups": [serialize(lead, name, admin=True) for lead, name in due[:10]],
+    })
+    return out
+
+
+@router.get("/vendor-to-koc")
+def vendor_to_koc_overview(viewer: LeadViewer, db: DbSession, period: DashboardPeriod, refresh: bool = Query(False)):
+    """Vendor -> KOC dashboard for a period (same rules as /analytics/overview). Admins: every vendor
+    and every number. Vendor logins: their own leads; received, change_pct, average_per_day, inflow."""
+    if refresh:
+        response_cache.clear("analytics")
+    scope = "admin" if viewer.is_admin else ("vendor", viewer.vendor_id)
+    bind = db.get_bind()
+
+    def build():
+        with Session(bind) as session:
+            return _vtk_build(session, None if viewer.is_admin else viewer.vendor_id, period, viewer.is_admin)
+
+    key = ("analytics", "vendor-to-koc", scope) + _cache_key(scope, period)[3:]
+    return response_cache.get(key, build, fresh=FRESH_SECONDS, stale=FRESH_SECONDS)
