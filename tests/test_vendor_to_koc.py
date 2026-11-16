@@ -26,7 +26,7 @@ PASSWORD_HASH = hash_password(PASSWORD)   # hash once; Argon2 is slow on purpose
 PHODEO_HEADINGS = ["Sl. No", "Date", "Name", "Event date", "Phone", "City", "Status", "Comment",
                    "Quick reply", "campaign sent", "2nd campaign sent", "3rd campaign sent"]
 ADMIN_FIELDS = {"status_updated_by"}                       # a user id: admins only
-STATUS_FIELDS = {"update_status", "additional_comments", "follow_up_date",
+STATUS_FIELDS = {"update_status", "additional_comments", "follow_up_date", "quoted_amount", "conversion_amount",
                  "status_updated_at", "status_updated_by_name"}   # everyone (vendors: read-only)
 
 
@@ -403,6 +403,26 @@ class PatchTests(VendorToKocTestCase):
                                  json={"update_status": None})
         self.assertIsNone(resp.json()["update_status"])
         self.assertEqual(resp.json()["additional_comments"], "Call after 6")
+
+    def test_admin_sets_amounts_vendors_see_them_read_only(self):
+        lead_id = self.add_lead(self.phodeo_id, "9000000001")
+        url = f"{BASE}/leads/{lead_id}"
+        resp = self.client.patch(url, headers=self.admin, json={"quoted_amount": 150000, "conversion_amount": 0})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual((resp.json()["quoted_amount"], resp.json()["conversion_amount"]), (150000, 0))
+        self.assertEqual(resp.json()["status_updated_by"], self.ids["admin"])
+        resp = self.client.patch(url, headers=self.admin, json={"conversion_amount": 140000, "update_status": "converted"})
+        self.assertEqual((resp.json()["quoted_amount"], resp.json()["conversion_amount"]), (150000, 140000))
+        for path in (f"{BASE}/leads", url):                                   # vendor: list and details
+            body = self.client.get(path, headers=self.phodeo).json()
+            item = body["items"][0] if "items" in body else body
+            self.assertEqual((item["quoted_amount"], item["conversion_amount"]), (150000, 140000), path)
+        for body in ({"quoted_amount": 1}, {"conversion_amount": 1}, {"update_status": "converted"}):
+            self.assertEqual(self.client.patch(url, headers=self.phodeo, json=body).status_code, 403, body)
+        resp = self.client.patch(url, headers=self.admin, json={"quoted_amount": None})
+        self.assertEqual((resp.json()["quoted_amount"], resp.json()["conversion_amount"]), (None, 140000))
+        for body in ({"quoted_amount": -1}, {"conversion_amount": 100_000_001}, {"conversion_amount": "lots"}):
+            self.assertEqual(self.client.patch(url, headers=self.admin, json=body).status_code, 422, body)
 
     def test_patch_errors(self):
         lead_id = self.add_lead(self.phodeo_id, "9000000001")

@@ -17,7 +17,8 @@ EXPORT, TEMPLATE = f"{BASE}/leads/export", f"{BASE}/leads/template"
 XLSX_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 FORMULA_NAME = '=HYPERLINK("http://evil.example","click")'
 ADMIN_HEADINGS = ["Sl. No", "Vendor", "Date", "Name", "Phone", "City", "Update",
-                  "Additional comments", "Follow-up date", "Updated by", "Updated at"]
+                  "Additional comments", "Follow-up date", "Quoted amount", "Conversion amount",
+                  "Updated by", "Updated at"]
 VENDOR_HEADINGS = [h for h in ADMIN_HEADINGS if h != "Vendor"]
 
 
@@ -53,6 +54,7 @@ class ExportTestCase(VendorToKocTestCase):
             self.phodeo_id, "9000000001", name="Asha Rao", city="Bengaluru",
             lead_date=date(2026, 1, 5), update_status="converted",
             additional_comments="- call later", follow_up_date=date(2026, 2, 1),
+            quoted_amount=150000, conversion_amount=140000,
             status_updated_by=self.ids["admin"],
             status_updated_at=datetime(2026, 1, 15, 9, 30, tzinfo=timezone.utc))
         self.p2 = self.add_lead(self.phodeo_id, "9000000002", name=FORMULA_NAME, city="@Pune")
@@ -80,6 +82,8 @@ class VendorExportTests(ExportTestCase):
         self.assertEqual(asha[VENDOR_HEADINGS.index("Additional comments")], "- call later")
         self.assertEqual(asha[VENDOR_HEADINGS.index("Follow-up date")], datetime(2026, 2, 1))
         self.assertEqual(asha[VENDOR_HEADINGS.index("Updated by")], "Admin")             # a name, never an email
+        self.assertEqual((asha[VENDOR_HEADINGS.index("Quoted amount")], asha[VENDOR_HEADINGS.index("Conversion amount")]),
+                         (150000, 140000))                                        # vendors see the amounts
         self.assertEqual(asha[VENDOR_HEADINGS.index("Updated at")], datetime(2026, 1, 15, 15, 0))   # IST
         everything = " ".join(as_text(v) for row in rows for v in row)
         for hidden in ("Phodeo", "Meena", "admin@example.com"):                     # no vendor, no other vendor
@@ -117,7 +121,7 @@ class AdminExportTests(ExportTestCase):
         self.assertEqual(rows[0], ADMIN_HEADINGS)
         self.assertEqual(rows[1], [
             1, "Phodeo", datetime(2026, 1, 5), "Asha Rao", "+919000000001", "Bengaluru",
-            "Converted", "- call later", datetime(2026, 2, 1), "Admin",
+            "Converted", "- call later", datetime(2026, 2, 1), 150000, 140000, "Admin",
             datetime(2026, 1, 15, 15, 0),            # 09:30 UTC -> 15:00 IST
         ])
         self.assertEqual(len(rows), 2)
@@ -139,7 +143,12 @@ class AdminExportTests(ExportTestCase):
         self.assertEqual((phone.data_type, phone.number_format), ("s", "@"))
         lead_date = ws.cell(row=asha_row, column=3)
         self.assertEqual((lead_date.value, lead_date.number_format), (datetime(2026, 1, 5), "dd mmm yyyy"))
-        self.assertEqual(ws.cell(row=asha_row, column=11).number_format, "d mmm yyyy, hh:mm am/pm")
+        self.assertEqual(ws.cell(row=asha_row, column=13).number_format, "d mmm yyyy, hh:mm am/pm")
+        for column, amount in ((10, 150000), (11, 140000)):                   # number cells, ₹ format
+            cell = ws.cell(row=asha_row, column=column)
+            self.assertEqual((cell.value, cell.data_type), (amount, "n"))
+            self.assertIn('"₹"', cell.number_format)
+        self.assertIsNone(ws.cell(row=formula_row, column=10).value)
 
     def test_csv_formats_and_apostrophe_escaping(self):
         resp = self.export(self.admin, "format=csv&sort=lead_date&order=asc")
@@ -150,7 +159,9 @@ class AdminExportTests(ExportTestCase):
         self.assertEqual(asha[2], "05 Jan 2026")
         self.assertEqual(asha[7], "'- call later")
         self.assertEqual(asha[8], "01 Feb 2026")
-        self.assertEqual(asha[10], "15 Jan 2026, 03:00 pm")                    # 09:30 UTC = 3 pm IST
+        self.assertEqual((asha[9], asha[10]), ("150000", "140000"))           # plain rupees
+        self.assertEqual((formula[9], formula[10]), ("", ""))
+        self.assertEqual(asha[12], "15 Jan 2026, 03:00 pm")                    # 09:30 UTC = 3 pm IST
         self.assertEqual(formula[3], "'" + FORMULA_NAME)
         self.assertEqual(formula[5], "'@Pune")
 

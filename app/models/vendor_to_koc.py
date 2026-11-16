@@ -67,6 +67,8 @@ class VendorToKocLead(SQLModel, table=True):
     update_status: str | None = Field(default=None, max_length=30)
     additional_comments: str | None = Field(default=None, sa_type=Text)
     follow_up_date: date | None = None
+    quoted_amount: int | None = None                       # rupees; admins set it (PATCH)
+    conversion_amount: int | None = None                   # rupees; admins set it (PATCH)
     status_updated_by: int | None = Field(default=None, foreign_key="crm_users.id")
     status_updated_at: datetime | None = None
     source: str = Field(max_length=20)                     # LeadSource value
@@ -144,6 +146,8 @@ class LeadUpdate(SQLModel):
     update_status: UpdateStatus | None = None
     additional_comments: str | None = Field(default=None, max_length=5000)
     follow_up_date: date | None = None
+    quoted_amount: int | None = Field(default=None, ge=0, le=100_000_000)        # rupees
+    conversion_amount: int | None = Field(default=None, ge=0, le=100_000_000)    # rupees
 
 
 class VendorLeadRead(SQLModel):
@@ -163,6 +167,8 @@ class VendorLeadRead(SQLModel):
     update_status: str | None          # null = pending
     additional_comments: str | None
     follow_up_date: date | None
+    quoted_amount: int | None = None
+    conversion_amount: int | None = None
     status_updated_at: datetime | None
     status_updated_by_name: str | None = None   # who last changed the update (name)
 

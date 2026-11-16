@@ -224,7 +224,8 @@ def _download(content: bytes, file_format: str, filename: str) -> Response:
 
 @router.get("/leads/export", response_class=Response, responses={200: {
     "description": "The file: Sl. No, Vendor (admins only), Date, Name, Phone, City, Update, "
-                   "Additional comments, Follow-up date, Updated by, Updated at.",
+                   "Additional comments, Follow-up date, Quoted amount, Conversion amount, Updated by, "
+                   "Updated at.",
     "content": {lead_export.XLSX_MEDIA_TYPE: {}, "text/csv": {}}}})
 def export_leads(
     db: DbSession,
@@ -282,8 +283,8 @@ def update_lead(lead_id: int, body: LeadUpdate, db: DbSession, admin: AdminUser)
     changes = body.model_dump(exclude_unset=True)
     if not changes:
         raise _unprocessable([{"type": "missing", "loc": ["body"],
-                               "msg": "Send at least one of update_status, "
-                                      "additional_comments, follow_up_date"}])
+                               "msg": "Send at least one of update_status, additional_comments, "
+                                      "follow_up_date, quoted_amount, conversion_amount"}])
     found = crud.get_lead(db, lead_id)
     if found is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Lead not found")

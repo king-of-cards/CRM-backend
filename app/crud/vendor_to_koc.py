@@ -225,14 +225,15 @@ def lead_stats(db: Session, f: LeadFilters, admin: bool, today: date) -> dict:
 
 def export_rows(db: Session, f: LeadFilters, sort: str, order: str, admin: bool) -> list[tuple]:
     """All matching leads in list order, as tuples: (vendor_name, lead_date, name, phone, city,
-    update_status, additional_comments, follow_up_date, updater_name, updater_email,
-    status_updated_at). The table leaves the vendor out for vendor users (their filters are
+    update_status, additional_comments, follow_up_date, quoted_amount, conversion_amount,
+    updater_name, updater_email, status_updated_at). The table leaves the vendor out for vendor users (their filters are
     always their own vendor) and shows only the updater's name to them, never an email."""
     lead = VendorToKocLead
     updater = aliased(User)
     stmt = (
         select(Vendor.name, lead.lead_date, lead.name, lead.phone, lead.city,
                lead.update_status, lead.additional_comments, lead.follow_up_date,
+               lead.quoted_amount, lead.conversion_amount,
                updater.name, updater.email if admin else updater.name, lead.status_updated_at)
         .join(Vendor, col(Vendor.id) == lead.vendor_id)
         .outerjoin(updater, col(updater.id) == lead.status_updated_by)

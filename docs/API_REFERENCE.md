@@ -1123,7 +1123,7 @@ paths, shapes and rules. Base path: `/api/v1/vendor-to-koc`.
 | `GET /leads/export` | all | The same filtered leads as a file (`format=xlsx` (default) or `csv`), see [Export](#export-1) |
 | `GET /leads/template` | any login | The upload template (`format=xlsx` or `csv`): Name, Date, Phone, City and one example row, dates `DD-MM-YYYY` |
 | `GET /leads/{id}` | all | One lead (another vendor's: 404) |
-| `PATCH /leads/{id}` | admin | Any of `update_status`, `additional_comments` (≤ 5,000), `follow_up_date`. Only the fields sent change; `null` clears one (`update_status: null` = back to pending). Records `status_updated_by` / `status_updated_at` |
+| `PATCH /leads/{id}` | admin | Any of `update_status`, `additional_comments` (≤ 5,000), `follow_up_date`, `quoted_amount`, `conversion_amount` (rupees, 0–100,000,000). Vendors: 403. Only the fields sent change; `null` clears one (`update_status: null` = back to pending). Records `status_updated_by` / `status_updated_at` |
 | `GET /vendors` | admin | Every vendor (active and inactive) with `lead_count`: `[{id, name, is_active, lead_count}]` |
 | `POST /vendors` | admin | `{name}`. 409 if the name exists, ignoring case. The vendor gets this CRM's defaults (no areas, not fallback, priority 100); edit them on the Vendors page (`PATCH /api/v1/vendors/{id}`) |
 | `PATCH /vendors/{id}` | admin | `{name?, is_active?}`. 409 on a duplicate name |
@@ -1132,7 +1132,8 @@ paths, shapes and rules. Base path: `/api/v1/vendor-to-koc`.
 **Lead object:**
 - Everyone gets `id, vendor_id, vendor_name, lead_date, name, phone, city, source, created_by,
   created_at, updated_at, update_status (null = pending), additional_comments, follow_up_date,
-  status_updated_at, status_updated_by_name` (the name of who last changed the update).
+  quoted_amount, conversion_amount (rupees, null = not set), status_updated_at,
+  status_updated_by_name` (the name of who last changed the update or the amounts).
 - Admins also get `status_updated_by` (that login's user id).
 
 ### Filters (list, stats and export)
@@ -1160,13 +1161,14 @@ with no paging (50,000 at most; 400 above that).
 
 - **Columns:**
   - Admins: Sl. No, Vendor, Date, Name, Phone, City, Update, Additional comments, Follow-up date,
-    Updated by, Updated at.
+    Quoted amount, Conversion amount, Updated by, Updated at.
   - Vendor logins: the same **without Vendor** (their own leads only). Updated by is a name, never
     an email.
 - **Formats**, as this CRM's list screens and the other exports:
   - dates `13 Dec 2026` (Excel date cells, `dd mmm yyyy`);
   - date-times `14 Nov 2026, 10:30 am` in IST;
   - phones `+91XXXXXXXXXX` as text;
+  - amounts as rupees: Excel number cells with a ₹ format (`₹1,50,000`), CSV plain numbers (`150000`);
   - Update as readable labels (`Pending`, `Converted`, `Already purchased with us`…).
 - **Formula safety:** text never becomes a formula; in CSV, text starting with `=`, `+`, `-`, `@`
   gets a leading `'`.

@@ -30,6 +30,8 @@ CSV_MEDIA_TYPE = "text/csv; charset=utf-8"
 # Exports look like this CRM's list screens: 13 Dec 2026, 14 Nov 2026, 10:30 am (IST), +91 phones
 DATE_FORMAT = "dd mmm yyyy"
 DATETIME_FORMAT = "d mmm yyyy, hh:mm am/pm"
+# ₹1,50,000 (Indian grouping), as the other exports' money cells
+MONEY_FORMAT = '[>=10000000]"₹"##\\,##\\,##\\,##0;[>=100000]"₹"##\\,##\\,##0;"₹"##,##0'
 # The upload template keeps the upload format (dates DD-MM-YYYY), which the import reads
 TEMPLATE_DATE_FORMAT = "DD-MM-YYYY"
 CSV_DANGEROUS_START = ("=", "+", "-", "@", "\t", "\r")
@@ -38,7 +40,7 @@ CSV_DANGEROUS_START = ("=", "+", "-", "@", "\t", "\r")
 @dataclass(frozen=True)
 class Column:
     heading: str
-    kind: str          # "int" | "text" | "phone" | "date" | "datetime"
+    kind: str          # "int" | "text" | "phone" | "date" | "datetime" | "money" (rupees)
     width: int
 
 
@@ -46,7 +48,8 @@ ADMIN_COLUMNS = [
     Column("Sl. No", "int", 8), Column("Vendor", "text", 24), Column("Date", "date", 12),
     Column("Name", "text", 30), Column("Phone", "phone", 14), Column("City", "text", 20),
     Column("Update", "text", 30), Column("Additional comments", "text", 50),
-    Column("Follow-up date", "date", 14), Column("Updated by", "text", 24),
+    Column("Follow-up date", "date", 14), Column("Quoted amount", "money", 16),
+    Column("Conversion amount", "money", 18), Column("Updated by", "text", 24),
     Column("Updated at", "datetime", 18),
 ]
 # Vendor logins: the same without the Vendor column (only their own leads)
@@ -95,11 +98,11 @@ def lead_table(rows: Iterable[tuple], admin: bool) -> tuple[list[Column], list[l
     """Turn export_rows() tuples into (columns, values). Values are Python objects;
     the writers below format them."""
     table = []
-    for i, (vendor, lead_date, name, phone, city, status, comments, follow_up,
+    for i, (vendor, lead_date, name, phone, city, status, comments, follow_up, quoted, conversion,
             updater_name, updater_email, updated_at) in enumerate(rows, start=1):
         row = [
             i, vendor, lead_date, name, display_phone(phone), city,
-            STATUS_LABELS.get(status, status), comments, follow_up,
+            STATUS_LABELS.get(status, status), comments, follow_up, quoted, conversion,
             updater_name or updater_email, to_ist(updated_at),
         ]
         table.append(row if admin else row[:1] + row[2:])         # vendor logins: no Vendor
@@ -136,6 +139,8 @@ def _xlsx_cell(ws, value: Any, kind: str) -> WriteOnlyCell:
         cell.number_format = DATE_FORMAT
     elif kind == "datetime":
         cell.number_format = DATETIME_FORMAT
+    elif kind == "money":
+        cell.number_format = MONEY_FORMAT
     return cell
 
 
@@ -192,8 +197,8 @@ def _csv_value(value: Any, kind: str, upload_format: bool = False) -> str:
         return value.strftime("%d-%m-%Y") if upload_format else display_date(value)
     if kind == "datetime":
         return display_datetime(value)
-    if kind == "int":
-        return str(value)
+    if kind in ("int", "money"):
+        return str(value)                # plain rupees: 150000
     text = str(value)
     if text.startswith(CSV_DANGEROUS_START):
         text = "'" + text           # stops spreadsheet programs from running it as a formula
