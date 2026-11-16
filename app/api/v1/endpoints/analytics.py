@@ -416,16 +416,25 @@ def analytics_overview(viewer: LeadViewer, db: DbSession, period: DashboardPerio
 # ── Vendor -> KOC dashboard ────────────────────────────────────────────
 def _vtk_build(db: Session, vendor_id: int | None, period, admin: bool) -> dict:
     """GET /analytics/vendor-to-koc. Arrival date = created_at (IST day). vendor_id: a vendor
-    login's own leads only; admin: every vendor and the admin-only numbers."""
+    login's own leads only (no previous_received, per_vendor, top_cities, by_source, latest);
+    admin: every vendor and every number."""
     from app.crud.vendor_to_koc import serialize
     from app.models.vendor import Vendor
     from app.models.vendor_to_koc import CLOSED_STATUSES, LeadSource, UpdateStatus, VendorToKocLead
 
     today = periods.today_ist()
-    stmt = select(VendorToKocLead, Vendor.name).join(Vendor, Vendor.id == VendorToKocLead.vendor_id)
+    from sqlalchemy.orm import aliased
+    from app.models.user import User
+
+    updater = aliased(User)
+    stmt = (select(VendorToKocLead, Vendor.name, updater.name)
+            .join(Vendor, Vendor.id == VendorToKocLead.vendor_id)
+            .outerjoin(updater, updater.id == VendorToKocLead.status_updated_by))
     if vendor_id is not None:
         stmt = stmt.where(VendorToKocLead.vendor_id == vendor_id)
-    rows = db.exec(stmt).all()
+    named = db.exec(stmt).all()
+    updater_of = {lead.id: who for lead, _, who in named}
+    rows = [(lead, name) for lead, name, _ in named]
     arrival = [periods.ist_date(lead.created_at) for lead, _ in rows]
 
     if isinstance(period, periods.AllTime):
@@ -468,9 +477,6 @@ def _vtk_build(db: Session, vendor_id: int | None, period, admin: bool) -> dict:
         "inflow": inflow,
         "inflow_vendors": [{"id": vid, "name": legend[vid]} for vid in sorted(legend, key=lambda v: legend[v].lower())],
     }
-    if not admin:
-        return out          # vendor logins: received, change, average per day and inflow only
-
     def is_open(lead) -> bool:
         return lead.update_status is None or lead.update_status not in CLOSED_STATUSES
 
@@ -502,26 +508,31 @@ def _vtk_build(db: Session, vendor_id: int | None, period, admin: bool) -> dict:
     due.sort(key=lambda pair: (pair[0].follow_up_date, pair[0].id))
     latest = sorted(current, key=lambda pair: (pair[0].created_at, pair[0].id), reverse=True)[:6]
 
+    # Everyone (vendor logins: over their own leads only)
     out.update({
         "not_filtered": ["follow_ups_due", "next_follow_ups"],
-        "previous_received": before,
         "pending": status_of.count(None),
         "follow_ups_due": sum(1 for lead, _ in due if lead.follow_up_date <= today),
         "converted": converted,
         "converted_pct": round(converted / received * 100, 1) if received else None,
         "purchased_with_us": status_of.count(UpdateStatus.PURCHASED_WITH_US.value),
         "by_status": {"pending": status_of.count(None), **{s.value: status_of.count(s.value) for s in UpdateStatus}},
-        "per_vendor": vendors_out,
         "funnel": {
             "received": received,
             "updated": sum(1 for s in status_of if s is not None),
             "engaged": sum(1 for s in status_of if s in engaged_statuses),
             "converted": converted,
         },
+        "next_follow_ups": [serialize(lead, name, admin, updater_of[lead.id]) for lead, name in due[:10]],
+    })
+    if not admin:
+        return out
+    out.update({
+        "previous_received": before,
+        "per_vendor": vendors_out,
         "top_cities": _top(Counter(c for c in (_clean_place(lead.city) for lead, _ in current) if c)),
         "by_source": {s.value: sum(1 for lead, _ in current if lead.source == s.value) for s in LeadSource},
-        "latest": [serialize(lead, name, admin=True) for lead, name in latest],
-        "next_follow_ups": [serialize(lead, name, admin=True) for lead, name in due[:10]],
+        "latest": [serialize(lead, name, True, updater_of[lead.id]) for lead, name in latest],
     })
     return out
 
@@ -529,7 +540,8 @@ def _vtk_build(db: Session, vendor_id: int | None, period, admin: bool) -> dict:
 @router.get("/vendor-to-koc")
 def vendor_to_koc_overview(viewer: LeadViewer, db: DbSession, period: DashboardPeriod, refresh: bool = Query(False)):
     """Vendor -> KOC dashboard for a period (same rules as /analytics/overview). Admins: every vendor
-    and every number. Vendor logins: their own leads; received, change_pct, average_per_day, inflow."""
+    and every number. Vendor logins: their own leads, without previous_received, per_vendor,
+    top_cities, by_source and latest."""
     if refresh:
         response_cache.clear("analytics")
     scope = "admin" if viewer.is_admin else ("vendor", viewer.vendor_id)

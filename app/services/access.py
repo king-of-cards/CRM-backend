@@ -1,6 +1,6 @@
 """Who may see and change which lead.
 
-  Admin        sees every lead; assigns vendors; can't change interest / quote / converted.
+  Admin        sees every lead; assigns vendors; can also change interest, quote, converted, notes.
   Vendor user  (crm_users.role = vendor, linked to one vendor in crm_vendor_users) sees only the
                leads whose effective assignment is their vendor, in every source; can change
                interest, quote, converted and notes on those leads; can't assign.

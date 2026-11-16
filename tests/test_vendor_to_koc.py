@@ -25,8 +25,9 @@ BASE = "/api/v1/vendor-to-koc"
 PASSWORD_HASH = hash_password(PASSWORD)   # hash once; Argon2 is slow on purpose
 PHODEO_HEADINGS = ["Sl. No", "Date", "Name", "Event date", "Phone", "City", "Status", "Comment",
                    "Quick reply", "campaign sent", "2nd campaign sent", "3rd campaign sent"]
-ADMIN_FIELDS = {"update_status", "additional_comments", "follow_up_date",
-                "status_updated_by", "status_updated_at"}
+ADMIN_FIELDS = {"status_updated_by"}                       # a user id: admins only
+STATUS_FIELDS = {"update_status", "additional_comments", "follow_up_date",
+                 "status_updated_at", "status_updated_by_name"}   # everyone (vendors: read-only)
 
 
 def phodeo_rows():
@@ -345,27 +346,38 @@ class ScopeTests(VendorToKocTestCase):
         self.assertEqual(self.leads(self.phodeo_id)[0].update_status, "interested")
         self.assertIsNone(self.leads(self.other_id)[0].update_status)
 
-    def test_vendor_responses_never_contain_admin_fields(self):
+    def test_vendor_sees_the_update_read_only_but_no_user_id(self):
         self.assertEqual(ADMIN_ONLY_FIELDS, ADMIN_FIELDS)
+        self.client.patch(f"{BASE}/leads/{self.own}", headers=self.admin, json={"update_status": "will_call_back"})
         items = self.client.get(f"{BASE}/leads", headers=self.phodeo).json()["items"]
         detail = self.client.get(f"{BASE}/leads/{self.own}", headers=self.phodeo).json()
         created = self.client.post(f"{BASE}/leads", headers=self.phodeo,
                                    json={"phone": "9000000003"}).json()
         for obj in (*items, detail, created):
             self.assert_no_admin_fields(obj)
-            self.assertNotIn("admin note", str(obj))
+            self.assertTrue(STATUS_FIELDS <= set(obj), obj)
+        self.assertEqual((detail["update_status"], detail["additional_comments"], detail["follow_up_date"],
+                          detail["status_updated_by_name"]), ("will_call_back", "admin note", "2026-02-01", "Admin"))
+        self.assertIsNotNone(detail["status_updated_at"])
+        self.assertEqual((created["update_status"], created["status_updated_by_name"]), (None, None))
         admin_detail = self.client.get(f"{BASE}/leads/{self.own}", headers=self.admin).json()
-        self.assertTrue(ADMIN_FIELDS <= set(admin_detail))
-        self.assertEqual(admin_detail["additional_comments"], "admin note")
+        self.assertTrue(ADMIN_FIELDS | STATUS_FIELDS <= set(admin_detail))
+        self.assertEqual((admin_detail["status_updated_by"], admin_detail["status_updated_by_name"]),
+                         (self.ids["admin"], "Admin"))
 
-    def test_vendor_cannot_filter_or_sort_by_admin_fields(self):
-        for query in ("update_status=pending", "update_status=converted",
-                      "follow_up_from=2026-01-01", "follow_up_to=2026-12-31",
-                      "sort=update_status", "sort=follow_up_date"):
+    def test_vendor_filters_and_sorts_by_update_and_follow_up_on_own_leads_only(self):
+        self.add_lead(self.other_id, "9000000004", update_status="interested", follow_up_date=date(2026, 2, 1))
+        for query, expected in (("update_status=interested", [self.own]), ("update_status=pending", []),
+                                ("update_status=converted", []), ("follow_up_from=2026-01-01", [self.own]),
+                                ("follow_up_to=2026-01-31", []), ("follow_up_due=true", [self.own]),
+                                ("sort=update_status", [self.own]), ("sort=follow_up_date&order=asc", [self.own]),
+                                (f"vendor_id={self.other_id}&update_status=interested", [self.own])):   # vendor_id ignored
             resp = self.client.get(f"{BASE}/leads?{query}", headers=self.phodeo)
-            self.assertEqual(resp.status_code, 422, query)
-        for query in ("update_status=pending", "sort=follow_up_date"):
-            self.assertEqual(self.client.get(f"{BASE}/leads?{query}", headers=self.admin).status_code, 200)
+            self.assertEqual(resp.status_code, 200, query)
+            self.assertEqual([i["id"] for i in resp.json()["items"]], expected, query)
+        stats = self.client.get(f"{BASE}/leads/stats?update_status=interested", headers=self.phodeo).json()
+        self.assertEqual((stats["total"], stats["by_status"]["interested"]), (1, 1))      # Other's lead not counted
+        self.assertNotIn("by_vendor", stats)
 
     def test_unlinked_vendor_login_gets_403(self):
         unlinked = self.headers("unlinked@example.com")

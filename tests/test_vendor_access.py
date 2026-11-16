@@ -167,16 +167,24 @@ class VendorAccessTest(ApiTestBase, unittest.TestCase):
             self.assertEqual(s.exec(select(LeadMeta).where(LeadMeta.lead_key == "WD_PHODEO")).one().updated_by,
                              self.users["admin"].id)
 
-    def test_admin_cannot_edit_interest_quote_or_converted(self):
+    def test_admin_can_edit_interest_quote_and_converted(self):
         leads = {"wedding": "WD_PHODEO", "whatsapp": "WA_OHP", "wedding_planner": "WP_OHP", "spin": "102"}
+        body = {"interest": "interested", "quoted_amount": 1000, "quoted_date": "2026-11-20", "converted": True}
         for source, key in leads.items():
-            for body in ({"interest": "interested"}, {"quoted_amount": 1000}, {"quoted_date": "2026-11-20"},
-                         {"converted": True}):
-                resp = self.put_crm("admin", source, key, body)
-                self.assertEqual(resp.status_code, 403, (source, body))
-                self.assertIn("assigned vendor", resp.json()["detail"])
+            resp = self.put_crm("admin", source, key, body)
+            self.assertEqual(resp.status_code, 200, (source, resp.text))
+            with Session(self.engine) as s:
+                meta = s.exec(select(LeadMeta).where(LeadMeta.source == source, LeadMeta.lead_key == key)).one()
+                self.assertEqual((meta.interest, meta.quoted_amount, meta.quoted_date, meta.converted),
+                                 ("interested", 1000, date(2026, 11, 20), True), source)
+                self.assertIsNotNone(meta.converted_at)
+                self.assertEqual(meta.updated_by, self.users["admin"].id, source)       # who changed it
+        # The assigned vendor can still change them; updated_by follows the last change
+        resp = self.put_crm("phodeo", "wedding", "WD_PHODEO", {"converted": False})
+        self.assertEqual(resp.status_code, 200, resp.text)
         with Session(self.engine) as s:
-            self.assertEqual(len(s.exec(select(LeadMeta).where(LeadMeta.lead_key != "WA_RJ")).all()), 0)
+            meta = s.exec(select(LeadMeta).where(LeadMeta.lead_key == "WD_PHODEO")).one()
+            self.assertEqual((meta.converted, meta.converted_at, meta.updated_by), (False, None, self.users["phodeo"].id))
 
     def test_vendor_cannot_assign(self):
         for body in ({"vendor_id": self.vendor_ids["phodeo"]}, {"vendor_id": None}):
@@ -246,17 +254,16 @@ class VendorAccessTest(ApiTestBase, unittest.TestCase):
                         items = self.list_items(source)
                         ws = self.export_sheet(source)
                         rows = list(ws.iter_rows(values_only=True))
-                        self.assertEqual(list(rows[0]), HEADERS[source])
+                        # Vendor logins: no Assigned to column
+                        h = HEADERS[source] if who == "admin" else [c for c in HEADERS[source] if c != "Assigned to"]
+                        self.assertEqual(list(rows[0]), h)
                         self.assertEqual(len(rows) - 1, len(items))
-                        h = HEADERS[source]
                         phone_col = h.index("Lead") if source == "whatsapp" else h.index("Contact")
                         for item, row in zip(items, rows[1:]):           # same order as the list
                             phone = item.get("phone_display") or ("+91" + str(item.get("phone")))
                             self.assertEqual(row[phone_col], phone)
-                            self.assertEqual(row[h.index("Assigned to")], assigned_label(item["crm"]))
-                        if who != "admin":
-                            labels = {r[h.index("Assigned to")] for r in rows[1:]}
-                            self.assertTrue(all(label.split(" · ")[0].lower() == who for label in labels), labels)
+                            if who == "admin":
+                                self.assertEqual(row[h.index("Assigned to")], assigned_label(item["crm"]))
         # Formats, as on the screen
         ws = self.export_sheet("wedding")
         h = HEADERS["wedding"]

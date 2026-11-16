@@ -44,7 +44,6 @@ class LeadCrmUpdate(BaseModel):
 
 
 EDITABLE = ("vendor_id", "interest", "converted", "quoted_date", "quoted_amount", "notes")
-VENDOR_ONLY = ("interest", "converted", "quoted_date", "quoted_amount")
 
 
 def _answer(db, source: str, lead_key: str, meta: LeadMeta | None, body: LeadCrmUpdate | None = None) -> dict:
@@ -73,10 +72,10 @@ def get_lead_crm(source: Source, lead_key: str, viewer: LeadViewer, db: DbSessio
 @router.put("/{source}/{lead_key}/crm")
 def save_lead_crm(source: Source, lead_key: str, body: LeadCrmUpdate, viewer: LeadViewer, db: DbSession):
     """Who may change what:
-      vendor_id                                          admins only
-      interest, quoted_amount, quoted_date, converted    only a vendor user of the assigned vendor
-      notes                                              admins and the assigned vendor's users
-    A vendor user can't see other vendors' or unassigned leads: those answer 404."""
+      vendor_id                                                 admins only
+      interest, quoted_amount, quoted_date, converted, notes    admins and the assigned vendor's users
+    A vendor user can't see other vendors' or unassigned leads: those answer 404.
+    updated_by records who saved."""
     if len(lead_key) > 100:
         raise HTTPException(400, "Lead key is too long")
     # crm-… keys belong to leads added/imported in the CRM: they must exist (archived is fine).
@@ -86,8 +85,6 @@ def save_lead_crm(source: Source, lead_key: str, body: LeadCrmUpdate, viewer: Le
     if not access.can_see(db, viewer, source, lead_key):
         raise HTTPException(404, "Lead not found")
     changes = {f: getattr(body, f) for f in EDITABLE if f in body.model_fields_set}
-    if viewer.is_admin and any(f in changes for f in VENDOR_ONLY):
-        raise HTTPException(403, "Only the assigned vendor can change interest, quote and converted.")
     if not viewer.is_admin and "vendor_id" in changes:
         raise HTTPException(403, "Only an admin can assign leads.")
 

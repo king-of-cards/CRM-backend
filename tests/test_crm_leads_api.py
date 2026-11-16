@@ -286,10 +286,10 @@ class CrmLeadsApiTest(ApiTestBase, unittest.TestCase):
         with Session(self.engine) as s:
             before = s.exec(select(CrmSpinLead)).one().model_dump()
 
-        # 2. Set Interest and Quoted amount from the API, as a user of the assigned vendor
-        #    (Jayanagar is a Phodeo branch); an admin may not set them
-        resp = self.put_crm("admin", "spin", key, {"interest": "interested", "quoted_amount": 45000})
-        self.assertEqual(resp.status_code, 403, resp.text)
+        # 2. Set Interest and Quoted amount from the API: an admin first, then a user of the
+        #    assigned vendor (Jayanagar is a Phodeo branch); updated_by is the last one
+        resp = self.put_crm("admin", "spin", key, {"interest": "not_interested", "quoted_amount": 1})
+        self.assertEqual(resp.status_code, 200, resp.text)
         resp = self.put_crm("phodeo", "spin", key, {"interest": "interested", "quoted_amount": 45000})
         self.assertEqual(resp.status_code, 200, resp.text)
 

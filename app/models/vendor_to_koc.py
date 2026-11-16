@@ -147,7 +147,8 @@ class LeadUpdate(SQLModel):
 
 
 class VendorLeadRead(SQLModel):
-    """What vendor users see. The admin-only fields are not part of this schema at all."""
+    """What vendor users see: their own leads, with KOC's update read-only. The admin-only
+    field (status_updated_by, a user id) is not part of this schema at all."""
     id: int
     vendor_id: int
     vendor_name: str
@@ -159,14 +160,15 @@ class VendorLeadRead(SQLModel):
     created_by: int
     created_at: datetime
     updated_at: datetime
-
-
-class AdminLeadRead(VendorLeadRead):
     update_status: str | None          # null = pending
     additional_comments: str | None
     follow_up_date: date | None
-    status_updated_by: int | None
     status_updated_at: datetime | None
+    status_updated_by_name: str | None = None   # who last changed the update (name)
+
+
+class AdminLeadRead(VendorLeadRead):
+    status_updated_by: int | None      # user id
 
 
 # Fields that must never reach a vendor user (checked by the tests)

@@ -81,10 +81,13 @@ class VendorLeadFilterTests(VendorToKocTestCase):
         self.assertEqual(self.got(p, f"vendor_id={self.other_id}"), {"L1", "L2"})            # ignored
         self.assertEqual(self.got(p, "city=bengaluru"), {"L1"})
         self.assertEqual(self.got(p, "date_from=2026-11-16"), {"L2"})
-        resp = self.client.get(f"{BASE}/leads?follow_up_due=true", headers=p)
-        self.assertEqual(resp.status_code, 422)                                              # admin field
+        self.assertEqual(self.got(p, "follow_up_due=true"), {"L1"})                          # not L4 (Other's)
+        self.assertEqual(self.got(p, "update_status=pending"), {"L1"})
+        self.assertEqual(self.got(p, "update_status=interested"), set())                    # L3 is Other's
         stats = self.client.get(f"{BASE}/leads/stats", headers=p).json()
-        self.assertEqual(stats, {"total": 2, "by_source": {"manual": 1, "bulk_upload": 1}})    # no admin numbers
+        self.assertEqual(set(stats), {"total", "by_source", "by_status", "follow_ups_due"})    # no by_vendor
+        self.assertEqual((stats["total"], stats["follow_ups_due"]), (2, 1))
+        self.assertEqual({k: v for k, v in stats["by_status"].items() if v}, {"pending": 1, "converted": 1})
 
     def test_validation(self):
         for query, code, text in (
@@ -103,7 +106,8 @@ class VendorLeadFilterTests(VendorToKocTestCase):
     def test_stats_and_export_match_the_list(self):
         combos = ["", "date_from=2026-11-01", "city=bengaluru", "source=manual", "follow_up_due=true",
                   "update_status=pending&update_status=converted", f"vendor_id={self.phodeo_id}&search=9000"]
-        vendor_combos = ["", "date_from=2026-11-16", "city=mys", "source=bulk_upload"]
+        vendor_combos = ["", "date_from=2026-11-16", "city=mys", "source=bulk_upload", "follow_up_due=true",
+                         "update_status=converted", "sort=follow_up_date"]
         for headers, cases in ((self.admin, combos), (self.phodeo, vendor_combos)):
             for query in cases:
                 listed = self.client.get(f"{BASE}/leads?page_size=100&{query}", headers=headers).json()

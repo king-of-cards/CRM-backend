@@ -1,8 +1,9 @@
 """Vendor to KOC: leads that vendors send to KOC.
 
-Vendor users work only with their own vendor (vendor_id from the login, never from input)
-and never see the admin-only fields (update_status, additional_comments, follow_up_date,
-status_updated_by, status_updated_at). Admins see every vendor and edit those fields.
+Vendor users add leads and work only with their own vendor (vendor_id from the login, never
+from input). They see KOC's update (update_status, additional_comments, follow_up_date,
+status_updated_at, status_updated_by_name) read-only and may filter and sort by it. Admins see
+every vendor and edit those fields (PATCH).
 """
 from dataclasses import dataclass
 from datetime import date
@@ -35,11 +36,9 @@ SortField = Literal[
     "created_at", "updated_at", "lead_date", "name", "city", "phone", "vendor_name",
     "update_status", "follow_up_date",
 ]
-ADMIN_ONLY_SORTS = {"update_status", "follow_up_date"}
 
 LEAD_RESPONSE_DOC = ("Admins get every field. Vendor users get the same object without "
-                     "update_status, additional_comments, follow_up_date, status_updated_by "
-                     "and status_updated_at.")
+                     "status_updated_by (a user id); status_updated_by_name is there for everyone.")
 
 
 def _unprocessable(errors: list[dict]) -> HTTPException:
@@ -154,8 +153,8 @@ def create_lead(body: LeadCreate, db: DbSession, scope: VendorLogin):
     except crud.DuplicateLead:
         raise HTTPException(status.HTTP_409_CONFLICT,
                             "A lead with this phone already exists for this vendor")
-    saved, vendor_name = crud.get_lead(db, lead_id)
-    return crud.serialize(saved, vendor_name, admin=scope.is_admin)
+    lead, vendor_name, updater_name = crud.get_lead(db, lead_id)
+    return crud.serialize(lead, vendor_name, False, updater_name)
 
 
 @dataclass(frozen=True)
@@ -170,12 +169,12 @@ def lead_query(
     period: OptionalPeriod,
     search: str | None = Query(None, description="Matches name, phone or city"),
     vendor_id: list[int] | None = Query(None, description="Admins only, repeatable"),
-    update_status: list[StatusFilter] | None = Query(None, description="Admins only, repeatable"),
+    update_status: list[StatusFilter] | None = Query(None, description="Repeatable; pending = no update yet"),
     lead_date_from: date | None = Query(None, description="The lead's own date from (inclusive)"),
     lead_date_to: date | None = Query(None, description="The lead's own date to (inclusive)"),
-    follow_up_from: date | None = Query(None, description="Admins only"),
-    follow_up_to: date | None = Query(None, description="Admins only"),
-    follow_up_due: bool = Query(False, description="Admins only: follow-up date today or earlier, open leads"),
+    follow_up_from: date | None = Query(None, description="Follow-up date from (inclusive)"),
+    follow_up_to: date | None = Query(None, description="Follow-up date to (inclusive)"),
+    follow_up_due: bool = Query(False, description="Follow-up date today or earlier, open leads"),
     city: str | None = Query(None, max_length=100, description="City contains (case-insensitive)"),
     source: list[Literal["bulk_upload", "manual"]] | None = Query(None, description="Repeatable"),
     sort: SortField = Query("created_at"),
@@ -183,16 +182,7 @@ def lead_query(
 ) -> LeadQuery:
     """Filters, search and sort shared by GET /leads, GET /leads/stats and GET /leads/export.
     date_from / date_to: arrival (created_at), IST days, the other lists' rules (400 when invalid).
-    Vendor users are limited to their own vendor and can't use the admin-only fields (422)."""
-    if not scope.is_admin:
-        forbidden = [name for name, value in (
-            ("update_status", update_status), ("follow_up_from", follow_up_from),
-            ("follow_up_to", follow_up_to), ("follow_up_due", follow_up_due)) if value]
-        if sort in ADMIN_ONLY_SORTS:
-            forbidden.append("sort")
-        if forbidden:
-            raise _unprocessable([{"type": "forbidden", "loc": ["query", name],
-                                   "msg": "Not available for vendor users"} for name in forbidden])
+    Vendor users are always limited to their own vendor (vendor_id is ignored for them)."""
     for low, high, name in ((lead_date_from, lead_date_to, "lead_date"), (follow_up_from, follow_up_to, "follow_up")):
         if low and high and low > high:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{name}_from must be on or before {name}_to")
@@ -233,8 +223,8 @@ def _download(content: bytes, file_format: str, filename: str) -> Response:
 
 
 @router.get("/leads/export", response_class=Response, responses={200: {
-    "description": "The file. Vendor users: Sl. No, Date, Name, Phone, City. Admins also get "
-                   "Vendor, Update, Additional comments, Follow-up date, Updated by, Updated at.",
+    "description": "The file: Sl. No, Vendor (admins only), Date, Name, Phone, City, Update, "
+                   "Additional comments, Follow-up date, Updated by, Updated at.",
     "content": {lead_export.XLSX_MEDIA_TYPE: {}, "text/csv": {}}}})
 def export_leads(
     db: DbSession,
@@ -263,7 +253,7 @@ def export_leads(
 @router.get("/leads/stats")
 def lead_stats(db: DbSession, scope: LeadViewer, query: LeadQueryDep):
     """Header numbers over exactly the leads GET /leads lists for the same filters: total and
-    by_source; admins also by_status (incl. pending), by_vendor and follow_ups_due."""
+    by_source, by_status (incl. pending) and follow_ups_due; admins also by_vendor."""
     return crud.lead_stats(db, query.filters, admin=scope.is_admin, today=periods.today_ist())
 
 
@@ -281,8 +271,8 @@ def get_lead(lead_id: int, db: DbSession, scope: LeadViewer):
     found = crud.get_lead(db, lead_id, vendor_id=None if scope.is_admin else scope.vendor_id)
     if found is None:       # also for another vendor's lead, so its existence isn't revealed
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Lead not found")
-    lead, vendor_name = found
-    return crud.serialize(lead, vendor_name, admin=scope.is_admin)
+    lead, vendor_name, updater_name = found
+    return crud.serialize(lead, vendor_name, scope.is_admin, updater_name)
 
 
 @router.patch("/leads/{lead_id}")
@@ -297,10 +287,9 @@ def update_lead(lead_id: int, body: LeadUpdate, db: DbSession, admin: AdminUser)
     found = crud.get_lead(db, lead_id)
     if found is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Lead not found")
-    lead, _ = found
-    crud.update_lead(db, lead, changes, admin.id)
-    lead, vendor_name = crud.get_lead(db, lead_id)
-    return crud.serialize(lead, vendor_name, admin=True)
+    crud.update_lead(db, found[0], changes, admin.id)
+    lead, vendor_name, updater_name = crud.get_lead(db, lead_id)
+    return crud.serialize(lead, vendor_name, True, updater_name)
 
 
 # ── Vendors (admin only) ───────────────────────────────────────────────

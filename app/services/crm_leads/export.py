@@ -7,7 +7,7 @@ column. Values are what the screen shows:
   date-times   14 Nov 2026, 10:30 am (India time; xlsx: datetime cells)
   phones       +919845012345         (text)
   money        full rupees           (xlsx: number cells with a ₹ format)
-  Assigned to  the chip text: "Phodeo", "Phodeo · auto" or "Unassigned"
+  Assigned to  the chip text: "Phodeo", "Phodeo · auto" or "Unassigned" (admins only)
 The template and the upload parser use the same headers (see fields.py), so an exported file
 can be uploaded back.
 """
@@ -71,8 +71,9 @@ def _g(key: str) -> Callable[[dict], Any]:
     return lambda i: i.get(key)
 
 
+ASSIGNED_HEADER = "Assigned to"         # left out of vendor logins' exports
 CRM_COLUMNS: list[Col] = [
-    ("Assigned to", lambda i: assigned_label(i.get("crm")), "text"),
+    (ASSIGNED_HEADER, lambda i: assigned_label(i.get("crm")), "text"),
     ("Interest", lambda i: INTEREST_LABELS.get(_crm(i, "interest"), _crm(i, "interest")), "text"),
     ("Quoted amount", lambda i: _crm(i, "quoted_amount"), "money"),
     ("Quoted date", lambda i: to_date(_crm(i, "quoted_date")), "date"),

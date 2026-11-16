@@ -18,7 +18,10 @@ from app.services import periods  # noqa: E402
 
 TODAY = date(2026, 11, 16)
 URL = "/api/v1/analytics/vendor-to-koc"
-VENDOR_KEYS = {"generated_at", "today", "period", "received", "change_pct", "average_per_day", "inflow", "inflow_vendors"}
+VENDOR_KEYS = {"generated_at", "today", "period", "received", "change_pct", "average_per_day", "inflow", "inflow_vendors",
+               "not_filtered", "pending", "converted", "converted_pct", "purchased_with_us", "by_status", "funnel",
+               "follow_ups_due", "next_follow_ups"}
+ADMIN_ONLY_KEYS = {"previous_received", "per_vendor", "top_cities", "by_source", "latest"}
 
 
 def utc(*args) -> datetime:
@@ -115,7 +118,17 @@ class VendorDashboardTests(VendorToKocTestCase):
     def test_vendor_login_gets_only_its_own_numbers(self):
         o = self.dash(self.phodeo)
         self.assertEqual(set(o), VENDOR_KEYS)
+        self.assertEqual(set(self.dash()), VENDOR_KEYS | ADMIN_ONLY_KEYS)
         self.assertEqual(o["received"], 3)                                                   # D1, D2, D5
+        # Status numbers over their own leads only (D3, D4 are Other Vendor's)
+        self.assertEqual((o["pending"], o["converted"], o["converted_pct"], o["purchased_with_us"]), (1, 1, 33.3, 1))
+        self.assertEqual({k: v for k, v in o["by_status"].items() if v},
+                         {"pending": 1, "converted": 1, "purchased_with_us": 1})
+        self.assertEqual(o["funnel"], {"received": 3, "updated": 2, "engaged": 1, "converted": 1})
+        self.assertEqual(o["follow_ups_due"], 1)                                             # D1; not D4 (Other's)
+        self.assertEqual([l["name"] for l in o["next_follow_ups"]], ["D1"])
+        self.assertNotIn("status_updated_by", o["next_follow_ups"][0])                      # no user ids
+        self.assertIn("update_status", o["next_follow_ups"][0])
         self.assertEqual([v["name"] for v in o["inflow_vendors"]], ["Phodeo"])
         week = self.dash(self.phodeo, "date_from=2026-11-10&date_to=2026-11-16")
         self.assertEqual((week["received"], week["change_pct"]), (2, 100))                  # D1, D2 vs D5

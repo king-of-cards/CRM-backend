@@ -42,10 +42,6 @@ class Column:
     width: int
 
 
-VENDOR_COLUMNS = [
-    Column("Sl. No", "int", 8), Column("Date", "date", 12), Column("Name", "text", 30),
-    Column("Phone", "phone", 14), Column("City", "text", 20),
-]
 ADMIN_COLUMNS = [
     Column("Sl. No", "int", 8), Column("Vendor", "text", 24), Column("Date", "date", 12),
     Column("Name", "text", 30), Column("Phone", "phone", 14), Column("City", "text", 20),
@@ -53,6 +49,8 @@ ADMIN_COLUMNS = [
     Column("Follow-up date", "date", 14), Column("Updated by", "text", 24),
     Column("Updated at", "datetime", 18),
 ]
+# Vendor logins: the same without the Vendor column (only their own leads)
+VENDOR_COLUMNS = [c for c in ADMIN_COLUMNS if c.heading != "Vendor"]
 TEMPLATE_COLUMNS = [
     Column("Name", "text", 30), Column("Date", "date", 14),
     Column("Phone", "phone", 14), Column("City", "text", 20),
@@ -96,18 +94,16 @@ def display_datetime(value: datetime) -> str:
 def lead_table(rows: Iterable[tuple], admin: bool) -> tuple[list[Column], list[list[Any]]]:
     """Turn export_rows() tuples into (columns, values). Values are Python objects;
     the writers below format them."""
-    if not admin:
-        return VENDOR_COLUMNS, [[i, lead_date, name, display_phone(phone), city]
-                                for i, (lead_date, name, phone, city) in enumerate(rows, start=1)]
     table = []
     for i, (vendor, lead_date, name, phone, city, status, comments, follow_up,
             updater_name, updater_email, updated_at) in enumerate(rows, start=1):
-        table.append([
+        row = [
             i, vendor, lead_date, name, display_phone(phone), city,
             STATUS_LABELS.get(status, status), comments, follow_up,
             updater_name or updater_email, to_ist(updated_at),
-        ])
-    return ADMIN_COLUMNS, table
+        ]
+        table.append(row if admin else row[:1] + row[2:])         # vendor logins: no Vendor
+    return (ADMIN_COLUMNS if admin else VENDOR_COLUMNS), table
 
 
 def template_table() -> tuple[list[Column], list[list[Any]]]:

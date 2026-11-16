@@ -178,17 +178,19 @@ def _check_cap(total: int) -> None:
         )
 
 
-def _export(source: str, format: str, columns, items) -> Response:
+def _export(source: str, format: str, columns, items, viewer) -> Response:
+    if not viewer.is_admin:               # vendor logins: no Assigned to column
+        columns = [c for c in columns if c[0] != export_cols.ASSIGNED_HEADER]
     headers, rows, kinds = export_cols.build(columns, items)
     content, media_type, ext = tabular.write_table(format, SOURCE_LABELS[source], headers, rows, kinds)
     return _file_response(content, media_type, tabular.filename(f"{source}-leads", ext))
 
 
-def _sheet_export(db, source: str, model, module, filters, sort: str, order: str, format: str) -> Response:
+def _sheet_export(db, source: str, model, module, filters, sort: str, order: str, format: str, viewer) -> Response:
     _check_cap(db.exec(select(func.count()).select_from(model).where(*filters)).one())
     rows = db.exec(select(model).where(*filters).order_by(*module.ordering(sort, order))).all()
     items = module.attach_crm(db, [module._out(r) for r in rows])
-    return _export(source, format, export_cols.SHEET_COLUMNS[source], items)
+    return _export(source, format, export_cols.SHEET_COLUMNS[source], items, viewer)
 
 
 @router.get("/whatsapp/export")
@@ -202,7 +204,7 @@ def export_whatsapp(
 ):
     """Exactly the requesting user's International list: same filters (GET /whatsapp-leads) and sort."""
     return _sheet_export(db, "whatsapp", WhatsAppLead, whatsapp_ep, whatsapp_ep.build_filters(db, viewer, f),
-                         sort, order, format)
+                         sort, order, format, viewer)
 
 
 @router.get("/wedding/export")
@@ -216,7 +218,7 @@ def export_wedding(
 ):
     """Exactly the requesting user's Wedding list: same filters (GET /wedding-leads) and sort."""
     return _sheet_export(db, "wedding", WeddingLead, wedding_ep, wedding_ep.build_filters(db, viewer, f),
-                         sort, order, format)
+                         sort, order, format, viewer)
 
 
 @router.get("/wedding_planner/export")
@@ -230,7 +232,7 @@ def export_wedding_planner(
 ):
     """Exactly the requesting user's Wedding planner list: same filters (GET /wedding-plans) and sort."""
     return _sheet_export(db, "wedding_planner", WeddingPlan, planner_ep, planner_ep.build_filters(db, viewer, f),
-                         sort, order, format)
+                         sort, order, format, viewer)
 
 
 @router.get("/spin/export")
@@ -248,7 +250,7 @@ def export_spin(
     _check_cap(total)
     data = spin_ep.merged_page(db, 0, total, f.common.search, sort, order, f.branch, filters, use_cache=False)
     branches = list(branches_by_id(db).values())       # + the built-in stores, as the screen shows them
-    return _export("spin", format, export_cols.spin_columns(data["columns"], branches), data["items"])
+    return _export("spin", format, export_cols.spin_columns(data["columns"], branches), data["items"], viewer)
 
 
 # ── Single lead ────────────────────────────────────────────────────────

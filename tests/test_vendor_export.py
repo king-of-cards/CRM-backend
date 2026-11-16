@@ -16,9 +16,9 @@ from app.services.vendor_lead_import import EXAMPLE_ROW_ERROR  # noqa: E402
 EXPORT, TEMPLATE = f"{BASE}/leads/export", f"{BASE}/leads/template"
 XLSX_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 FORMULA_NAME = '=HYPERLINK("http://evil.example","click")'
-VENDOR_HEADINGS = ["Sl. No", "Date", "Name", "Phone", "City"]
 ADMIN_HEADINGS = ["Sl. No", "Vendor", "Date", "Name", "Phone", "City", "Update",
                   "Additional comments", "Follow-up date", "Updated by", "Updated at"]
+VENDOR_HEADINGS = [h for h in ADMIN_HEADINGS if h != "Vendor"]
 
 
 def xlsx_sheet(resp):
@@ -64,7 +64,7 @@ class ExportTestCase(VendorToKocTestCase):
 
 
 class VendorExportTests(ExportTestCase):
-    def test_vendor_export_has_only_own_leads_and_no_admin_columns(self):
+    def test_vendor_export_has_only_own_leads_with_the_update_and_no_vendor_column(self):
         resp = self.export(self.phodeo, "sort=lead_date&order=asc")
         self.assertEqual(resp.status_code, 200, resp.text)
         self.assertEqual(resp.headers["content-type"], XLSX_TYPE)
@@ -75,14 +75,27 @@ class VendorExportTests(ExportTestCase):
         rows = xlsx_rows(resp)
         self.assertEqual(rows[0], VENDOR_HEADINGS)
         self.assertEqual([r[3] for r in rows[1:]], ["+919000000001", "+919000000002"])   # no Meena
+        asha = rows[1]
+        self.assertEqual(asha[VENDOR_HEADINGS.index("Update")], "Converted")
+        self.assertEqual(asha[VENDOR_HEADINGS.index("Additional comments")], "- call later")
+        self.assertEqual(asha[VENDOR_HEADINGS.index("Follow-up date")], datetime(2026, 2, 1))
+        self.assertEqual(asha[VENDOR_HEADINGS.index("Updated by")], "Admin")             # a name, never an email
+        self.assertEqual(asha[VENDOR_HEADINGS.index("Updated at")], datetime(2026, 1, 15, 15, 0))   # IST
         everything = " ".join(as_text(v) for row in rows for v in row)
-        for admin_value in ("call later", "Converted", "Admin", "Phodeo"):
-            self.assertNotIn(admin_value, everything)
+        for hidden in ("Phodeo", "Meena", "admin@example.com"):                     # no vendor, no other vendor
+            self.assertNotIn(hidden, everything)
+        csv_text = self.export(self.phodeo, "format=csv&sort=lead_date&order=asc")
+        self.assertEqual(csv_rows(csv_text)[0], VENDOR_HEADINGS)
 
-    def test_vendor_cannot_use_admin_filters_or_sorts(self):
-        for query in ("update_status=pending", "follow_up_from=2026-01-01", "sort=update_status",
-                      "sort=follow_up_date"):
-            self.assertEqual(self.export(self.phodeo, query).status_code, 422, query)
+    def test_vendor_filters_by_update_and_follow_up_on_own_leads(self):
+        for query, phones in (("update_status=pending", ["+919000000002"]),
+                              ("update_status=converted", ["+919000000001"]),
+                              ("update_status=interested", []),                     # Meena is Other's
+                              ("follow_up_from=2026-01-01", ["+919000000001"]),
+                              ("sort=follow_up_date&order=asc", ["+919000000001", "+919000000002"])):
+            resp = self.export(self.phodeo, query)
+            self.assertEqual(resp.status_code, 200, query)
+            self.assertEqual([r[3] for r in xlsx_rows(resp)[1:]], phones, query)
 
     def test_vendor_id_from_a_vendor_is_ignored(self):
         rows = xlsx_rows(self.export(self.phodeo, f"vendor_id={self.other_id}"))

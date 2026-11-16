@@ -176,14 +176,22 @@ def _order_by(sort: str, order: str) -> list:
     ]
 
 
-def _lead_dict(lead: VendorToKocLead, vendor_name: str) -> dict:
-    return {**lead.model_dump(), "vendor_name": vendor_name}
+def _lead_dict(lead: VendorToKocLead, vendor_name: str, updater_name: str | None) -> dict:
+    return {**lead.model_dump(), "vendor_name": vendor_name, "status_updated_by_name": updater_name}
 
 
-def serialize(lead: VendorToKocLead, vendor_name: str, admin: bool) -> dict:
-    """Admins get AdminLeadRead; vendor users get VendorLeadRead, which has no admin fields."""
+def _with_names():
+    """(lead, vendor name, updater name) in one query, no N+1."""
+    updater = aliased(User)
+    return (select(VendorToKocLead, Vendor.name, updater.name)
+            .join(Vendor, col(Vendor.id) == VendorToKocLead.vendor_id)
+            .outerjoin(updater, col(updater.id) == VendorToKocLead.status_updated_by))
+
+
+def serialize(lead: VendorToKocLead, vendor_name: str, admin: bool, updater_name: str | None = None) -> dict:
+    """Admins get AdminLeadRead; vendor users get VendorLeadRead (no status_updated_by user id)."""
     schema = AdminLeadRead if admin else VendorLeadRead
-    return schema.model_validate(_lead_dict(lead, vendor_name)).model_dump(mode="json")
+    return schema.model_validate(_lead_dict(lead, vendor_name, updater_name)).model_dump(mode="json")
 
 
 def count_leads(db: Session, f: LeadFilters) -> int:
@@ -191,49 +199,44 @@ def count_leads(db: Session, f: LeadFilters) -> int:
 
 
 def lead_stats(db: Session, f: LeadFilters, admin: bool, today: date) -> dict:
-    """Header numbers over the same filtered leads as the list. Vendor users get no admin fields."""
+    """Header numbers over the same filtered leads as the list. Vendor users (whose filters are
+    always their own vendor) get by_status and follow_ups_due too, but not by_vendor."""
     lead = VendorToKocLead
     conds = _conditions(f)
     by_source = dict(db.exec(select(lead.source, func.count()).where(*conds).group_by(lead.source)).all())
     out = {"total": count_leads(db, f),
            "by_source": {s.value: by_source.get(s.value, 0) for s in LeadSource}}
+    by_status = dict(db.exec(select(lead.update_status, func.count()).where(*conds).group_by(lead.update_status)).all())
+    due = db.exec(select(func.count()).select_from(lead).where(
+        *conds, col(lead.follow_up_date) <= today,
+        or_(col(lead.update_status).is_(None), col(lead.update_status).not_in(sorted(CLOSED_STATUSES))))).one()
+    out["by_status"] = {"pending": by_status.get(None, 0), **{s.value: by_status.get(s.value, 0) for s in UpdateStatus}}
+    out["follow_ups_due"] = due
     if not admin:
         return out
-    by_status = dict(db.exec(select(lead.update_status, func.count()).where(*conds).group_by(lead.update_status)).all())
     by_vendor = db.exec(
         select(Vendor.id, Vendor.name, func.count()).select_from(lead)
         .join(Vendor, col(Vendor.id) == lead.vendor_id).where(*conds)
         .group_by(col(Vendor.id), Vendor.name).order_by(func.count().desc(), Vendor.name)
     ).all()
-    due = db.exec(select(func.count()).select_from(lead).where(
-        *conds, col(lead.follow_up_date) <= today,
-        or_(col(lead.update_status).is_(None), col(lead.update_status).not_in(sorted(CLOSED_STATUSES))))).one()
-    out.update({
-        "by_status": {"pending": by_status.get(None, 0), **{s.value: by_status.get(s.value, 0) for s in UpdateStatus}},
-        "by_vendor": [{"vendor_id": vid, "vendor_name": name, "count": n} for vid, name, n in by_vendor],
-        "follow_ups_due": due,
-    })
+    out["by_vendor"] = [{"vendor_id": vid, "vendor_name": name, "count": n} for vid, name, n in by_vendor]
     return out
 
 
 def export_rows(db: Session, f: LeadFilters, sort: str, order: str, admin: bool) -> list[tuple]:
-    """All matching leads in list order, as tuples. Vendor users get only
-    (lead_date, name, phone, city); admin-only columns aren't even selected for them.
-    Admins get (vendor_name, lead_date, name, phone, city, update_status,
-    additional_comments, follow_up_date, updater_name, updater_email, status_updated_at)."""
+    """All matching leads in list order, as tuples: (vendor_name, lead_date, name, phone, city,
+    update_status, additional_comments, follow_up_date, updater_name, updater_email,
+    status_updated_at). The table leaves the vendor out for vendor users (their filters are
+    always their own vendor) and shows only the updater's name to them, never an email."""
     lead = VendorToKocLead
-    if admin:
-        updater = aliased(User)
-        stmt = (
-            select(Vendor.name, lead.lead_date, lead.name, lead.phone, lead.city,
-                   lead.update_status, lead.additional_comments, lead.follow_up_date,
-                   updater.name, updater.email, lead.status_updated_at)
-            .join(Vendor, col(Vendor.id) == lead.vendor_id)
-            .outerjoin(updater, col(updater.id) == lead.status_updated_by)
-        )
-    else:
-        stmt = (select(lead.lead_date, lead.name, lead.phone, lead.city)
-                .join(Vendor, col(Vendor.id) == lead.vendor_id))   # for sort=vendor_name
+    updater = aliased(User)
+    stmt = (
+        select(Vendor.name, lead.lead_date, lead.name, lead.phone, lead.city,
+               lead.update_status, lead.additional_comments, lead.follow_up_date,
+               updater.name, updater.email if admin else updater.name, lead.status_updated_at)
+        .join(Vendor, col(Vendor.id) == lead.vendor_id)
+        .outerjoin(updater, col(updater.id) == lead.status_updated_by)
+    )
     return list(db.exec(stmt.where(*_conditions(f)).order_by(*_order_by(sort, order))).all())
 
 
@@ -243,25 +246,23 @@ def list_leads(db: Session, f: LeadFilters, sort: str, order: str,
     total = count_leads(db, f)
     offset = (page - 1) * page_size
     rows = db.exec(
-        select(VendorToKocLead, Vendor.name)
-        .join(Vendor, col(Vendor.id) == VendorToKocLead.vendor_id)   # one query, no N+1
+        _with_names()                                                 # one query, no N+1
         .where(*conds)
         .order_by(*_order_by(sort, order))
         .offset(offset)
         .limit(page_size)
     ).all()
-    items = [{"sl_no": offset + i + 1, **serialize(lead, vendor_name, admin)}
-             for i, (lead, vendor_name) in enumerate(rows)]
+    items = [{"sl_no": offset + i + 1, **serialize(lead, vendor_name, admin, updater_name)}
+             for i, (lead, vendor_name, updater_name) in enumerate(rows)]
     return {"items": items, "total": total, "page": page, "page_size": page_size,
             "pages": math.ceil(total / page_size)}
 
 
 def get_lead(db: Session, lead_id: int, vendor_id: int | None = None
-             ) -> tuple[VendorToKocLead, str] | None:
-    """The lead and its vendor name. With vendor_id, only that vendor's lead is found."""
-    stmt = (select(VendorToKocLead, Vendor.name)
-            .join(Vendor, col(Vendor.id) == VendorToKocLead.vendor_id)
-            .where(VendorToKocLead.id == lead_id))
+             ) -> tuple[VendorToKocLead, str, str | None] | None:
+    """The lead, its vendor name and the updater's name. With vendor_id, only that vendor's
+    lead is found."""
+    stmt = _with_names().where(VendorToKocLead.id == lead_id)
     if vendor_id is not None:
         stmt = stmt.where(VendorToKocLead.vendor_id == vendor_id)
     return db.exec(stmt).first()
