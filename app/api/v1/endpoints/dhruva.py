@@ -10,16 +10,19 @@ Paths (prefix /api/v1/dhruva): upload/preview, leads/bulk, leads (POST add, GET 
 leads/stats, leads/export, leads/template, leads/filter-options, leads/{id} (GET, PATCH),
 leads/{id}/archive, leads/{id}/unarchive.
 """
-from typing import Literal
+from dataclasses import dataclass
+from datetime import date, timedelta
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 
-from app.api.deps import AdminUser, DbSession, DhruvaSectionUser
+from app.api.deps import AdminUser, DbSession, DhruvaSectionUser, OptionalPeriod, PageSize
 from app.crud import dhruva as crud
 from app.models.dhruva import ADMIN_FIELDS, DhruvaBulkCreate, DhruvaLeadCreate, DhruvaLeadUpdate
 from app.models.user import Role
+from app.models.vendor_to_koc import STATUS_LABELS
 from app.services import dhruva_import as parser
-from app.services import periods
+from app.services import lead_filters, periods
 from app.services import vendor_lead_export as files
 
 router = APIRouter(prefix="/dhruva", tags=["dhruva leads"])
@@ -134,6 +137,128 @@ def template(_user: DhruvaSectionUser, format: Literal["xlsx", "csv"] = Query("x
     media = files.XLSX_MEDIA_TYPE if format == "xlsx" else files.CSV_MEDIA_TYPE
     return Response(content, media_type=media, headers={
         "Content-Disposition": f'attachment; filename="dhruva_template.{format}"', "Cache-Control": "no-store"})
+
+
+# ── List, stats, export, filter options (one filter definition) ────────
+SortField = Literal["created_at", "updated_at", "event_date", "name", "venue", "event_type", "update_status",
+                    "follow_up_date"]
+StatusFilter = Literal["pending", "converted", "not_converted", "purchased_elsewhere", "purchased_with_us",
+                       "will_call_back", "interested", "not_interested"]
+
+
+@dataclass(frozen=True)
+class ListQuery:
+    filters: crud.DhruvaFilters
+    sort: str
+    order: str
+
+
+def list_query(
+    user: DhruvaSectionUser,
+    db: DbSession,
+    period: OptionalPeriod,
+    search: str | None = Query(None, max_length=100, description="Name, venue, event type, date text, phone"),
+    event_from: str | None = Query(None, description="Event date from, YYYY-MM-DD (included)"),
+    event_to: str | None = Query(None, description="Event date to, YYYY-MM-DD (included)"),
+    upcoming_days: int | None = Query(None, description="Event from today to today + N days"),
+    venue: str | None = Query(None, max_length=100, description="Venue contains (any case)"),
+    event_type: list[str] | None = Query(None, description="Repeatable; event type contains (any case)"),
+    update_status: list[StatusFilter] | None = Query(None, description="Repeatable; pending = no update yet"),
+    quote: str | None = Query(None, description="Quoted amount: has, none, gt:<amount> or lt:<amount>"),
+    conversion: str | None = Query(None, description="Conversion amount: has, none, gt:<amount> or lt:<amount>"),
+    follow_up_from: date | None = Query(None),
+    follow_up_to: date | None = Query(None),
+    follow_up_due: bool = Query(False, description="Follow-up date today or earlier, open leads only"),
+    has_phone: Literal["yes", "no"] | None = Query(None),
+    sort: SortField = Query("created_at"),
+    order: Literal["asc", "desc"] = Query("desc"),
+) -> ListQuery:
+    """Shared by GET /leads, /leads/stats and /leads/export. date_from / date_to: received
+    (created_at), IST days, the other lists' rules. 400 for invalid values."""
+    start = lead_filters._event_day(event_from, "event_from")
+    end = lead_filters._event_day(event_to, "event_to")
+    if upcoming_days is not None:
+        if start or end:
+            raise HTTPException(400, "Use either upcoming_days or event_from / event_to, not both")
+        if not 1 <= upcoming_days <= lead_filters.MAX_UPCOMING_DAYS:
+            raise HTTPException(400, f"upcoming_days must be between 1 and {lead_filters.MAX_UPCOMING_DAYS}")
+        start = periods.today_ist()
+        end = start + timedelta(days=upcoming_days)
+    for low, high, name in ((start, end, "event"), (follow_up_from, follow_up_to, "follow_up")):
+        if low and high and low > high:
+            raise HTTPException(400, f"{name}_from must be on or before {name}_to")
+    created_from, created_to = period.utc_bounds() if period is not None else (None, None)
+    filters = crud.DhruvaFilters(
+        search=search, created_from=created_from, created_to=created_to, event_from=start, event_to=end,
+        venue=(venue or "").strip() or None, event_types=[e.strip() for e in event_type or [] if e.strip()],
+        statuses=list(update_status or []), quote=lead_filters.parse_quote(quote),
+        conversion=lead_filters.parse_quote(conversion, "conversion"),
+        follow_up_from=follow_up_from, follow_up_to=follow_up_to,
+        follow_up_due_by=periods.today_ist() if follow_up_due else None,
+        has_phone=None if has_phone is None else has_phone == "yes",
+    )
+    return ListQuery(filters, sort, order)
+
+
+ListQueryDep = Annotated[ListQuery, Depends(list_query)]
+
+
+@router.get("/leads")
+def list_leads(db: DbSession, user: DhruvaSectionUser, query: ListQueryDep, page: int = Query(1, ge=1),
+               page_size: PageSize = 10):
+    """{items (each with sl_no), total, page, page_size, pages}."""
+    return crud.list_page(db, query.filters, query.sort, query.order, page, page_size, admin=is_admin(user))
+
+
+@router.get("/leads/stats")
+def lead_stats(db: DbSession, _user: DhruvaSectionUser, query: ListQueryDep):
+    """{total, kpis, by_status, no_phone, follow_ups_due, upcoming_30_days} over the same leads."""
+    return crud.stats(db, query.filters, periods.today_ist())
+
+
+EXPORT_COLUMNS = [
+    files.Column("Sl. No", "int", 8), files.Column("Name", "text", 28), files.Column("Venue", "text", 28),
+    files.Column("Date", "date", 18), files.Column("Phone", "phone", 16), files.Column("Alt phone", "phone", 16),
+    files.Column("Event type", "text", 24), files.Column("Update", "text", 28),
+    files.Column("Additional comments", "text", 40), files.Column("Follow-up date", "date", 14),
+    files.Column("Quoted amount", "money", 16), files.Column("Conversion amount", "money", 18),
+    files.Column("Received", "datetime", 18), files.Column("Updated by", "text", 20),
+    files.Column("Updated at", "datetime", 18),
+]
+
+
+@router.get("/leads/export", response_class=Response, responses={200: {
+    "description": "The list as a file: " + ", ".join(c.heading for c in EXPORT_COLUMNS) + ".",
+    "content": {files.XLSX_MEDIA_TYPE: {}, "text/csv": {}}}})
+def export_leads(db: DbSession, _user: DhruvaSectionUser, query: ListQueryDep,
+                 format: Literal["xlsx", "csv"] = Query("xlsx")):
+    """Every lead matching the same filters, in list order (50,000 at most). The same columns for
+    admins and Dhruva logins. It uploads back: every row is then a duplicate."""
+    total = crud.count(db, query.filters)
+    if total > files.EXPORT_MAX_ROWS:
+        raise HTTPException(400, f"The export has {total:,} leads; the limit is {files.EXPORT_MAX_ROWS:,}. "
+                                 "Narrow the filters.")
+    table = []
+    for i, (row, _creator, updater) in enumerate(crud.all_rows(db, query.filters, query.sort, query.order), start=1):
+        table.append([
+            i, row.name, row.venue, row.event_date or row.event_date_text,
+            row.phone_e164 or row.phone, row.alt_phone_e164 or row.alt_phone, row.event_type,
+            STATUS_LABELS.get(row.update_status, row.update_status), row.additional_comments, row.follow_up_date,
+            row.quoted_amount, row.conversion_amount, files.to_ist(row.created_at), updater,
+            files.to_ist(row.status_updated_at),
+        ])
+    content = files.to_xlsx(EXPORT_COLUMNS, table) if format == "xlsx" else files.to_csv(EXPORT_COLUMNS, table)
+    media = files.XLSX_MEDIA_TYPE if format == "xlsx" else files.CSV_MEDIA_TYPE
+    return Response(content, media_type=media, headers={
+        "Content-Disposition": f'attachment; filename="dhruva_leads_{periods.today_ist().isoformat()}.{format}"',
+        "Cache-Control": "no-store"})
+
+
+@router.get("/leads/filter-options")
+def filter_options(db: DbSession, _user: DhruvaSectionUser):
+    """Dropdown values with counts over every listed lead: venues and event types (spellings that
+    differ only in case or spacing are one value), updates (pending first), has_phone, sources."""
+    return crud.filter_options(db)
 
 
 # ── One lead ───────────────────────────────────────────────────────────

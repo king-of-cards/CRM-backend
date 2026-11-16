@@ -1391,3 +1391,43 @@ conversion_amount, follow_up_date, status_updated_at, status_updated_by_name`. A
   `lead_id`). `no_phone` rows are `ok` unless something else is wrong.
 - **Errors:** 400 for an unreadable file, a missing sheet (the message lists the sheets) or no
   heading row; 413 above 5 MB.
+
+### List, stats, export, filter options
+
+`GET /leads`, `GET /leads/stats` and `GET /leads/export` share one filter definition: for the same
+parameters the list `total`, the stats `total` and the export's rows are equal. Archived leads are
+left out. Admins and Dhruva logins: all leads; vendor logins: 403.
+
+| Parameter | Meaning |
+|---|---|
+| `search` | Name, venue, event type, date text, phone or alt phone as written, and phone digits (`98000 00002` finds `+919800000002`) |
+| `date_from`, `date_to` | **Received** (`created_at`), IST days, inclusive, the rules of the other lists (no future dates, at most 366 days) |
+| `event_from`, `event_to` | Event date, `YYYY-MM-DD`, inclusive. Text-only dates never match |
+| `upcoming_days` | Event from today (IST) to today + N, N from 1 to 366 (not with `event_from` / `event_to`) |
+| `venue` | Venue contains, ignoring case ("main palace" finds "Main Palace" and "Main palace") |
+| `event_type` (repeatable) | Event type contains, ignoring case; repeated values: either ("muhurtham" finds "reception, muhurtham") |
+| `update_status` (repeatable) | The 7 Update values, or `pending` (no update yet) |
+| `quote`, `conversion` | Quoted / conversion amount: `has`, `none`, `gt:<amount>`, `lt:<amount>` |
+| `follow_up_from`, `follow_up_to` | Follow-up date range |
+| `follow_up_due=true` | Follow-up date today or earlier, open leads only (not converted, not converted, purchased elsewhere, purchased with us or not interested) |
+| `has_phone` | `yes` / `no` (no phone and no alt phone) |
+| `sort`, `order` | `created_at` (default, `desc`), `updated_at`, `event_date`, `name`, `venue`, `event_type`, `update_status`, `follow_up_date`. Empty values last |
+| `page`, `page_size` | List only. `page_size` 10, 25, 50 or 100 (default 10; others 422) |
+
+Errors (400): event or follow-up `from` after `to`, `upcoming_days` with event dates or outside
+1–366, a bad `quote` / `conversion`, an event date not `YYYY-MM-DD`, and the received-date rules
+of the other lists. Unknown `update_status` / `sort`: 422.
+
+| Method and path | Returns |
+|---|---|
+| `GET /leads` | `{items (lead objects with sl_no), total, page, page_size, pages}` |
+| `GET /leads/stats` | `{total, kpis, by_status (pending + the 7 values), no_phone, follow_ups_due, upcoming_30_days}`; `kpis` is [the same object as the other lists](#kpis-the-same-six-everywhere) |
+| `GET /leads/export` | `format=xlsx` (default) or `csv`, every matching lead in list order (50,000 at most; 400 above). File `dhruva_leads_YYYY-MM-DD.<ext>` |
+| `GET /leads/filter-options` | `{venues, event_types, updates, has_phone, sources}`, each `[{value, count}]` over every listed lead. Venues and event types: spellings that differ only in case or spacing are one value, shown as written most often; an event type like "engagement, wedding" counts for both |
+
+**Export columns** (the same for admins and Dhruva logins, who see the admin fields): Sl. No, Name,
+Venue, Date (a date cell when the date is known, else the text as typed), Phone, Alt phone (E.164,
+or as written when unreadable), Event type, Update (`Pending`, `Converted`, …), Additional
+comments, Follow-up date, Quoted amount, Conversion amount (₹ number cells; CSV plain numbers),
+Received, Updated by (a name), Updated at (IST). Formats and formula safety as the other exports.
+An export uploads back: every row is then a duplicate.

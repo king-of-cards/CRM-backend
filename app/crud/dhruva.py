@@ -1,13 +1,17 @@
 """Database access for Dhruva leads: duplicates, writes, reads."""
+import math
+import re
+from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any
 
-from sqlalchemy import or_
+from sqlalchemy import case, false, func, or_
 from sqlalchemy.orm import aliased
 from sqlmodel import Session, col, select
 
 from app.models.dhruva import DhruvaLead
 from app.models.user import User
+from app.models.vendor_to_koc import CLOSED_STATUSES, UpdateStatus
 from app.services.dhruva_import import CleanLead, name_date_key
 
 DUPLICATE_REASONS = ("in_file", "existing")
@@ -159,3 +163,174 @@ def serialize(row: DhruvaLead, creator_name: str | None, updater_name: str | Non
         out["created_by"] = row.created_by
         out["status_updated_by"] = row.status_updated_by
     return out
+
+
+# ── List, stats, export (one filter definition) ────────────────────────
+LIKE_ESCAPE = "/"
+SORT_COLUMNS = {
+    "created_at": DhruvaLead.created_at, "updated_at": DhruvaLead.updated_at, "event_date": DhruvaLead.event_date,
+    "name": DhruvaLead.name, "venue": DhruvaLead.venue, "event_type": DhruvaLead.event_type,
+    "update_status": DhruvaLead.update_status, "follow_up_date": DhruvaLead.follow_up_date,
+}
+
+
+@dataclass
+class DhruvaFilters:
+    search: str | None = None
+    created_from: datetime | None = None          # received (created_at), aware UTC, [from, to)
+    created_to: datetime | None = None
+    event_from: date | None = None
+    event_to: date | None = None
+    venue: str | None = None                      # contains
+    event_types: list[str] = field(default_factory=list)   # contains, OR
+    statuses: list[str] = field(default_factory=list)      # may contain "pending"
+    quote: tuple[str, int | None] | None = None
+    conversion: tuple[str, int | None] | None = None
+    follow_up_from: date | None = None
+    follow_up_to: date | None = None
+    follow_up_due_by: date | None = None
+    has_phone: bool | None = None
+    ids_in: set[int] | None = None                # also_in=yes
+    ids_not_in: set[int] | None = None            # also_in=no
+
+
+def _like(column, text: str):
+    escaped = text.replace("/", "//").replace("%", "/%").replace("_", "/_")
+    return col(column).ilike(f"%{escaped}%", escape=LIKE_ESCAPE)
+
+
+def _amount(column, quote: tuple[str, int | None]):
+    op, value = quote
+    if op == "has":
+        return col(column).is_not(None)
+    if op == "none":
+        return col(column).is_(None)
+    return col(column) > value if op == "gt" else col(column) < value
+
+
+def conditions(f: DhruvaFilters) -> list:
+    lead = DhruvaLead
+    conds = [col(lead.is_deleted) == False]  # noqa: E712
+    term = (f.search or "").strip()
+    if term:
+        parts = [_like(c, term) for c in (lead.name, lead.venue, lead.event_type, lead.event_date_text,
+                                          lead.phone, lead.alt_phone)]
+        digits = re.sub(r"\D", "", term)
+        if len(digits) >= 3:
+            parts += [col(lead.phone_e164).like(f"%{digits}%"), col(lead.alt_phone_e164).like(f"%{digits}%")]
+        conds.append(or_(*parts))
+    if f.created_from is not None:
+        conds.append(col(lead.created_at) >= f.created_from)
+    if f.created_to is not None:
+        conds.append(col(lead.created_at) < f.created_to)
+    if f.event_from is not None:
+        conds.append(col(lead.event_date) >= f.event_from)
+    if f.event_to is not None:
+        conds.append(col(lead.event_date) <= f.event_to)
+    if f.venue:
+        conds.append(_like(lead.venue, f.venue))
+    if f.event_types:
+        conds.append(or_(*(_like(lead.event_type, t) for t in f.event_types)))
+    if f.statuses:
+        named = [s for s in f.statuses if s != "pending"]
+        options = [col(lead.update_status).in_(named)] if named else []
+        if "pending" in f.statuses:
+            options.append(col(lead.update_status).is_(None))
+        conds.append(or_(*options))
+    if f.quote:
+        conds.append(_amount(lead.quoted_amount, f.quote))
+    if f.conversion:
+        conds.append(_amount(lead.conversion_amount, f.conversion))
+    if f.follow_up_from:
+        conds.append(col(lead.follow_up_date) >= f.follow_up_from)
+    if f.follow_up_to:
+        conds.append(col(lead.follow_up_date) <= f.follow_up_to)
+    if f.follow_up_due_by is not None:
+        conds.append(col(lead.follow_up_date) <= f.follow_up_due_by)
+        conds.append(or_(col(lead.update_status).is_(None), col(lead.update_status).not_in(sorted(CLOSED_STATUSES))))
+    if f.has_phone is not None:
+        has = or_(col(lead.phone_e164).is_not(None), col(lead.alt_phone_e164).is_not(None))
+        conds.append(has if f.has_phone else ~has)
+    if f.ids_in is not None:
+        conds.append(col(lead.id).in_(sorted(f.ids_in)) if f.ids_in else false())
+    if f.ids_not_in:
+        conds.append(col(lead.id).not_in(sorted(f.ids_not_in)))
+    return conds
+
+
+def order_by(sort: str, order: str) -> list:
+    column = SORT_COLUMNS[sort]
+    desc = order == "desc"
+    return [case((column.is_(None), 1), else_=0), column.desc() if desc else column.asc(),
+            col(DhruvaLead.id).desc() if desc else col(DhruvaLead.id).asc()]
+
+
+def count(db: Session, f: DhruvaFilters) -> int:
+    return db.exec(select(func.count()).select_from(DhruvaLead).where(*conditions(f))).one()
+
+
+def list_page(db: Session, f: DhruvaFilters, sort: str, order: str, page: int, page_size: int, admin: bool) -> dict:
+    total = count(db, f)
+    offset = (page - 1) * page_size
+    rows = db.exec(with_names().where(*conditions(f)).order_by(*order_by(sort, order)).offset(offset).limit(page_size)).all()
+    items = [{"sl_no": offset + i + 1, **serialize(*row, admin=admin)} for i, row in enumerate(rows)]
+    return {"items": items, "total": total, "page": page, "page_size": page_size,
+            "pages": math.ceil(total / page_size)}
+
+
+def all_rows(db: Session, f: DhruvaFilters, sort: str, order: str) -> list[tuple]:
+    return list(db.exec(with_names().where(*conditions(f)).order_by(*order_by(sort, order))).all())
+
+
+def stats(db: Session, f: DhruvaFilters, today: date) -> dict:
+    from app.services import kpis
+
+    rows = db.exec(select(DhruvaLead).where(*conditions(f))).all()
+    by_status = {"pending": 0, **{s.value: 0 for s in UpdateStatus}}
+    for r in rows:
+        by_status[r.update_status or "pending"] = by_status.get(r.update_status or "pending", 0) + 1
+    return {
+        "total": len(rows),
+        "kpis": kpis.compute(rows),
+        "by_status": by_status,
+        "no_phone": sum(1 for r in rows if not r.phone_e164 and not r.alt_phone_e164),
+        "follow_ups_due": sum(1 for r in rows if r.follow_up_date is not None and r.follow_up_date <= today
+                              and (r.update_status is None or r.update_status not in CLOSED_STATUSES)),
+        "upcoming_30_days": sum(1 for r in rows if r.event_date is not None
+                                and today <= r.event_date <= date.fromordinal(today.toordinal() + 30)),
+    }
+
+
+def filter_options(db: Session) -> dict:
+    """Dropdown values over every listed (not archived) lead, most common first."""
+    rows = db.exec(select(DhruvaLead.venue, DhruvaLead.event_type, DhruvaLead.update_status, DhruvaLead.phone_e164,
+                          DhruvaLead.alt_phone_e164, DhruvaLead.source).where(col(DhruvaLead.is_deleted) == False)).all()  # noqa: E712
+
+    def ranked(counter: dict[str, list]) -> list[dict]:
+        # Spellings that differ only in case or spacing are one value, shown as written most often
+        out = []
+        for spellings in counter.values():
+            best = max(set(spellings), key=lambda s: (spellings.count(s), s))
+            out.append({"value": best, "count": len(spellings)})
+        return sorted(out, key=lambda o: (-o["count"], o["value"].lower()))
+
+    venues: dict[str, list] = {}
+    types: dict[str, list] = {}
+    for venue, event_type, *_ in rows:
+        if venue:
+            venues.setdefault(re.sub(r"\s+", " ", venue).strip().lower(), []).append(venue)
+        for part in (event_type or "").split(","):
+            part = part.strip()
+            if part:
+                types.setdefault(part.lower(), []).append(part)
+    updates = {"pending": 0, **{s.value: 0 for s in UpdateStatus}}
+    for r in rows:
+        updates[r[2] or "pending"] = updates.get(r[2] or "pending", 0) + 1
+    with_phone = sum(1 for r in rows if r[3] or r[4])
+    return {
+        "venues": ranked(venues),
+        "event_types": ranked(types),
+        "updates": [{"value": k, "count": n} for k, n in updates.items()],
+        "has_phone": [{"value": "yes", "count": with_phone}, {"value": "no", "count": len(rows) - with_phone}],
+        "sources": [{"value": s, "count": sum(1 for r in rows if r[5] == s)} for s in ("manual", "bulk_upload")],
+    }

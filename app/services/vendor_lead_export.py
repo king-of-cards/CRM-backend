@@ -132,7 +132,7 @@ def _xlsx_cell(ws, value: Any, kind: str) -> WriteOnlyCell:
         if kind == "phone":
             cell.number_format = "@"
         return cell
-    if kind in ("text", "phone"):
+    if kind in ("text", "phone") or isinstance(value, str):     # a date column may hold text too
         return _text_cell(ws, value, "@" if kind == "phone" else None)
     cell = WriteOnlyCell(ws, value=value)
     if kind == "date":
@@ -193,9 +193,9 @@ def template_xlsx() -> bytes:
 def _csv_value(value: Any, kind: str, upload_format: bool = False) -> str:
     if value is None:
         return ""
-    if kind == "date":
+    if kind == "date" and not isinstance(value, str):
         return value.strftime("%d-%m-%Y") if upload_format else display_date(value)
-    if kind == "datetime":
+    if kind == "datetime" and not isinstance(value, str):
         return display_datetime(value)
     if kind in ("int", "money"):
         return str(value)                # plain rupees: 150000
