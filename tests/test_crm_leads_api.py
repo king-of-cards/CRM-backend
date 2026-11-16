@@ -100,7 +100,7 @@ WORKFLOW_PHONE = "+919845099999"
 
 
 def fake_list_spin_leads(_admin=None, page=1, page_size=50, search=None, sort=None, order="asc", branch=None,
-                         filters=None, offset=None, limit=None):
+                         filters=None, offset=None, limit=None, keys_only=False):
     start = (page - 1) * page_size if offset is None else offset
     count = page_size if limit is None else limit
     rows = WORKFLOW_ROWS
@@ -118,6 +118,8 @@ def fake_list_spin_leads(_admin=None, page=1, page_size=50, search=None, sort=No
         rows = [r for r in rows if str(r.get("additional_details.pincode") or "").startswith(filters["pincode"])]
     if branch not in (None, ""):
         rows = [r for r in rows if str(r.get("branch_id")) == str(branch)]
+    if keys_only:
+        return {"keys": [str(r["id"]) for r in rows], "total": len(rows)}
     return {"columns": WORKFLOW_COLUMNS, "items": [dict(r) for r in rows[start:start + count]], "total": len(rows),
             "page": page, "page_size": page_size, "branch_column": "branch_id"}
 

@@ -206,6 +206,13 @@ class SheetListFiltersTest(ApiTestBase, unittest.TestCase):
                             exported = [r[header.index(identity[source])] for r in ws.iter_rows(min_row=2, values_only=True)]
                             self.assertEqual(exported, [i["phone_display"] for i in listed["items"]])   # same rows, same order
                             self.assertEqual(stats["total"], listed["total"])
+                            crm = [i["crm"] for i in listed["items"]]
+                            self.assertEqual(stats["kpis"]["total"], listed["total"])
+                            self.assertEqual(stats["kpis"]["converted"], sum(c["update_status"] == "converted" for c in crm))
+                            self.assertEqual(stats["kpis"]["not_interested"],
+                                             sum(c["update_status"] == "not_interested" for c in crm))
+                            self.assertEqual(stats["kpis"]["quoted_total"], sum(c["quoted_amount"] or 0 for c in crm))
+                            self.assertEqual(stats["kpis"]["conversion_total"], sum(c["conversion_amount"] or 0 for c in crm))
 
     # ── Filter options ──
     def test_filter_options_are_scoped_to_the_viewer(self):
@@ -364,6 +371,30 @@ class SpinListFiltersTest(ApiTestBase, unittest.TestCase):
         resp = self.client.get(f"{API}/spin-leads", params={"interest": "interested"})
         self.assertEqual(resp.status_code, 400)
         self.assertIn("replaced by update_status", resp.json()["detail"])
+
+    def test_spin_stats_match_the_list(self):
+        for who, params in (("admin", {}), ("admin", {"update_status": "converted"}), ("admin", {"origin": "workflow"}),
+                            ("admin", {"date_from": "2026-11-10", "date_to": "2026-11-16"}), ("phodeo", {}),
+                            ("rj", {}), ("admin", {"conversion": "has"}), ("admin", {"search": "Spin"})):
+            with self.logged_in(who):
+                listed = self.client.get(f"{API}/spin-leads", params={"page_size": 200, **params}).json()
+                resp = self.client.get(f"{API}/spin-leads/stats", params=params)
+            self.assertEqual(resp.status_code, 200, resp.text)
+            stats = resp.json()
+            self.assertEqual(set(stats), {"total", "kpis"})
+            self.assertEqual((stats["total"], stats["kpis"]["total"]), (listed["total"], listed["total"]), (who, params))
+            crm = [i["crm"] for i in listed["items"]]
+            self.assertEqual(stats["kpis"]["converted"], sum(c["update_status"] == "converted" for c in crm), (who, params))
+            self.assertEqual(stats["kpis"]["quoted_total"], sum(c["quoted_amount"] or 0 for c in crm), (who, params))
+            self.assertEqual(stats["kpis"]["conversion_total"], sum(c["conversion_amount"] or 0 for c in crm), (who, params))
+        with self.logged_in("admin"):
+            everything = self.client.get(f"{API}/spin-leads/stats").json()["kpis"]
+        self.assertEqual(everything, {"total": 4, "interested": 0, "not_interested": 0, "quoted_count": 1,
+                                      "quoted_total": 30000, "converted": 1, "converted_pct": 25.0,
+                                      "conversion_count": 1, "conversion_total": 25000})
+        with self.logged_in("admin"):
+            bad = self.client.get(f"{API}/spin-leads/stats", params={"update_status": "maybe"})
+        self.assertEqual(bad.status_code, 400)
 
     def test_spin_filter_options(self):
         def options(who="admin"):

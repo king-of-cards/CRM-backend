@@ -835,7 +835,7 @@ can't see.
 | `GET /spin-leads` | Their spin leads (workflow and CRM-added). `vendor_id` is ignored. |
 | `GET /spin-leads/filter-options`, `/whatsapp-leads/filter-options`, `/wedding-leads/filter-options`, `/wedding-plans/filter-options` | Dropdown values counted over their leads; no vendors (see [Lead list filters](#10-lead-list-filters)). |
 | `GET /whatsapp-leads`, `/wedding-leads`, `/wedding-plans` | Their leads. |
-| `GET /whatsapp-leads/stats`, `/wedding-leads/stats`, `/wedding-plans/stats` | Numbers over their leads. |
+| `GET /spin-leads/stats`, `/whatsapp-leads/stats`, `/wedding-leads/stats`, `/wedding-plans/stats` | Numbers over their leads. |
 | `GET /analytics/overview` | Built from their leads only, for the period asked (see [Dashboard](#9-dashboard-date-filter)). |
 | `GET /leads/{source}/{lead_key}/crm`, `PUT …/crm` | See [Access](#5-access-who-sees-and-edits-what). |
 | `GET /crm-leads/{source}/export` | Their list. |
@@ -940,8 +940,7 @@ optional. Admins and vendor users; vendor users only ever get their own leads.
   no arrival date.
 - **`period`:** `date_from` is the earliest arrival date among those leads and `date_to` is today.
   `days` counts both ends, `all_time` is `true`, `previous` is `null`, and `granularity` is `"month"`.
-- **No comparison:** `previous_period`, `change_pct` and `average_per_day.previous` are `null`.
-- **`average_per_day.period`:** leads per day over `days`, from the earliest arrival to today.
+- **No comparison:** `previous_period` and `change_pct` are `null`.
 - **`trend`:** one point per calendar month, from the first lead's month to the current month
   (`{date: YYYY-MM-01, end: last day of the month, or today}`).
 - **Limits:** the 366-day limit doesn't apply. Results are cached per viewer like any other period.
@@ -960,6 +959,34 @@ optional. Admins and vendor users; vendor users only ever get their own leads.
 A planner visitor who continues a plan later moves it to that later day; the sheet has no
 separate "submitted" time. Leads with no arrival time are never in a period, so the dashboard doesn't count them.
 
+### KPIs: the same six everywhere
+
+Every lead screen's stats and both dashboards return a `kpis` object with the same keys, computed
+the same way over the leads they cover:
+
+```json
+{"total": 120, "interested": 14, "not_interested": 9, "quoted_count": 11, "quoted_total": 1650000,
+ "converted": 6, "converted_pct": 5.0, "conversion_count": 5, "conversion_total": 720000}
+```
+
+| Key | Meaning |
+|---|---|
+| `total` | Leads counted |
+| `interested`, `not_interested` | Update is "interested" / "not_interested" |
+| `quoted_count`, `quoted_total` | Leads with a quoted amount, and their sum (rupees) |
+| `converted`, `converted_pct` | Update is "converted"; % of `total`, 1 decimal, `null` with no leads |
+| `conversion_count`, `conversion_total` | Leads with a conversion amount, and their sum (rupees) |
+
+The 4 sources read Update and the amounts from `crm_lead_meta` (a lead without CRM details is
+Pending, without amounts); Vendor → KOC from its own columns.
+
+| Where | Covers |
+|---|---|
+| `GET /spin-leads/stats`, `/whatsapp-leads/stats`, `/wedding-leads/stats`, `/wedding-plans/stats` | The list's leads for the same filters (vendor users: their own) |
+| `GET /vendor-to-koc/leads/stats` | The same filtered Vendor → KOC leads (vendors: their own) |
+| `GET /analytics/overview` | `kpis`: every source combined, the period's leads; `outcomes` has the same per source |
+| `GET /analytics/vendor-to-koc` | The period's Vendor → KOC leads (admins: all; vendors: their own) |
+
 ### What each number covers (`/analytics/overview`)
 
 **Every number follows the period:** it counts only leads that arrived in it. The only exception is
@@ -971,16 +998,16 @@ separate "submitted" time. Leads with no arrival time are never in a period, so 
 | `new_in_period` | New in period, tiles' "+N" | Leads that arrived in the period |
 | `previous_period` | Comparison | The same number of days right before `date_from` |
 | `change_pct` | % change | `new_in_period` vs `previous_period`, rounded; `null` when the previous period has 0 |
-| `average_per_day` | Average per day | `{period, previous}`, each per source plus `all`: leads per day, 1 decimal (e.g. 6 leads in 7 days = `0.9`) |
+| `kpis` | KPI tiles | [The six KPIs](#kpis-the-same-six-everywhere) over every source's leads of the period (spin left out when the workflow database can't be read) |
 | `source_mix` | Source mix, tiles' % bar | `[{source, count, pct}]` of `new_in_period` |
 | `trend` | Lead inflow | `[{date, end, <source counts>}]`: one point per day; for periods over 90 days, 7-day buckets starting at `date_from` (the last may be shorter). `period.granularity` says which |
-| `wedding_budget`, `photography_budget`, `guests`, `budget_fit`, `repeats` | Wedding budgets, Budgets & size | Leads that arrived in the period |
+| `photography_budget`, `guests`, `budget_fit`, `repeats` | Budgets & size | Leads that arrived in the period |
 | `sharing` | Shared with partners, Partners callout | Wedding and planner leads that arrived in the period |
 | `top_cities`, `top_countries`, `occasions`, `partners` | Lists | Leads that arrived in the period |
-| `upcoming_30_days` | Events in 30 days | Leads that arrived in the period whose event is from today to today + 30 |
 | `upcoming_by_month` | Upcoming events by month | Leads that arrived in the period, by event month (from this month) |
 | `needs_attention` | Needs attention | `{not_shared, over_budget, total}` among the leads that arrived in the period |
-| `outcomes` | CRM results per source | `{spin, whatsapp, wedding, wedding_planner, all}`, each `{leads, interested, converted, converted_pct, quoted_count, quoted_total}` over the leads that arrived in the period (all of the viewer's leads for `period=all`). `interested` / `converted`: the Update is "interested" / "converted". `converted_pct`: of `leads`, 1 decimal, `null` with no leads. `quoted_count` / `quoted_total`: leads with a quote, and the sum in rupees. The values come from the CRM details (`crm_lead_meta`) with the same lead keys as the lists, so they equal the list totals for `update_status=interested`, `update_status=converted` and `quote=has` with the same dates. `spin` is `null` (and left out of `all`) when the workflow database can't be read |
+| `outcomes` | CRM results per source | `{spin, whatsapp, wedding, wedding_planner, all}`, each [the six KPIs](#kpis-the-same-six-everywhere) plus `leads` (= `total`, kept for the current screen) over the leads that arrived in the period (all of the viewer's leads for `period=all`). `interested` / `converted`: the Update is "interested" / "converted".  The values come from the CRM details (`crm_lead_meta`) with the same lead keys as the lists, so they equal the list totals for `update_status=interested`, `update_status=not_interested`, `update_status=converted`, `quote=has` and `conversion=has` with the same dates, and each list's stats `kpis`. `spin` is `null` (and left out of `all`) when the workflow database can't be read |
+| Removed | | `average_per_day`, `upcoming_30_days` and `wedding_budget` are no longer returned |
 | `this_week`, `last_week` | (current screen) | **Original meaning**, not the period: the last 7 days vs the 7 before. Kept until the screen uses `new_in_period` / `previous_period`, then removed |
 
 Also in the response:
@@ -1003,12 +1030,13 @@ exports and stats take the same parameters (see [Lead list filters](#10-lead-lis
 `GET /spin-leads`, `/whatsapp-leads`, `/wedding-leads` and `/wedding-plans` take the parameters
 below. The same parameters work on:
 - each source's export (`GET /crm-leads/{source}/export`);
-- the stats endpoints (`GET /whatsapp-leads/stats`, `/wedding-leads/stats`, `/wedding-plans/stats`),
-  whose numbers are all computed over the filtered leads.
+- the stats endpoints (`GET /spin-leads/stats`, `/whatsapp-leads/stats`, `/wedding-leads/stats`,
+  `/wedding-plans/stats`), whose numbers are all computed over the filtered leads. Each has
+  [`kpis`](#kpis-the-same-six-everywhere); the sheet sources keep their other numbers
+  (`last_7_days`, `upcoming_events`, …). Spin's returns `{total, kpis}`.
 
 A list, its export and its stats share one filter definition, so for the same parameters the list
-`total`, the export's rows and the stats `total` are always equal. Spin has no stats endpoint; use
-the list's `total`.
+`total`, the export's rows and the stats `total` are always equal.
 
 **Combining:** different parameters combine with AND; repeated values of one parameter
 (`?update_status=interested&update_status=pending`) combine with OR. Vendor users only ever get their own
@@ -1119,7 +1147,7 @@ paths, shapes and rules. Base path: `/api/v1/vendor-to-koc`.
 | `POST /leads/bulk` | vendor | `{leads: [{name, date, phone, city}]}` (at most 5,000). Validates each lead again, saves the valid ones, skips duplicates. Returns `{added, duplicates_skipped, failed, errors: [{index, field, message}]}` |
 | `POST /leads` | vendor | One lead: `{name, date, phone, city}`. 201 with the lead; 409 duplicate; 422 field errors |
 | `GET /leads` | all | The list with [the filters below](#filters-list-stats-and-export), `page`, `page_size` (1–100, default 20). Returns `{items (each with sl_no), total, page, page_size, pages}` |
-| `GET /leads/stats` | all | Header numbers over the same filtered leads: `{total, by_source, by_status (incl. pending), follow_ups_due}`; admins also `by_vendor` |
+| `GET /leads/stats` | all | Header numbers over the same filtered leads: `{total, by_source, by_status (incl. pending), follow_ups_due, kpis}` ([KPIs](#kpis-the-same-six-everywhere)); admins also `by_vendor` |
 | `GET /leads/export` | all | The same filtered leads as a file (`format=xlsx` (default) or `csv`), see [Export](#export-1) |
 | `GET /leads/template` | any login | The upload template (`format=xlsx` or `csv`): Name, Date, Phone, City and one example row, dates `DD-MM-YYYY` |
 | `GET /leads/{id}` | all | One lead (another vendor's: 404) |
@@ -1186,7 +1214,7 @@ same 400 errors. A lead's arrival date is its `created_at`. Results are cached p
 | `period` | all | As in the overview (`granularity` day / week / month) |
 | `received` | all | Leads that arrived in the period |
 | `change_pct` | all | `received` vs the previous period; `null` for all time or with 0 before |
-| `average_per_day` | all | `{period, previous}`; `previous` is `null` for all time |
+| `kpis` | all | [The six KPIs](#kpis-the-same-six-everywhere) over the period's leads (vendors: their own). `average_per_day` was removed |
 | `inflow`, `inflow_vendors` | all | Points `{date, end, total, vendors: {"<vendor id>": n}}` plus the vendor legend `[{id, name}]` |
 | `previous_received` | admin | Leads in the previous period |
 | `pending`, `converted`, `converted_pct`, `purchased_with_us` | all | Over the period's leads (`converted_pct` of `received`, 1 decimal) |

@@ -206,7 +206,10 @@ def lead_stats(db: Session, f: LeadFilters, admin: bool, today: date) -> dict:
     by_source = dict(db.exec(select(lead.source, func.count()).where(*conds).group_by(lead.source)).all())
     out = {"total": count_leads(db, f),
            "by_source": {s.value: by_source.get(s.value, 0) for s in LeadSource}}
+    from app.services import kpis
+
     by_status = dict(db.exec(select(lead.update_status, func.count()).where(*conds).group_by(lead.update_status)).all())
+    out["kpis"] = kpis.compute(db.exec(select(lead).where(*conds)).all())
     due = db.exec(select(func.count()).select_from(lead).where(
         *conds, col(lead.follow_up_date) <= today,
         or_(col(lead.update_status).is_(None), col(lead.update_status).not_in(sorted(CLOSED_STATUSES))))).one()

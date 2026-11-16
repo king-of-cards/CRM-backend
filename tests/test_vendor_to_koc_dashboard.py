@@ -18,7 +18,7 @@ from app.services import periods  # noqa: E402
 
 TODAY = date(2026, 11, 16)
 URL = "/api/v1/analytics/vendor-to-koc"
-VENDOR_KEYS = {"generated_at", "today", "period", "received", "change_pct", "average_per_day", "inflow", "inflow_vendors",
+VENDOR_KEYS = {"generated_at", "today", "period", "received", "change_pct", "kpis", "inflow", "inflow_vendors",
                "not_filtered", "pending", "converted", "converted_pct", "purchased_with_us", "by_status", "funnel",
                "follow_ups_due", "next_follow_ups"}
 ADMIN_ONLY_KEYS = {"previous_received", "per_vendor", "top_cities", "by_source", "latest"}
@@ -74,7 +74,9 @@ class VendorDashboardTests(VendorToKocTestCase):
         o = self.dash()                                         # 18 Oct - 16 Nov; previous 18 Sep - 17 Oct
         self.assertEqual((o["period"]["date_from"], o["period"]["date_to"]), ("2026-10-18", "2026-11-16"))
         self.assertEqual((o["received"], o["previous_received"], o["change_pct"]), (4, 1, 300))
-        self.assertEqual(o["average_per_day"], {"period": 0.1, "previous": 0.0})
+        self.assertNotIn("average_per_day", o)
+        self.assertEqual(o["kpis"], {"total": 4, "interested": 0, "not_interested": 0, "quoted_count": 0, "quoted_total": 0,
+                                     "converted": 1, "converted_pct": 25.0, "conversion_count": 0, "conversion_total": 0})
         self.assertEqual((o["pending"], o["converted"], o["converted_pct"], o["purchased_with_us"]), (1, 1, 25.0, 1))
         self.assertEqual({k: v for k, v in o["by_status"].items() if v},
                          {"pending": 1, "converted": 1, "will_call_back": 1, "purchased_with_us": 1})
@@ -108,7 +110,7 @@ class VendorDashboardTests(VendorToKocTestCase):
     def test_all_time_and_weekly_inflow(self):
         everything = self.dash(query="period=all")
         self.assertEqual((everything["received"], everything["previous_received"], everything["change_pct"]), (5, None, None))
-        self.assertEqual(everything["average_per_day"]["previous"], None)
+        self.assertEqual((everything["kpis"]["total"], everything["kpis"]["interested"]), (5, 1))    # D3 too
         self.assertEqual(everything["period"]["granularity"], "month")
         self.assertEqual([p["date"] for p in everything["inflow"]], ["2026-10-01", "2026-11-01"])
         long = self.dash(query="date_from=2026-08-01&date_to=2026-11-16")
@@ -116,8 +118,19 @@ class VendorDashboardTests(VendorToKocTestCase):
         self.assertEqual(sum(p["total"] for p in long["inflow"]), 5)
 
     def test_vendor_login_gets_only_its_own_numbers(self):
+        # Amounts on D2 (Phodeo) and D4 (Other): each viewer's KPIs count only their own
+        self.client.patch(f"/api/v1/vendor-to-koc/leads/{self.ids_by_name['D2']}", headers=self.admin,
+                          json={"quoted_amount": 100000, "conversion_amount": 90000})
+        self.client.patch(f"/api/v1/vendor-to-koc/leads/{self.ids_by_name['D4']}", headers=self.admin,
+                          json={"quoted_amount": 7000})
+        response_cache.clear()
         o = self.dash(self.phodeo)
         self.assertEqual(set(o), VENDOR_KEYS)
+        self.assertEqual(o["kpis"], {"total": 3, "interested": 0, "not_interested": 0, "quoted_count": 1,
+                                     "quoted_total": 100000, "converted": 1, "converted_pct": 33.3,
+                                     "conversion_count": 1, "conversion_total": 90000})
+        admin = self.dash()
+        self.assertEqual((admin["kpis"]["quoted_count"], admin["kpis"]["quoted_total"]), (2, 107000))
         self.assertEqual(set(self.dash()), VENDOR_KEYS | ADMIN_ONLY_KEYS)
         self.assertEqual(o["received"], 3)                                                   # D1, D2, D5
         # Status numbers over their own leads only (D3, D4 are Other Vendor's)

@@ -85,7 +85,8 @@ class VendorLeadFilterTests(VendorToKocTestCase):
         self.assertEqual(self.got(p, "update_status=pending"), {"L1"})
         self.assertEqual(self.got(p, "update_status=interested"), set())                    # L3 is Other's
         stats = self.client.get(f"{BASE}/leads/stats", headers=p).json()
-        self.assertEqual(set(stats), {"total", "by_source", "by_status", "follow_ups_due"})    # no by_vendor
+        self.assertEqual(set(stats), {"total", "by_source", "by_status", "follow_ups_due", "kpis"})    # no by_vendor
+        self.assertEqual((stats["kpis"]["total"], stats["kpis"]["converted"], stats["kpis"]["converted_pct"]), (2, 1, 50.0))
         self.assertEqual((stats["total"], stats["follow_ups_due"]), (2, 1))
         self.assertEqual({k: v for k, v in stats["by_status"].items() if v}, {"pending": 1, "converted": 1})
 
@@ -116,6 +117,8 @@ class VendorLeadFilterTests(VendorToKocTestCase):
                 self.assertEqual(resp.status_code, 200, (query, resp.text))
                 rows = list(openpyxl.load_workbook(io.BytesIO(resp.content)).active.iter_rows(min_row=2, values_only=True))
                 self.assertEqual(stats["total"], listed["total"], query)
+                self.assertEqual(stats["kpis"]["total"], listed["total"], query)
+                self.assertEqual(stats["kpis"]["converted"], sum(i["update_status"] == "converted" for i in listed["items"]), query)
                 self.assertEqual(len(rows), listed["total"], query)
                 phone_col = 3 if headers is self.phodeo else 4
                 self.assertEqual([r[phone_col] for r in rows], [f"+91{i['phone']}" for i in listed["items"]], query)

@@ -254,7 +254,7 @@ def export_leads(
 @router.get("/leads/stats")
 def lead_stats(db: DbSession, scope: LeadViewer, query: LeadQueryDep):
     """Header numbers over exactly the leads GET /leads lists for the same filters: total and
-    by_source, by_status (incl. pending) and follow_ups_due; admins also by_vendor."""
+    by_source, by_status (incl. pending), follow_ups_due and kpis; admins also by_vendor."""
     return crud.lead_stats(db, query.filters, admin=scope.is_admin, today=periods.today_ist())
 
 

@@ -14,7 +14,7 @@ from sqlmodel import col, select
 
 from app.api.deps import DbSession, LeadViewer, common_filter_params
 from app.models.wedding_lead import WeddingLead
-from app.services import access, lead_crm, lead_filters
+from app.services import access, kpis, lead_crm, lead_filters
 
 router = APIRouter(prefix="/wedding-leads", tags=["wedding-leads"])
 
@@ -193,6 +193,7 @@ def wedding_lead_stats(viewer: LeadViewer, db: DbSession, f: Filters):
         "repeats": count(WeddingLead.is_repeat == True),  # noqa: E712
         "occasions": grouped(WeddingLead.occasion),
         "shared_with": grouped(WeddingLead.shared_with),
+        "kpis": kpis.for_keys(db, "wedding", db.exec(select(WeddingLead.sheet_key).where(active)).all()),
     }
 
 

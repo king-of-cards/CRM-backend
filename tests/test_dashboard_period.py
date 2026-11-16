@@ -119,7 +119,6 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
         self.assertEqual(mix["spin"], (2, 33))
         # Period-filtered numbers
         self.assertEqual(o["sharing"], {"shareable": 2, "shared": 0, "not_shared": 2, "rate": 0})
-        self.assertEqual(o["wedding_budget"]["total"], 2_000_000)
         self.assertEqual(o["photography_budget"]["count"], 1)
         self.assertEqual(o["budget_fit"], {"over": 1})
         self.assertEqual([c["value"] for c in o["top_cities"]], ["Bangalore", "Udaipur"])
@@ -132,14 +131,13 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
         default = self.overview()
         self.assertEqual(default["totals"], {"spin": 3, "whatsapp": 2, "wedding": 2, "wedding_planner": 1, "all": 8})
 
-    def test_average_per_day(self):
-        o = self.overview(date_from="2026-11-10", date_to="2026-11-16")      # 7 days: 6 leads, previous 2
-        self.assertEqual(o["average_per_day"]["period"],
-                         {"spin": 0.3, "whatsapp": 0.3, "wedding": 0.1, "wedding_planner": 0.1, "all": 0.9})
-        self.assertEqual(o["average_per_day"]["previous"],
-                         {"spin": 0.1, "whatsapp": 0.0, "wedding": 0.1, "wedding_planner": 0.0, "all": 0.3})
-        day = self.overview(date_from="2026-11-16", date_to="2026-11-16")
-        self.assertEqual(day["average_per_day"]["period"]["all"], 2.0)      # 1 International + 1 spin on one day
+    def test_removed_kpis_and_kept_ones(self):
+        for params in ({"date_from": "2026-11-10", "date_to": "2026-11-16"}, {"period": "all"}):
+            o = self.overview(**params)
+            for removed in ("average_per_day", "upcoming_30_days", "wedding_budget"):
+                self.assertNotIn(removed, o, (params, removed))
+            for kept in ("sharing", "needs_attention", "outcomes", "kpis", "upcoming_by_month", "photography_budget"):
+                self.assertIn(kept, o, (params, kept))
 
     def test_per_source_arrival_dates(self):
         # Planner: updated_in_sheet_at (14 Nov), not first_seen_at (1 Jan)
@@ -166,7 +164,6 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
         nov = self.overview(date_from="2026-11-01", date_to="2026-11-16")
         # Events within 30 days of today, of leads that arrived in the period: the 10 Nov wedding
         # (event 26 Nov) and spin 501 (16 Nov, event 25 Nov); the October lead's 1 Dec event is left out
-        self.assertEqual(nov["upcoming_30_days"], {"spin": 1, "whatsapp": 0, "wedding": 1, "wedding_planner": 0, "all": 2})
         months = {m["month"]: m for m in nov["upcoming_by_month"]}
         self.assertEqual((months["2026-11"]["wedding"], months["2026-11"]["spin"]), (1, 1))
         self.assertEqual(months["2026-12"]["wedding"], 0)                  # October lead: outside the period
@@ -176,7 +173,6 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
         self.assertEqual(nov["needs_attention"], {"not_shared": 2, "over_budget": 1, "total": 3})
         # A period with no leads: everything is zero
         empty = self.overview(date_from="2026-01-01", date_to="2026-03-31")
-        self.assertEqual(empty["upcoming_30_days"]["all"], 0)
         self.assertEqual(empty["needs_attention"], {"not_shared": 0, "over_budget": 0, "total": 0})
         self.assertTrue(all(m[s] == 0 for m in empty["upcoming_by_month"]
                             for s in ("spin", "whatsapp", "wedding", "wedding_planner")))
@@ -204,10 +200,8 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
                          [("2026-09-01", "2026-09-30"), ("2026-10-01", "2026-10-31"), ("2026-11-01", "2026-11-16")])
         self.assertIsNone(o["previous_period"])
         self.assertIsNone(o["change_pct"])
-        self.assertIsNone(o["average_per_day"]["previous"])
         # Every lead the viewer can see, also the one without an arrival date
         self.assertEqual(o["totals"], {"spin": 3, "whatsapp": 3, "wedding": 3, "wedding_planner": 2, "all": 11})
-        self.assertEqual(o["average_per_day"]["period"]["all"], round(11 / 77, 1))
         dated = sum(p[s] for p in o["trend"] for s in ("spin", "whatsapp", "wedding", "wedding_planner"))
         self.assertEqual(dated, 10)                                  # the undated lead has no month
         self.assertEqual(o["not_filtered"], [])
@@ -217,7 +211,6 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
             self.assertEqual(o["totals"][source], listed, source)
         # Needs attention and upcoming events over all leads
         self.assertEqual(o["needs_attention"], {"not_shared": 3, "over_budget": 2, "total": 5})
-        self.assertEqual(o["upcoming_30_days"]["wedding"], 2)
 
     def test_all_time_vendor_scope_and_errors(self):
         rj = self.overview("rj", period="all")
@@ -243,9 +236,11 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
             s.add_all([
                 LeadMeta(source="whatsapp", lead_key="WA_1600", update_status="converted", quoted_amount=40000,
                          updated_at=NOW),
-                LeadMeta(source="wedding", lead_key="WD_10", update_status="converted", quoted_amount=50000, updated_at=NOW),
+                LeadMeta(source="wedding", lead_key="WD_10", update_status="converted", quoted_amount=50000,
+                         conversion_amount=45000, updated_at=NOW),
                 LeadMeta(source="wedding", lead_key="WD_OCT", update_status="interested", updated_at=NOW),   # October
-                LeadMeta(source="wedding_planner", lead_key="WP_14", quoted_amount=1_000_000, updated_at=NOW),
+                LeadMeta(source="wedding_planner", lead_key="WP_14", update_status="not_interested",
+                         quoted_amount=1_000_000, updated_at=NOW),
                 LeadMeta(source="spin", lead_key="501", update_status="interested", updated_at=NOW),
                 LeadMeta(source="spin", lead_key=crm_key, update_status="converted", updated_at=NOW),
             ])
@@ -253,21 +248,26 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
 
     def test_outcomes_per_source(self):
         self.add_outcomes()
-        o = self.overview(date_from="2026-11-10", date_to="2026-11-16")["outcomes"]
-        self.assertEqual(o["whatsapp"], {"leads": 2, "interested": 0, "converted": 1, "converted_pct": 50.0,
-                                         "quoted_count": 1, "quoted_total": 40000})
-        self.assertEqual(o["wedding"], {"leads": 1, "interested": 0, "converted": 1, "converted_pct": 100.0,
-                                        "quoted_count": 1, "quoted_total": 50000})
-        self.assertEqual(o["wedding_planner"], {"leads": 1, "interested": 0, "converted": 0, "converted_pct": 0.0,
-                                                "quoted_count": 1, "quoted_total": 1_000_000})
-        self.assertEqual(o["spin"], {"leads": 2, "interested": 1, "converted": 1, "converted_pct": 50.0,
-                                     "quoted_count": 0, "quoted_total": 0})
-        self.assertEqual(o["all"], {"leads": 6, "interested": 1, "converted": 3, "converted_pct": 50.0,
-                                    "quoted_count": 3, "quoted_total": 1_090_000})
+        def k(total, interested=0, not_interested=0, quoted=(0, 0), converted=0, conversion=(0, 0)):
+            return {"leads": total, "total": total, "interested": interested, "not_interested": not_interested,
+                    "quoted_count": quoted[0], "quoted_total": quoted[1], "converted": converted,
+                    "converted_pct": round(converted / total * 100, 1) if total else None,
+                    "conversion_count": conversion[0], "conversion_total": conversion[1]}
+
+        overview = self.overview(date_from="2026-11-10", date_to="2026-11-16")
+        o = overview["outcomes"]
+        self.assertEqual(o["whatsapp"], k(2, quoted=(1, 40000), converted=1))
+        self.assertEqual(o["wedding"], k(1, quoted=(1, 50000), converted=1, conversion=(1, 45000)))
+        self.assertEqual(o["wedding_planner"], k(1, not_interested=1, quoted=(1, 1_000_000)))
+        self.assertEqual(o["spin"], k(2, interested=1, converted=1))
+        self.assertEqual(o["all"], k(6, interested=1, not_interested=1, quoted=(3, 1_090_000), converted=3,
+                                     conversion=(1, 45000)))
+        # The top-level KPIs: every source combined (= outcomes.all without "leads")
+        self.assertEqual(overview["kpis"], {key: v for key, v in o["all"].items() if key != "leads"})
         # A period with no leads
-        empty = self.overview(date_from="2026-01-01", date_to="2026-01-31")["outcomes"]["all"]
-        self.assertEqual(empty, {"leads": 0, "interested": 0, "converted": 0, "converted_pct": None,
-                                 "quoted_count": 0, "quoted_total": 0})
+        empty = self.overview(date_from="2026-01-01", date_to="2026-01-31")
+        self.assertEqual(empty["outcomes"]["all"], k(0))
+        self.assertEqual(empty["kpis"]["converted_pct"], None)
         # All time: the October wedding lead's interest counts too
         everything = self.overview(period="all")["outcomes"]
         self.assertEqual(everything["wedding"]["interested"], 1)
@@ -277,8 +277,13 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
     def test_outcomes_equal_the_filtered_list_totals(self):
         self.add_outcomes()
         lists = {"whatsapp": "/whatsapp-leads", "wedding": "/wedding-leads", "wedding_planner": "/wedding-plans"}
-        filters = {"interested": {"update_status": "interested"}, "converted": {"update_status": "converted"},
-                   "quoted_count": {"quote": "has"}}
+        filters = {"interested": {"update_status": "interested"}, "not_interested": {"update_status": "not_interested"},
+                   "converted": {"update_status": "converted"}, "quoted_count": {"quote": "has"},
+                   "conversion_count": {"conversion": "has"}}
+        # Spin is left out here: this test fakes the dashboard's spin rows separately from the spin
+        # list's (test_list_filters checks /spin-leads/stats against the spin list)
+        stats_url = {"whatsapp": "/whatsapp-leads/stats", "wedding": "/wedding-leads/stats",
+                     "wedding_planner": "/wedding-plans/stats"}
         for who in ("admin", "phodeo", "rj"):
             for dates in ({"date_from": "2026-11-01", "date_to": "2026-11-16"}, {}):
                 params = dates or {"period": "all"}
@@ -288,6 +293,12 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
                         for field, flt in filters.items():
                             listed = self.client.get(f"{API}{url}", params={"page_size": 1, **dates, **flt}).json()["total"]
                             self.assertEqual(outcomes[source][field], listed, (who, dates, source, field))
+                    # Each list's stats KPIs (same dates) equal the dashboard's outcomes for that source
+                    for source, url in stats_url.items():
+                        stats = self.client.get(f"{API}{url}", params=dates)
+                        self.assertEqual(stats.status_code, 200, stats.text)
+                        expected = {k: v for k, v in outcomes[source].items() if k != "leads"}
+                        self.assertEqual(stats.json()["kpis"], expected, (who, dates, source))
 
     def test_outcomes_vendor_scope(self):
         self.add_outcomes()

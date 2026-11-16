@@ -13,7 +13,7 @@ from sqlmodel import col, select
 
 from app.api.deps import DbSession, LeadViewer, common_filter_params
 from app.models.whatsapp_lead import WhatsAppLead
-from app.services import access, lead_crm, lead_filters
+from app.services import access, kpis, lead_crm, lead_filters
 
 router = APIRouter(prefix="/whatsapp-leads", tags=["whatsapp-leads"])
 
@@ -152,6 +152,7 @@ def whatsapp_lead_stats(viewer: LeadViewer, db: DbSession, f: Filters):
         "last_7_days": last_7_days,
         "upcoming_events": upcoming_events,
         "top_countries": [{"country": c, "count": n} for c, n in top_countries],
+        "kpis": kpis.for_keys(db, "whatsapp", db.exec(select(WhatsAppLead.sheet_key).where(active)).all()),
     }
 
 

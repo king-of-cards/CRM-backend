@@ -14,7 +14,7 @@ from sqlmodel import col, select
 
 from app.api.deps import DbSession, LeadViewer, common_filter_params
 from app.models.wedding_plan import WeddingPlan
-from app.services import access, lead_crm, lead_filters
+from app.services import access, kpis, lead_crm, lead_filters
 
 router = APIRouter(prefix="/wedding-plans", tags=["wedding-plans"])
 
@@ -224,6 +224,7 @@ def wedding_plan_stats(viewer: LeadViewer, db: DbSession, f: Filters):
         "total_budget": int(total_budget),
         "shared_with": grouped(WeddingPlan.shared_with),
         "last_steps": grouped(WeddingPlan.last_step),
+        "kpis": kpis.for_keys(db, "wedding_planner", db.exec(select(WeddingPlan.plan_id).where(active)).all()),
     }
 
 

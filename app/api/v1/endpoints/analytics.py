@@ -23,7 +23,7 @@ from sqlmodel import Session, select
 
 from app.api.deps import DashboardPeriod, DbSession, LeadViewer
 from app.core import response_cache
-from app.services import access, periods
+from app.services import access, kpis, periods
 from app.db.session import engine, read_engine
 from app.models.lead_meta import LeadMeta
 from app.models.wedding_lead import WeddingLead
@@ -135,18 +135,10 @@ def _counts(rows_by_source: dict[str, list], keep) -> dict[str, int]:
 
 
 def _outcome(metas: list) -> dict:
-    """Numbers over the CRM details of a set of leads (one LeadMeta or None per lead)."""
-    leads = len(metas)
-    converted = sum(1 for m in metas if m is not None and m.update_status == "converted")
-    quoted = [m.quoted_amount for m in metas if m is not None and m.quoted_amount is not None]
-    return {
-        "leads": leads,
-        "interested": sum(1 for m in metas if m is not None and m.update_status == "interested"),
-        "converted": converted,
-        "converted_pct": round(converted / leads * 100, 1) if leads else None,
-        "quoted_count": len(quoted),
-        "quoted_total": sum(quoted),
-    }
+    """The KPIs (app/services/kpis.py) over a set of leads (one LeadMeta or None per lead), plus
+    "leads" (= total, kept for the existing screen)."""
+    numbers = kpis.compute(metas)
+    return {"leads": numbers["total"], **numbers}
 
 
 def _outcomes(db: Session, keys_by_source: dict[str, list[str]], spin_available: bool) -> dict:
@@ -262,7 +254,6 @@ def _build(db: Session, keys: dict[str, set[str]] | None = None,
         if m > 12:
             y, m = y + 1, 1
     upcoming = {k: dict.fromkeys(SOURCES, 0) for k in months}
-    next_30 = dict.fromkeys(SOURCES, 0)
     for source, items in events.items():
         for event, d in zip(items, arrival[source]):
             if not in_period(d) or event is None or event < today.replace(day=1):
@@ -270,8 +261,6 @@ def _build(db: Session, keys: dict[str, set[str]] | None = None,
             key = f"{event.year:04d}-{event.month:02d}"
             if key in upcoming:
                 upcoming[key][source] += 1
-            if today <= event <= today + timedelta(days=30):
-                next_30[source] += 1
 
     # Everything below: leads that arrived in the period
     wa_p = [r for r, d in zip(wa, arrival["whatsapp"]) if in_period(d)]
@@ -301,7 +290,6 @@ def _build(db: Session, keys: dict[str, set[str]] | None = None,
     not_shared = sum(1 for r in wd_p if not r[5]) + sum(1 for r in wp_p if not r[7])
 
     photo_budgets = [r[4] for r in wd_p if r[4]]
-    wedding_budgets = [r[3] for r in wp_p if r[3]]
     guests = [r[6] for r in wp_p if r[6]]
     fits = Counter("fits" if r[5] is True else "over" if r[5] is False else "unknown" for r in wp_p)
 
@@ -320,9 +308,6 @@ def _build(db: Session, keys: dict[str, set[str]] | None = None,
     known_totals = [v for v in totals.values() if v is not None]
     new_all = sum(new.values())
     before_all = sum(before.values()) if before is not None else None
-
-    def per_day(counts: dict[str, int], total: int, days: int) -> dict:
-        return {**{s: round(counts[s] / days, 1) for s in SOURCES}, "all": round(total / days, 1)}
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "today": today.isoformat(),
@@ -335,10 +320,8 @@ def _build(db: Session, keys: dict[str, set[str]] | None = None,
         "previous_period": {**before, "all": before_all} if before is not None else None,
         "change_pct": ({**{s: _change(new[s], before[s]) for s in SOURCES}, "all": _change(new_all, before_all)}
                        if before is not None else None),
-        "average_per_day": {
-            "period": per_day(new, new_all, period.days),
-            "previous": per_day(before, before_all, previous.days) if previous else None,
-        },
+        # The six KPIs over every source's leads of the period (outcomes has them per source)
+        "kpis": {k: outcomes["all"][k] for k in kpis.KEYS},
         "source_mix": [
             {"source": s, "count": new[s], "pct": round(new[s] / new_all * 100) if new_all else 0} for s in SOURCES
         ],
@@ -347,7 +330,6 @@ def _build(db: Session, keys: dict[str, set[str]] | None = None,
         "last_week": {**last_week, "all": sum(last_week.values())},
         "trend": trend,
         "upcoming_by_month": [{"month": k, **v} for k, v in upcoming.items()],
-        "upcoming_30_days": {**next_30, "all": sum(next_30.values())},
         "outcomes": outcomes,
         "needs_attention": {
             "not_shared": open_not_shared,
@@ -365,7 +347,6 @@ def _build(db: Session, keys: dict[str, set[str]] | None = None,
             "rate": round((shareable - not_shared) / shareable * 100) if shareable else None,
         },
         "photography_budget": money(photo_budgets),
-        "wedding_budget": money(wedding_budgets),
         "guests": {"average": round(statistics.mean(guests)) if guests else None, "total": sum(guests)},
         "budget_fit": dict(fits),
         "repeats": sum(1 for r in wd_p if r[6]),
@@ -470,10 +451,7 @@ def _vtk_build(db: Session, vendor_id: int | None, period, admin: bool) -> dict:
         "period": period.as_dict(),
         "received": received,
         "change_pct": _change(received, before) if before is not None else None,
-        "average_per_day": {
-            "period": round(received / period.days, 1),
-            "previous": round(before / previous.days, 1) if previous else None,
-        },
+        "kpis": kpis.compute(lead for lead, _ in current),      # the period's leads (vendors: their own)
         "inflow": inflow,
         "inflow_vendors": [{"id": vid, "name": legend[vid]} for vid in sorted(legend, key=lambda v: legend[v].lower())],
     }

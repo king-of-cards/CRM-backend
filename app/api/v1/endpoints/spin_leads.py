@@ -400,8 +400,10 @@ def list_spin_leads(
     filters: dict | None = None,
     offset: int | None = None,
     limit: int | None = None,
+    keys_only: bool = False,
 ):
     """offset/limit override page/page_size (used to page after the CRM's own spin leads).
+    keys_only=True: {"keys": [every matching lead id as text], "total"}, no rows (stats).
 
     filters (all optional):
       pincode        leads whose pincode starts with this
@@ -521,6 +523,14 @@ def list_spin_leads(
                 conditions.append(day <= bindparam(None, flt["event_to"], type_=Text))
     if flt.get("no_workflow"):
         conditions.append(false())                     # origin asked for has no workflow leads
+
+    if keys_only:
+        try:
+            with read_engine.connect() as conn:
+                keys = [str(k) for k in conn.execute(select(pk_text).where(*conditions)).scalars()]
+        except SQLAlchemyError as exc:
+            raise _db_error(exc, "query")
+        return {"keys": keys, "total": len(keys)}
 
     query = (
         select(*(e.label(f"f{i}") for i, e in enumerate(select_exprs)))
@@ -660,6 +670,19 @@ def spin_leads_filter_options(viewer: LeadViewer, db: DbSession):
         "updates": lead_filters.update_options(db, "spin", keys),
         "vendors": lead_filters.vendor_options(db, viewer),
     }
+
+
+@router.get("/stats")
+def spin_lead_stats(viewer: LeadViewer, db: DbSession, f: Filters):
+    """{total, kpis} over exactly the leads the list shows for the same filters (workflow and
+    CRM leads; vendor users: their own). total equals the list's total."""
+    from app.services import crm_spin_leads, kpis
+
+    filters = filters_for(db, viewer, f)
+    added = crm_spin_leads.matching(db, f.common.search, None, "asc", f.branch, filters)
+    workflow = list_spin_leads(None, 1, 1, f.common.search, None, "asc", f.branch, filters or None, keys_only=True)
+    keys = [lead.lead_key for lead in added] + list(workflow["keys"])
+    return {"total": len(keys), "kpis": kpis.for_keys(db, "spin", keys)}
 
 
 @router.get("")
