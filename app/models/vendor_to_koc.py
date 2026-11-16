@@ -36,6 +36,13 @@ STATUS_LABELS = {
 }
 
 
+# Statuses after which nothing more is expected: their follow-ups are never "due"
+CLOSED_STATUSES = frozenset({
+    UpdateStatus.CONVERTED.value, UpdateStatus.NOT_CONVERTED.value, UpdateStatus.PURCHASED_ELSEWHERE.value,
+    UpdateStatus.PURCHASED_WITH_US.value, UpdateStatus.NOT_INTERESTED.value,
+})
+
+
 class LeadSource(str, Enum):
     MANUAL = "manual"
     BULK_UPLOAD = "bulk_upload"

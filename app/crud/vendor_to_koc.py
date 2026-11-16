@@ -11,7 +11,9 @@ from sqlmodel import Session, col, select
 
 from app.models.user import User
 from app.models.vendor import Vendor
-from app.models.vendor_to_koc import AdminLeadRead, LeadSource, VendorLeadRead, VendorRead, VendorToKocLead
+from app.models.vendor_to_koc import (
+    CLOSED_STATUSES, AdminLeadRead, LeadSource, UpdateStatus, VendorLeadRead, VendorRead, VendorToKocLead,
+)
 from app.models.vendor_user import VendorUser
 from app.services.vendor_lead_import import CleanLead
 
@@ -104,10 +106,15 @@ class LeadFilters:
     vendor_ids: list[int] | None = None      # None: no vendor filter
     search: str | None = None
     statuses: list[str] | None = None        # may contain "pending" (= NULL)
-    date_from: date | None = None
-    date_to: date | None = None
+    created_from: datetime | None = None     # arrival (created_at), aware UTC, [from, to)
+    created_to: datetime | None = None
+    lead_date_from: date | None = None       # the lead's own date
+    lead_date_to: date | None = None
     follow_up_from: date | None = None
     follow_up_to: date | None = None
+    follow_up_due_by: date | None = None     # follow_up_date <= this, open statuses only
+    city: str | None = None                  # contains, ignoring case
+    sources: list[str] | None = None         # bulk_upload / manual
 
 
 def _conditions(f: LeadFilters) -> list:
@@ -134,10 +141,22 @@ def _conditions(f: LeadFilters) -> list:
         if "pending" in f.statuses:
             options.append(col(lead.update_status).is_(None))
         conds.append(or_(*options))
-    if f.date_from:
-        conds.append(col(lead.lead_date) >= f.date_from)
-    if f.date_to:
-        conds.append(col(lead.lead_date) <= f.date_to)
+    if f.created_from is not None:
+        conds.append(col(lead.created_at) >= f.created_from)
+    if f.created_to is not None:
+        conds.append(col(lead.created_at) < f.created_to)
+    if f.lead_date_from:
+        conds.append(col(lead.lead_date) >= f.lead_date_from)
+    if f.lead_date_to:
+        conds.append(col(lead.lead_date) <= f.lead_date_to)
+    if f.follow_up_due_by is not None:
+        conds.append(col(lead.follow_up_date) <= f.follow_up_due_by)
+        conds.append(or_(col(lead.update_status).is_(None), col(lead.update_status).not_in(sorted(CLOSED_STATUSES))))
+    if f.city:
+        escaped_city = f.city.replace("/", "//").replace("%", "/%").replace("_", "/_")
+        conds.append(col(lead.city).ilike(f"%{escaped_city}%", escape=LIKE_ESCAPE))
+    if f.sources:
+        conds.append(col(lead.source).in_(f.sources))
     if f.follow_up_from:
         conds.append(col(lead.follow_up_date) >= f.follow_up_from)
     if f.follow_up_to:
@@ -169,6 +188,32 @@ def serialize(lead: VendorToKocLead, vendor_name: str, admin: bool) -> dict:
 
 def count_leads(db: Session, f: LeadFilters) -> int:
     return db.exec(select(func.count()).select_from(VendorToKocLead).where(*_conditions(f))).one()
+
+
+def lead_stats(db: Session, f: LeadFilters, admin: bool, today: date) -> dict:
+    """Header numbers over the same filtered leads as the list. Vendor users get no admin fields."""
+    lead = VendorToKocLead
+    conds = _conditions(f)
+    by_source = dict(db.exec(select(lead.source, func.count()).where(*conds).group_by(lead.source)).all())
+    out = {"total": count_leads(db, f),
+           "by_source": {s.value: by_source.get(s.value, 0) for s in LeadSource}}
+    if not admin:
+        return out
+    by_status = dict(db.exec(select(lead.update_status, func.count()).where(*conds).group_by(lead.update_status)).all())
+    by_vendor = db.exec(
+        select(Vendor.id, Vendor.name, func.count()).select_from(lead)
+        .join(Vendor, col(Vendor.id) == lead.vendor_id).where(*conds)
+        .group_by(col(Vendor.id), Vendor.name).order_by(func.count().desc(), Vendor.name)
+    ).all()
+    due = db.exec(select(func.count()).select_from(lead).where(
+        *conds, col(lead.follow_up_date) <= today,
+        or_(col(lead.update_status).is_(None), col(lead.update_status).not_in(sorted(CLOSED_STATUSES))))).one()
+    out.update({
+        "by_status": {"pending": by_status.get(None, 0), **{s.value: by_status.get(s.value, 0) for s in UpdateStatus}},
+        "by_vendor": [{"vendor_id": vid, "vendor_name": name, "count": n} for vid, name, n in by_vendor],
+        "follow_ups_due": due,
+    })
+    return out
 
 
 def export_rows(db: Session, f: LeadFilters, sort: str, order: str, admin: bool) -> list[tuple]:

@@ -427,7 +427,8 @@ class ListTests(VendorToKocTestCase):
         self.assertEqual(sorted(self.ids_for("update_status=pending")), [self.b, self.c])
         self.assertEqual(sorted(self.ids_for("update_status=pending&update_status=converted")),
                          [self.a, self.b, self.c])
-        self.assertEqual(self.ids_for("date_from=2026-01-01&date_to=2026-01-31"), [self.a])
+        # This backend: the lead's own date is lead_date_from / lead_date_to (date_from = arrival)
+        self.assertEqual(self.ids_for("lead_date_from=2026-01-01&lead_date_to=2026-01-31"), [self.a])
         self.assertEqual(self.ids_for("follow_up_from=2026-02-15&follow_up_to=2026-03-15"), [self.a])
         self.assertEqual(self.ids_for("search=asha"), [self.a])
         self.assertEqual(self.ids_for("search=pune"), [self.c])

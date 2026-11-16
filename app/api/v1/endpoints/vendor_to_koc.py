@@ -10,7 +10,7 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 
-from app.api.deps import AdminUser, CurrentUser, DbSession, LeadViewer
+from app.api.deps import AdminUser, CurrentUser, DbSession, LeadViewer, OptionalPeriod
 from app.crud import vendor_to_koc as crud
 from app.services import vendor_lead_export as lead_export
 from app.models.user import Role, User
@@ -18,6 +18,7 @@ from app.models.vendor import Vendor
 from app.models.vendor_to_koc import (
     LeadBulkCreate, LeadCreate, LeadUpdate, UpdateStatus, VendorCreate, VendorRead, VendorUpdate, VendorUserLink,
 )
+from app.services import periods
 from app.services.access import Viewer
 from app.services.vendor_lead_import import (
     MAX_FILE_BYTES, PHONE_RE, ImportFileError, flag_template_example, parse_file_date,
@@ -162,31 +163,43 @@ class LeadQuery:
 
 def lead_query(
     scope: LeadViewer,
+    period: OptionalPeriod,
     search: str | None = Query(None, description="Matches name, phone or city"),
     vendor_id: list[int] | None = Query(None, description="Admins only, repeatable"),
     update_status: list[StatusFilter] | None = Query(None, description="Admins only, repeatable"),
-    date_from: date | None = Query(None, description="Lead date from (inclusive)"),
-    date_to: date | None = Query(None, description="Lead date to (inclusive)"),
+    lead_date_from: date | None = Query(None, description="The lead's own date from (inclusive)"),
+    lead_date_to: date | None = Query(None, description="The lead's own date to (inclusive)"),
     follow_up_from: date | None = Query(None, description="Admins only"),
     follow_up_to: date | None = Query(None, description="Admins only"),
+    follow_up_due: bool = Query(False, description="Admins only: follow-up date today or earlier, open leads"),
+    city: str | None = Query(None, max_length=100, description="City contains (case-insensitive)"),
+    source: list[Literal["bulk_upload", "manual"]] | None = Query(None, description="Repeatable"),
     sort: SortField = Query("created_at"),
     order: Literal["asc", "desc"] = Query("desc"),
 ) -> LeadQuery:
-    """Filters, search and sort shared by GET /leads and GET /leads/export.
-    Vendor users are limited to their own vendor and can't use the admin-only fields."""
+    """Filters, search and sort shared by GET /leads, GET /leads/stats and GET /leads/export.
+    date_from / date_to: arrival (created_at), IST days, the other lists' rules (400 when invalid).
+    Vendor users are limited to their own vendor and can't use the admin-only fields (422)."""
     if not scope.is_admin:
         forbidden = [name for name, value in (
             ("update_status", update_status), ("follow_up_from", follow_up_from),
-            ("follow_up_to", follow_up_to)) if value]
+            ("follow_up_to", follow_up_to), ("follow_up_due", follow_up_due)) if value]
         if sort in ADMIN_ONLY_SORTS:
             forbidden.append("sort")
         if forbidden:
             raise _unprocessable([{"type": "forbidden", "loc": ["query", name],
                                    "msg": "Not available for vendor users"} for name in forbidden])
+    for low, high, name in ((lead_date_from, lead_date_to, "lead_date"), (follow_up_from, follow_up_to, "follow_up")):
+        if low and high and low > high:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{name}_from must be on or before {name}_to")
+    created_from, created_to = period.utc_bounds() if period is not None else (None, None)
     filters = crud.LeadFilters(
         vendor_ids=(vendor_id or None) if scope.is_admin else [scope.vendor_id],
-        search=search, statuses=update_status, date_from=date_from, date_to=date_to,
+        search=search, statuses=update_status, created_from=created_from, created_to=created_to,
+        lead_date_from=lead_date_from, lead_date_to=lead_date_to,
         follow_up_from=follow_up_from, follow_up_to=follow_up_to,
+        follow_up_due_by=periods.today_ist() if follow_up_due else None,
+        city=(city or "").strip() or None, sources=source or None,
     )
     return LeadQuery(filters=filters, sort=sort, order=order)
 
@@ -241,6 +254,13 @@ def export_leads(
     else:
         prefix = lead_export.filename_slug(db.get(Vendor, scope.vendor_id).name)
     return _download(content, format, f"{prefix}_leads_{lead_export.today_ist().isoformat()}")
+
+
+@router.get("/leads/stats")
+def lead_stats(db: DbSession, scope: LeadViewer, query: LeadQueryDep):
+    """Header numbers over exactly the leads GET /leads lists for the same filters: total and
+    by_source; admins also by_status (incl. pending), by_vendor and follow_ups_due."""
+    return crud.lead_stats(db, query.filters, admin=scope.is_admin, today=periods.today_ist())
 
 
 @router.get("/leads/template", response_class=Response, responses={200: {
