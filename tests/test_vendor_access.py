@@ -215,6 +215,15 @@ class VendorAccessTest(ApiTestBase, unittest.TestCase):
                 self.client.get(f"{API}/users"),
             ]
             self.assertEqual([r.status_code for r in calls], [403] * len(calls))
+            # Adding / uploading on all 4 KOC -> Vendors sources stays admin-only (spin single add included)
+            for source in ("spin", "whatsapp", "wedding", "wedding_planner"):
+                adds = [
+                    self.client.post(f"{API}/crm-leads/{source}", json={"values": {"phone": "9845500005"}}),
+                    self.client.get(f"{API}/crm-leads/{source}/template"),
+                    self.client.post(f"{API}/crm-leads/{source}/import/preview", files={"file": ("u.xlsx", upload, XLSX)}),
+                    self.client.post(f"{API}/crm-leads/{source}/import", json={"rows": [{"row": 2, "values": {"phone": "9845500006"}}]}),
+                ]
+                self.assertEqual([r.status_code for r in adds], [403] * len(adds), source)
             # What a vendor login may read about itself
             me = self.client.get(f"{API}/auth/me").json()
             self.assertEqual(me["vendor"], {"id": self.vendor_ids["phodeo"], "name": "Phodeo"})

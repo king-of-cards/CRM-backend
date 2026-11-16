@@ -194,15 +194,15 @@ class RoundTripTests(ExportTestCase):
                 self.assertEqual(by_phone["9000000001"]["date"], "2026-01-05")    # "05 Jan 2026"
                 self.assertEqual(by_phone["9000000001"]["city"], "Bengaluru")
 
-    def test_admin_export_uploads_back_for_that_vendor(self):
-        for fmt in ("csv", "xlsx"):
+    def test_admin_export_uploads_back_by_that_vendor(self):
+        for fmt in ("csv", "xlsx"):                                     # admin columns are ignored
             with self.subTest(fmt=fmt):
                 resp = self.export(self.admin, f"format={fmt}&vendor_id={self.other_id}")
-                self.assert_all_duplicates(self.admin, resp, f"export.{fmt}", 1, vendor_id=self.other_id)
+                self.assert_all_duplicates(self.other, resp, f"export.{fmt}", 1)
 
     def test_export_for_another_vendor_is_new_leads(self):
         resp = self.export(self.admin, f"format=csv&vendor_id={self.phodeo_id}")
-        body = self.preview(self.admin, resp.content, filename="export.csv", vendor_id=self.other_id).json()
+        body = self.preview(self.other, resp.content, filename="export.csv").json()
         self.assertEqual((body["valid_count"], body["invalid_count"], body["duplicate_count"]), (2, 0, 0))
 
     def test_display_formats_are_cleaned(self):

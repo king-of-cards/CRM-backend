@@ -1057,9 +1057,12 @@ vendor logins linked in `crm_vendor_users`. Ported from the other CRM backend wi
 paths, shapes and rules. Base path: `/api/v1/vendor-to-koc`.
 
 **Who:**
-- **Admins** see every vendor's leads, and edit the admin fields (`update_status`,
-  `additional_comments`, `follow_up_date`).
-- **Vendor logins** work only with their own vendor's leads. Their vendor comes from the login and
+- **Admins** see every vendor's leads (list, stats, export, details), and edit the admin fields
+  (`update_status`, `additional_comments`, `follow_up_date`). They **don't add leads**:
+  `POST /upload/preview`, `POST /leads/bulk` and `POST /leads` answer
+  `403 {"detail": "Only vendor logins can add Vendor → KOC leads"}` for admins (checked before
+  the body or file). The template stays available to everyone.
+- **Vendor logins** add leads and work only with their own vendor's leads. Their vendor comes from the login and
   is never taken from input: a `vendor_id` they send is ignored. They never see the admin fields:
   their responses use `VendorLeadRead`, which doesn't contain them. Another vendor's lead answers
   404.
@@ -1073,7 +1076,7 @@ paths, shapes and rules. Base path: `/api/v1/vendor-to-koc`.
 | `name`, `city` | Optional, at most 100 characters |
 | `date` (the lead's own date) | Optional. Files: a real date, or text `DD-MM-YYYY` (day first) or `13 Dec 2026` / `13 December 2026` (the export's format). JSON: `YYYY-MM-DD` |
 | Duplicates | One lead per vendor and phone. Duplicates are skipped in bulk and answer 409 for a single add |
-| Exported files | An export (CSV or Excel) uploads back unchanged: Name, Date, Phone and City are read, the other columns ignored, and its rows show as duplicates for the same vendor |
+| Exported files | An export (CSV or Excel) uploads back unchanged: Name, Date, Phone and City are read, the other columns ignored, and its rows show as duplicates when that vendor's login uploads it (an admin's export too) |
 | Template example row | The template's example row, uploaded unchanged, is an error (`"This is the example row from the template; delete it"`) |
 | `update_status` | `null` (pending), `converted`, `not_converted`, `purchased_elsewhere`, `purchased_with_us`, `will_call_back`, `interested`, `not_interested` |
 | `source` | `bulk_upload` or `manual` |
@@ -1082,9 +1085,9 @@ paths, shapes and rules. Base path: `/api/v1/vendor-to-koc`.
 
 | Method and path | Who | What |
 |---|---|---|
-| `POST /upload/preview` | all | `multipart/form-data`: `file` (`.xlsx` / `.csv`, at most 5 MB and 5,000 rows), `sheet_name` (`.xlsx`, default the first sheet), `vendor_id` (admins: required; ignored for vendors). Saves nothing. Returns `{rows: [{row, name, date, phone, city, errors, duplicate}], valid_count, invalid_count, duplicate_count}`. File too large: 413 |
-| `POST /leads/bulk` | all | `{vendor_id (admins), leads: [{name, date, phone, city}]}` (at most 5,000). Validates each lead again, saves the valid ones, skips duplicates. Returns `{added, duplicates_skipped, failed, errors: [{index, field, message}]}` |
-| `POST /leads` | all | One lead: `{name, date, phone, city, vendor_id (admins)}`. 201 with the lead; 409 duplicate; 422 field errors |
+| `POST /upload/preview` | vendor | `multipart/form-data`: `file` (`.xlsx` / `.csv`, at most 5 MB and 5,000 rows), `sheet_name` (`.xlsx`, default the first sheet). Checked against the login's vendor (a `vendor_id` sent is ignored). Saves nothing. Returns `{rows: [{row, name, date, phone, city, errors, duplicate}], valid_count, invalid_count, duplicate_count}`. File too large: 413 |
+| `POST /leads/bulk` | vendor | `{leads: [{name, date, phone, city}]}` (at most 5,000). Validates each lead again, saves the valid ones, skips duplicates. Returns `{added, duplicates_skipped, failed, errors: [{index, field, message}]}` |
+| `POST /leads` | vendor | One lead: `{name, date, phone, city}`. 201 with the lead; 409 duplicate; 422 field errors |
 | `GET /leads` | all | The list with [the filters below](#filters-list-stats-and-export), `page`, `page_size` (1–100, default 20). Returns `{items (each with sl_no), total, page, page_size, pages}` |
 | `GET /leads/stats` | all | Header numbers over the same filtered leads: `{total, by_source}`; admins also `by_status` (incl. `pending`), `by_vendor`, `follow_ups_due` |
 | `GET /leads/export` | all | The same filtered leads as a file (`format=xlsx` (default) or `csv`), see [Export](#export-1) |

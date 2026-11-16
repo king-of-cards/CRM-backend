@@ -46,19 +46,21 @@ def _unprocessable(errors: list[dict]) -> HTTPException:
     return HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail=errors)
 
 
-def _target_vendor(db: DbSession, scope: Viewer, requested: int | None, loc: str) -> Vendor:
-    """The vendor new leads belong to: from the login for vendor users (input ignored),
-    from vendor_id for admins."""
+ONLY_VENDORS_ADD = "Only vendor logins can add Vendor → KOC leads"
+
+
+def require_vendor_login(scope: LeadViewer) -> Viewer:
+    """Adding leads (preview, bulk, manual) is for vendor logins only: admins get 403."""
     if scope.is_admin:
-        if requested is None:
-            raise _unprocessable([{"type": "missing", "loc": [loc, "vendor_id"],
-                                   "msg": "vendor_id is required for admins"}])
-        vendor = db.get(Vendor, requested)
-        if vendor is None:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Vendor not found")
-        if not vendor.is_active:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Vendor is inactive")
-        return vendor
+        raise HTTPException(status.HTTP_403_FORBIDDEN, ONLY_VENDORS_ADD)
+    return scope
+
+
+VendorLogin = Annotated[Viewer, Depends(require_vendor_login)]
+
+
+def _target_vendor(db: DbSession, scope: Viewer) -> Vendor:
+    """The vendor new leads belong to: always the login's vendor (a vendor_id sent is ignored)."""
     vendor = db.get(Vendor, scope.vendor_id)
     if vendor is None or not vendor.is_active:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Vendor is inactive")
@@ -73,13 +75,13 @@ def _phone_ok(phone: str | None) -> bool:
 @router.post("/upload/preview")
 def upload_preview(
     db: DbSession,
-    scope: LeadViewer,
+    scope: VendorLogin,
     file: UploadFile = File(..., description=".xlsx or .csv, at most 5 MB and 5,000 rows"),
     sheet_name: str | None = Form(None, description=".xlsx only; default is the first sheet"),
-    vendor_id: int | None = Form(None, description="Admins only (required); ignored for vendors"),
+    vendor_id: int | None = Form(None, description="Ignored: the vendor comes from the login"),
 ):
-    """Parses and validates the file. Saves nothing."""
-    vendor = _target_vendor(db, scope, vendor_id, "body")
+    """Vendor logins only (admins: 403). Parses and validates the file. Saves nothing."""
+    vendor = _target_vendor(db, scope)
     data = file.file.read(MAX_FILE_BYTES + 1)
     if len(data) > MAX_FILE_BYTES:
         raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "File is larger than 5 MB")
@@ -114,9 +116,10 @@ def upload_preview(
 
 # ── Leads ──────────────────────────────────────────────────────────────
 @router.post("/leads/bulk")
-def bulk_create_leads(body: LeadBulkCreate, db: DbSession, scope: LeadViewer):
-    """Validates every lead again, saves the valid ones and skips duplicates."""
-    vendor = _target_vendor(db, scope, body.vendor_id, "body")
+def bulk_create_leads(body: LeadBulkCreate, db: DbSession, scope: VendorLogin):
+    """Vendor logins only (admins: 403). Validates every lead again, saves the valid ones and
+    skips duplicates."""
+    vendor = _target_vendor(db, scope)
     errors, failed, duplicates = [], 0, 0
     seen: set[str] = set()
     valid = []
@@ -140,8 +143,9 @@ def bulk_create_leads(body: LeadBulkCreate, db: DbSession, scope: LeadViewer):
 
 @router.post("/leads", status_code=status.HTTP_201_CREATED,
              responses={201: {"description": LEAD_RESPONSE_DOC}})
-def create_lead(body: LeadCreate, db: DbSession, scope: LeadViewer):
-    vendor = _target_vendor(db, scope, body.vendor_id, "body")
+def create_lead(body: LeadCreate, db: DbSession, scope: VendorLogin):
+    """Vendor logins only (admins: 403)."""
+    vendor = _target_vendor(db, scope)
     lead = validate_lead(body.name, body.date, body.phone, body.city, parse_json_date)
     if not lead.ok:
         raise _unprocessable(lead.errors)

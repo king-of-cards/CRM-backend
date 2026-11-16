@@ -129,12 +129,12 @@ class LeadInput(SQLModel):
 
 class LeadCreate(LeadInput):
     model_config = ConfigDict(extra="forbid")
-    vendor_id: int | None = None       # admins only; ignored for vendor users
+    vendor_id: int | None = None       # ignored: the vendor comes from the login
 
 
 class LeadBulkCreate(SQLModel):
     model_config = ConfigDict(extra="forbid")
-    vendor_id: int | None = None       # admins only; ignored for vendor users
+    vendor_id: int | None = None       # ignored: the vendor comes from the login
     leads: list[LeadInput] = Field(max_length=5000)
 
 

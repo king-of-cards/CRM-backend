@@ -18,6 +18,7 @@ from app.models.user import User  # noqa: E402
 from app.models.vendor import Vendor  # noqa: E402
 from app.models.vendor_to_koc import ADMIN_ONLY_FIELDS, VendorToKocLead  # noqa: E402
 from app.models.vendor_user import VendorUser  # noqa: E402
+from app.api.v1.endpoints.vendor_to_koc import ONLY_VENDORS_ADD  # noqa: E402
 from app.services.vendor_lead_import import clean_phone, parse_file_date  # noqa: E402
 
 BASE = "/api/v1/vendor-to-koc"
@@ -192,13 +193,11 @@ class PreviewTests(VendorToKocTestCase):
         self.assertTrue(rows[7]["duplicate"])     # checked against Phodeo, not Other Vendor
         self.assertFalse(rows[3]["duplicate"])
 
-    def test_admin_must_choose_a_vendor(self):
-        self.assertEqual(self.preview(self.admin, make_xlsx(phodeo_rows())).status_code, 422)
-        resp = self.preview(self.admin, make_xlsx(phodeo_rows()), vendor_id=self.other_id)
-        rows = {r["row"]: r for r in resp.json()["rows"]}
-        self.assertTrue(rows[3]["duplicate"])     # 9845012345 exists for Other Vendor
-        self.assertFalse(rows[7]["duplicate"])
-        self.assertEqual(self.preview(self.admin, make_xlsx([]), vendor_id=999).status_code, 404)
+    def test_admins_cannot_preview(self):
+        for form in ({}, {"vendor_id": self.other_id}):
+            resp = self.preview(self.admin, make_xlsx(phodeo_rows()), **form)
+            self.assertEqual((resp.status_code, resp.json()["detail"]), (403, ONLY_VENDORS_ADD), form)
+        self.assertEqual(self.preview(self.admin, b"not a file", filename="x.txt").status_code, 403)
 
     def test_sheet_selection(self):
         content = make_xlsx([], title="Summary",
@@ -268,13 +267,12 @@ class BulkTests(VendorToKocTestCase):
         self.client.post(f"{BASE}/leads/bulk", headers=self.phodeo, json=body)
         self.assertEqual([l.vendor_id for l in self.leads()], [self.phodeo_id])
 
-    def test_admin_bulk_needs_vendor_id(self):
-        body = {"leads": [{"phone": "9000000001"}]}
-        self.assertEqual(self.client.post(f"{BASE}/leads/bulk", headers=self.admin, json=body).status_code, 422)
-        body["vendor_id"] = self.other_id
-        resp = self.client.post(f"{BASE}/leads/bulk", headers=self.admin, json=body)
-        self.assertEqual(resp.json()["added"], 1)
-        self.assertEqual(self.leads()[0].vendor_id, self.other_id)
+    def test_admins_cannot_bulk_add(self):
+        for body in ({"leads": [{"phone": "9000000001"}]},
+                     {"vendor_id": self.other_id, "leads": [{"phone": "9000000001"}]}):
+            resp = self.client.post(f"{BASE}/leads/bulk", headers=self.admin, json=body)
+            self.assertEqual((resp.status_code, resp.json()["detail"]), (403, ONLY_VENDORS_ADD))
+        self.assertEqual(self.leads(), [])
 
     def test_more_than_5000_leads_is_rejected(self):
         body = {"leads": [{"phone": "9000000001"}] * 5001}
@@ -303,12 +301,14 @@ class ManualAddTests(VendorToKocTestCase):
         self.assertEqual(bad.status_code, 422)
         self.assertEqual({e["field"] for e in bad.json()["detail"]}, {"phone", "date"})
 
-    def test_admin_adds_for_a_vendor_and_sees_admin_fields(self):
-        resp = self.client.post(f"{BASE}/leads", headers=self.admin,
-                                json={"vendor_id": self.other_id, "phone": "9000000001"})
-        self.assertEqual(resp.status_code, 201)
-        self.assertTrue(ADMIN_FIELDS <= set(resp.json()))
-        self.assertEqual(resp.json()["vendor_name"], "Other Vendor")
+    def test_admins_cannot_add(self):
+        for body in ({"vendor_id": self.other_id, "phone": "9000000001"}, {"phone": "9000000001"}, {}):
+            resp = self.client.post(f"{BASE}/leads", headers=self.admin, json=body)
+            self.assertEqual((resp.status_code, resp.json()["detail"]), (403, ONLY_VENDORS_ADD), body)
+        self.assertEqual(self.leads(), [])
+        unlinked = self.headers("unlinked@example.com")                  # vendor login without a vendor
+        self.assertEqual(self.client.post(f"{BASE}/leads", headers=unlinked,
+                                          json={"phone": "9000000001"}).status_code, 403)
 
     def test_inactive_vendor(self):
         with Session(self.engine) as s:
@@ -319,9 +319,6 @@ class ManualAddTests(VendorToKocTestCase):
         self.add_lead(self.phodeo_id, "9000000009")
         self.assertEqual(self.client.post(f"{BASE}/leads", headers=self.phodeo,
                                           json={"phone": "9000000001"}).status_code, 403)
-        self.assertEqual(self.client.post(f"{BASE}/leads", headers=self.admin,
-                                          json={"vendor_id": self.phodeo_id, "phone": "9000000001"}
-                                          ).status_code, 400)
         self.assertEqual(self.client.get(f"{BASE}/leads", headers=self.phodeo).json()["total"], 1)
 
 
