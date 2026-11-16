@@ -27,8 +27,11 @@ IST = timezone(timedelta(hours=5, minutes=30), "IST")   # India has no daylight 
 
 XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 CSV_MEDIA_TYPE = "text/csv; charset=utf-8"
-DATE_FORMAT = "DD-MM-YYYY"
-DATETIME_FORMAT = "DD-MM-YYYY HH:MM"
+# Exports look like this CRM's list screens: 13 Dec 2026, 14 Nov 2026, 10:30 am (IST), +91 phones
+DATE_FORMAT = "dd mmm yyyy"
+DATETIME_FORMAT = "d mmm yyyy, hh:mm am/pm"
+# The upload template keeps the upload format (dates DD-MM-YYYY), which the import reads
+TEMPLATE_DATE_FORMAT = "DD-MM-YYYY"
 CSV_DANGEROUS_START = ("=", "+", "-", "@", "\t", "\r")
 
 
@@ -75,17 +78,32 @@ def filename_slug(text: str) -> str:
 
 
 # ── Building the table ─────────────────────────────────────────────────
+def display_phone(phone: str | None) -> str | None:
+    """+919845012345, as the list screens show phones (stored as the 10-digit mobile number)."""
+    return f"+91{phone}" if phone else phone
+
+
+def display_date(value: date) -> str:
+    """13 Dec 2026"""
+    return value.strftime("%d %b %Y")
+
+
+def display_datetime(value: datetime) -> str:
+    """14 Nov 2026, 10:30 am (the value is already India time)"""
+    return f"{value.day} {value:%b %Y}, {value:%I:%M} {'am' if value.hour < 12 else 'pm'}"
+
+
 def lead_table(rows: Iterable[tuple], admin: bool) -> tuple[list[Column], list[list[Any]]]:
     """Turn export_rows() tuples into (columns, values). Values are Python objects;
     the writers below format them."""
     if not admin:
-        return VENDOR_COLUMNS, [[i, lead_date, name, phone, city]
+        return VENDOR_COLUMNS, [[i, lead_date, name, display_phone(phone), city]
                                 for i, (lead_date, name, phone, city) in enumerate(rows, start=1)]
     table = []
     for i, (vendor, lead_date, name, phone, city, status, comments, follow_up,
             updater_name, updater_email, updated_at) in enumerate(rows, start=1):
         table.append([
-            i, vendor, lead_date, name, phone, city,
+            i, vendor, lead_date, name, display_phone(phone), city,
             STATUS_LABELS.get(status, status), comments, follow_up,
             updater_name or updater_email, to_ist(updated_at),
         ])
@@ -150,7 +168,7 @@ def template_xlsx() -> bytes:
         dim = ws.column_dimensions[get_column_letter(index)]
         dim.width = column.width
         if column.kind == "date":
-            dim.number_format = DATE_FORMAT
+            dim.number_format = TEMPLATE_DATE_FORMAT
         elif column.kind == "phone":
             dim.number_format = "@"
     for index, column in enumerate(columns, start=1):
@@ -160,7 +178,7 @@ def template_xlsx() -> bytes:
         for index, (value, column) in enumerate(zip(row, columns), start=1):
             cell = ws.cell(row=r, column=index, value=value)
             if column.kind == "date":
-                cell.number_format = DATE_FORMAT
+                cell.number_format = TEMPLATE_DATE_FORMAT
             elif column.kind in ("text", "phone"):
                 cell.data_type = "s"
                 if column.kind == "phone":
@@ -171,13 +189,13 @@ def template_xlsx() -> bytes:
 
 
 # ── CSV ────────────────────────────────────────────────────────────────
-def _csv_value(value: Any, kind: str) -> str:
+def _csv_value(value: Any, kind: str, upload_format: bool = False) -> str:
     if value is None:
         return ""
     if kind == "date":
-        return value.strftime("%d-%m-%Y")
+        return value.strftime("%d-%m-%Y") if upload_format else display_date(value)
     if kind == "datetime":
-        return value.strftime("%d-%m-%Y %H:%M")
+        return display_datetime(value)
     if kind == "int":
         return str(value)
     text = str(value)
@@ -186,14 +204,14 @@ def _csv_value(value: Any, kind: str) -> str:
     return text
 
 
-def to_csv(columns: list[Column], rows: list[list[Any]]) -> bytes:
+def to_csv(columns: list[Column], rows: list[list[Any]], upload_format: bool = False) -> bytes:
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow([c.heading for c in columns])
     for row in rows:
-        writer.writerow([_csv_value(value, c.kind) for value, c in zip(row, columns)])
+        writer.writerow([_csv_value(value, c.kind, upload_format) for value, c in zip(row, columns)])
     return buf.getvalue().encode("utf-8-sig")    # BOM: Excel then reads UTF-8 correctly
 
 
 def template_csv() -> bytes:
-    return to_csv(*template_table())
+    return to_csv(*template_table(), upload_format=True)

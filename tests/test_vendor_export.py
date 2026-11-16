@@ -36,12 +36,13 @@ def csv_rows(resp) -> list[list[str]]:
 
 
 def as_text(value) -> str:
-    """Format an XLSX value the way the CSV writes it."""
+    """Format an XLSX value the way the CSV writes it (this CRM's list formats)."""
     if value is None:
         return ""
     if isinstance(value, datetime):
-        return (value.strftime("%d-%m-%Y %H:%M") if (value.hour, value.minute) != (0, 0)
-                else value.strftime("%d-%m-%Y"))
+        if (value.hour, value.minute) == (0, 0):
+            return value.strftime("%d %b %Y")                      # 05 Jan 2026
+        return f"{value.day} {value:%b %Y}, {value:%I:%M} {'am' if value.hour < 12 else 'pm'}"
     return str(value)
 
 
@@ -73,7 +74,7 @@ class VendorExportTests(ExportTestCase):
         self.assertEqual(resp.headers["cache-control"], "no-store")
         rows = xlsx_rows(resp)
         self.assertEqual(rows[0], VENDOR_HEADINGS)
-        self.assertEqual([r[3] for r in rows[1:]], ["9000000001", "9000000002"])   # no Meena
+        self.assertEqual([r[3] for r in rows[1:]], ["+919000000001", "+919000000002"])   # no Meena
         everything = " ".join(as_text(v) for row in rows for v in row)
         for admin_value in ("call later", "Converted", "Admin", "Phodeo"):
             self.assertNotIn(admin_value, everything)
@@ -85,7 +86,7 @@ class VendorExportTests(ExportTestCase):
 
     def test_vendor_id_from_a_vendor_is_ignored(self):
         rows = xlsx_rows(self.export(self.phodeo, f"vendor_id={self.other_id}"))
-        self.assertEqual(sorted(r[3] for r in rows[1:]), ["9000000001", "9000000002"])
+        self.assertEqual(sorted(r[3] for r in rows[1:]), ["+919000000001", "+919000000002"])
 
     def test_unlinked_vendor_and_bad_format(self):
         unlinked = self.headers("unlinked@example.com")
@@ -102,20 +103,20 @@ class AdminExportTests(ExportTestCase):
         rows = xlsx_rows(resp)
         self.assertEqual(rows[0], ADMIN_HEADINGS)
         self.assertEqual(rows[1], [
-            1, "Phodeo", datetime(2026, 1, 5), "Asha Rao", "9000000001", "Bengaluru",
+            1, "Phodeo", datetime(2026, 1, 5), "Asha Rao", "+919000000001", "Bengaluru",
             "Converted", "- call later", datetime(2026, 2, 1), "Admin",
             datetime(2026, 1, 15, 15, 0),            # 09:30 UTC -> 15:00 IST
         ])
         self.assertEqual(len(rows), 2)
         pending = xlsx_rows(self.export(self.admin, "update_status=pending"))
-        self.assertEqual([(r[4], r[6]) for r in pending[1:]], [("9000000002", "Pending")])
+        self.assertEqual([(r[4], r[6]) for r in pending[1:]], [("+919000000002", "Pending")])
         others = xlsx_rows(self.export(self.admin, f"vendor_id={self.other_id}"))
         self.assertEqual([(r[1], r[6]) for r in others[1:]], [("Other Vendor", "Interested")])
 
     def test_xlsx_text_cells_formats_and_formula_safety(self):
         ws = xlsx_sheet(self.export(self.admin, "sort=lead_date&order=asc"))
         by_phone = {ws.cell(row=r, column=5).value: r for r in range(2, ws.max_row + 1)}
-        formula_row, asha_row = by_phone["9000000002"], by_phone["9000000001"]
+        formula_row, asha_row = by_phone["+919000000002"], by_phone["+919000000001"]
         name = ws.cell(row=formula_row, column=4)
         self.assertEqual((name.value, name.data_type), (FORMULA_NAME, "s"))   # text, exact
         self.assertEqual(ws.cell(row=formula_row, column=6).value, "@Pune")
@@ -124,19 +125,19 @@ class AdminExportTests(ExportTestCase):
         phone = ws.cell(row=asha_row, column=5)
         self.assertEqual((phone.data_type, phone.number_format), ("s", "@"))
         lead_date = ws.cell(row=asha_row, column=3)
-        self.assertEqual((lead_date.value, lead_date.number_format), (datetime(2026, 1, 5), "DD-MM-YYYY"))
-        self.assertEqual(ws.cell(row=asha_row, column=11).number_format, "DD-MM-YYYY HH:MM")
+        self.assertEqual((lead_date.value, lead_date.number_format), (datetime(2026, 1, 5), "dd mmm yyyy"))
+        self.assertEqual(ws.cell(row=asha_row, column=11).number_format, "d mmm yyyy, hh:mm am/pm")
 
     def test_csv_formats_and_apostrophe_escaping(self):
         resp = self.export(self.admin, "format=csv&sort=lead_date&order=asc")
         self.assertEqual(resp.headers["content-type"], "text/csv; charset=utf-8")
         self.assertTrue(resp.headers["content-disposition"].endswith('.csv"'))
         rows = {r[4]: r for r in csv_rows(resp)[1:]}
-        asha, formula = rows["9000000001"], rows["9000000002"]
-        self.assertEqual(asha[2], "05-01-2026")
+        asha, formula = rows["'+919000000001"], rows["'+919000000002"]     # phone: text, formula-safe
+        self.assertEqual(asha[2], "05 Jan 2026")
         self.assertEqual(asha[7], "'- call later")
-        self.assertEqual(asha[8], "01-02-2026")
-        self.assertEqual(asha[10], "15-01-2026 15:00")
+        self.assertEqual(asha[8], "01 Feb 2026")
+        self.assertEqual(asha[10], "15 Jan 2026, 03:00 pm")                    # 09:30 UTC = 3 pm IST
         self.assertEqual(formula[3], "'" + FORMULA_NAME)
         self.assertEqual(formula[5], "'@Pune")
 
