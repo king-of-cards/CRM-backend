@@ -19,7 +19,7 @@ from tests.dhruva_fixtures import DhruvaTestBase
 class DhruvaListTest(DhruvaTestBase, unittest.TestCase):
     def setUp(self):
         super().setUp()
-        self.assertEqual(self.upload_all()["added"], 10)                                 # sheet 1
+        self.assertEqual(self.upload_all()["added"], 11)                                 # sheet 1
         self.assertEqual(self.upload_all(sheet_name="Dec -March 2027")["added"], 6)      # sheet 2
         with Session(self.engine) as s:
             self.ids = {l.name: l.id for l in s.exec(select(DhruvaLead))}
@@ -67,16 +67,16 @@ class DhruvaListTest(DhruvaTestBase, unittest.TestCase):
         c({"Asha Fake", "Ravi Kumarfake", "Meena Fake", "Excel Date"}, event_from="2026-12-01", event_to="2026-12-31")
         c({"No Phone One", "Asha Fake", "Meena Fake"}, upcoming_days=30)    # 16 Nov - 16 Dec (not 20 Dec)
         c({"Month Only"}, date_from="2026-11-01", date_to="2026-11-01")   # received
-        self.assertEqual(len(self.names(date_from="2026-11-16")), 15)
+        self.assertEqual(len(self.names(date_from="2026-11-16")), 15)  # name set collapses the repeated Asha row
         c({"Asha Fake"}, venue="palace", update_status="converted")        # combined: AND
 
     def test_sort_and_paging(self):
         resp = self.call("dhruva", "GET", "/leads", params={"sort": "event_date", "order": "asc"}).json()
-        self.assertEqual((resp["total"], resp["pages"], resp["page_size"], len(resp["items"])), (16, 2, 10, 10))
+        self.assertEqual((resp["total"], resp["pages"], resp["page_size"], len(resp["items"])), (17, 2, 10, 10))
         dates = [i["event_date"] for i in resp["items"]]
         self.assertEqual(dates[0], "2026-11-22")
         page2 = self.call("dhruva", "GET", "/leads", params={"sort": "event_date", "order": "asc", "page": 2}).json()
-        self.assertEqual([i["sl_no"] for i in page2["items"]], list(range(11, 17)))
+        self.assertEqual([i["sl_no"] for i in page2["items"]], list(range(11, 18)))
         self.assertIsNone(page2["items"][-1]["event_date"])                  # text-only dates last
         self.assertEqual(self.call("dhruva", "GET", "/leads", params={"page_size": 20}).status_code, 422)
 
@@ -99,11 +99,11 @@ class DhruvaListTest(DhruvaTestBase, unittest.TestCase):
 
     def test_stats(self):
         stats = self.call("dhruva", "GET", "/leads/stats").json()
-        self.assertEqual(stats["kpis"], {"total": 16, "interested": 1, "not_interested": 1, "quoted_count": 2,
-                                         "quoted_total": 250000, "converted": 1, "converted_pct": 6.2,
+        self.assertEqual(stats["kpis"], {"total": 17, "interested": 1, "not_interested": 1, "quoted_count": 2,
+                                         "quoted_total": 250000, "converted": 1, "converted_pct": 5.9,
                                          "conversion_count": 1, "conversion_total": 180000})
-        self.assertEqual(stats["by_status"]["pending"], 12)
-        self.assertEqual((stats["no_phone"], stats["follow_ups_due"], stats["upcoming_30_days"]), (3, 1, 3))
+        self.assertEqual(stats["by_status"]["pending"], 13)
+        self.assertEqual((stats["no_phone"], stats["follow_ups_due"], stats["upcoming_30_days"]), (4, 1, 4))
 
     def test_export_columns_formats_and_round_trip(self):
         resp = self.call("dhruva", "GET", "/leads/export", params={"sort": "name", "order": "asc"})
@@ -112,20 +112,20 @@ class DhruvaListTest(DhruvaTestBase, unittest.TestCase):
         header = [c.value for c in ws[1]]
         self.assertEqual(header, ["Sl. No", "Name", "Venue", "Date", "Phone", "Alt phone", "Event type", "Update",
                                   "Additional comments", "Follow-up date", "Quoted amount", "Conversion amount",
-                                  "Received", "Updated by", "Updated at"])
+                                  "Received", "Updated by", "Updated by ID", "Updated at"])
         rows = {r[1]: r for r in ws.iter_rows(min_row=2, values_only=True)}
         asha = rows["Asha Fake"]
         self.assertEqual((asha[3], asha[4], asha[7], asha[10], asha[13]),
-                         (datetime(2026, 12, 4), "+919800000001", "Converted", 200000, "Admin"))
+                         ("Dec 4th", "+919800000001", "Converted", 200000, "Admin"))
         self.assertEqual(rows["Month Only"][3], "March")                   # text-only date stays text
         self.assertEqual(rows["Ravi Kumarfake"][5], "+919000000002")
         self.assertEqual(rows["Nil Phone"][7], "Pending")
-        # CSV, then the export uploads back: every row is a duplicate
+        # CSV, then the export uploads back: rows with phones duplicate; no-phone rows don't.
         csv_resp = self.call("dhruva", "GET", "/leads/export", params={"format": "csv"})
         body = self.preview(content=csv_resp.content, filename="export.csv").json()
-        self.assertEqual((body["counts"]["total"], body["counts"]["duplicates"], body["counts"]["valid"]), (16, 16, 0))
+        self.assertEqual((body["counts"]["total"], body["counts"]["duplicates"], body["counts"]["valid"]), (17, 13, 4))
         body = self.preview(content=resp.content, filename="export.xlsx").json()
-        self.assertEqual(body["counts"]["duplicates"], 16)
+        self.assertEqual((body["counts"]["duplicates"], body["counts"]["valid"]), (13, 4))
 
     def test_filter_options(self):
         o = self.call("dhruva", "GET", "/leads/filter-options").json()
@@ -133,14 +133,14 @@ class DhruvaListTest(DhruvaTestBase, unittest.TestCase):
         self.assertEqual(venues["Main Palace"], 4)                         # "Main palace" counted with it
         types = {v["value"]: v["count"] for v in o["event_types"]}
         self.assertEqual((types["wedding"], types["engagement"], types["muhurtham"]), (5, 2, 1))
-        self.assertEqual(o["updates"][0], {"value": "pending", "count": 12})
-        self.assertEqual(o["has_phone"], [{"value": "yes", "count": 13}, {"value": "no", "count": 3}])
-        self.assertEqual(o["sources"], [{"value": "manual", "count": 0}, {"value": "bulk_upload", "count": 16}])
+        self.assertEqual(o["updates"][0], {"value": "pending", "count": 13})
+        self.assertEqual(o["has_phone"], [{"value": "yes", "count": 13}, {"value": "no", "count": 4}])
+        self.assertEqual(o["sources"], [{"value": "manual", "count": 0}, {"value": "bulk_upload", "count": 17}])
 
     def test_archived_and_errors(self):
         self.call("admin", "POST", f"/leads/{self.ids['Asha Fake']}/archive")
         self.assertNotIn("Asha Fake", self.names())
-        self.assertEqual(self.call("dhruva", "GET", "/leads/stats").json()["total"], 15)
+        self.assertEqual(self.call("dhruva", "GET", "/leads/stats").json()["total"], 16)
         for params, text in (({"event_from": "2026-12-31", "event_to": "2026-12-01"}, "event_from must be on or before"),
                              ({"upcoming_days": 0}, "between 1 and 366"), ({"quote": "lots"}, "quote must be"),
                              ({"upcoming_days": 5, "event_from": "2026-12-01"}, "either upcoming_days"),

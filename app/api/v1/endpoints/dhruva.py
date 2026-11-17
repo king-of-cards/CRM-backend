@@ -130,7 +130,7 @@ def create_lead(body: DhruvaLeadCreate, db: DbSession, user: DhruvaSectionUser):
     if dup and not body.allow_duplicate:
         raise HTTPException(status.HTTP_409_CONFLICT, {"message": "This lead already exists.", "duplicate": dup})
     row = crud.create(db, lead, SOURCE_MANUAL, user.id)
-    return crud.serialize(*crud.get(db, row.id), admin=is_admin(user))
+    return crud.serialize(*crud.get(db, row.id), admin=is_admin(user), expose_status_updater_id=True)
 
 
 # ── Template ───────────────────────────────────────────────────────────
@@ -236,12 +236,12 @@ def lead_stats(db: DbSession, _user: DhruvaSectionUser, query: ListQueryDep):
 
 EXPORT_COLUMNS = [
     files.Column("Sl. No", "int", 8), files.Column("Name", "text", 28), files.Column("Venue", "text", 28),
-    files.Column("Date", "date", 18), files.Column("Phone", "phone", 16), files.Column("Alt phone", "phone", 16),
+    files.Column("Date", "text", 18), files.Column("Phone", "phone", 16), files.Column("Alt phone", "phone", 16),
     files.Column("Event type", "text", 24), files.Column("Update", "text", 28),
     files.Column("Additional comments", "text", 40), files.Column("Follow-up date", "date", 14),
     files.Column("Quoted amount", "money", 16), files.Column("Conversion amount", "money", 18),
     files.Column("Received", "datetime", 18), files.Column("Updated by", "text", 20),
-    files.Column("Updated at", "datetime", 18),
+    files.Column("Updated by ID", "int", 14), files.Column("Updated at", "datetime", 18),
 ]
 
 
@@ -259,11 +259,11 @@ def export_leads(db: DbSession, _user: DhruvaSectionUser, query: ListQueryDep,
     table = []
     for i, (row, _creator, updater) in enumerate(crud.all_rows(db, query.filters, query.sort, query.order), start=1):
         table.append([
-            i, row.name, row.venue, row.event_date or row.event_date_text,
+            i, row.name, row.venue, row.event_date_text or (row.event_date.isoformat() if row.event_date else None),
             row.phone_e164 or row.phone, row.alt_phone_e164 or row.alt_phone, row.event_type,
             STATUS_LABELS.get(row.update_status, row.update_status), row.additional_comments, row.follow_up_date,
             row.quoted_amount, row.conversion_amount, files.to_ist(row.created_at), updater,
-            files.to_ist(row.status_updated_at),
+            row.status_updated_by, files.to_ist(row.status_updated_at),
         ])
     content = files.to_xlsx(EXPORT_COLUMNS, table) if format == "xlsx" else files.to_csv(EXPORT_COLUMNS, table)
     media = files.XLSX_MEDIA_TYPE if format == "xlsx" else files.CSV_MEDIA_TYPE
@@ -285,7 +285,7 @@ def get_lead(lead_id: int, db: DbSession, user: DhruvaSectionUser):
     found = crud.get(db, lead_id)
     if found is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Lead not found")
-    return crud.serialize(*found, admin=is_admin(user))
+    return crud.serialize(*found, admin=is_admin(user), expose_status_updater_id=True)
 
 
 @router.patch("/leads/{lead_id}")
@@ -317,16 +317,16 @@ def update_lead(lead_id: int, body: DhruvaLeadUpdate, db: DbSession, user: Dhruv
             lead.event_date, lead.event_date_text = row.event_date, row.event_date_text
         if not lead.ok:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, lead.errors)
-        phone_changed = lead.e164s != {e for e in (row.phone_e164, row.alt_phone_e164) if e}
-        if phone_changed and lead.e164s and not body.allow_duplicate:
+        if lead.e164s and not body.allow_duplicate:
             dup = crud.check_duplicates(db, [lead], exclude_id=row.id)[0]
             if dup:
                 raise HTTPException(status.HTTP_409_CONFLICT,
-                                    {"message": "Another lead has this phone.", "duplicate": dup})
+                                    {"message": "Another lead with the same details and phone already exists.",
+                                     "duplicate": dup})
         basic = crud.lead_columns(lead)
     admin_changes = {k: getattr(body, k) for k in admin_sent}
     crud.update(db, row, basic, admin_changes, user.id)
-    return crud.serialize(*crud.get(db, lead_id), admin=is_admin(user))
+    return crud.serialize(*crud.get(db, lead_id), admin=is_admin(user), expose_status_updater_id=True)
 
 
 @router.post("/leads/{lead_id}/archive")

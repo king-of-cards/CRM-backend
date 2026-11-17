@@ -1109,7 +1109,8 @@ exists.
 - **Matching:** by E.164 phone (`phone_e164`; Vendor → KOC's 10-digit numbers as `+91…`; Dhruva:
   phone **and** alt phone, so a Dhruva lead is found by either, and a lead found through both of a
   Dhruva lead's numbers counts once). Archived and removed rows count, like the upload duplicate
-  check.
+  check. This cross-source matching remains phone-only; it is separate from Dhruva's same-source
+  duplicate rule in section 13.
 - **`count`:** how many leads in that place. **`vendors`** (Vendor → KOC, admins only): the names
   of the vendors who sent that phone.
 - **Vendor logins** only get places they can see themselves: their own leads in the other sources
@@ -1333,8 +1334,9 @@ upload. Table `crm_dhruva_leads` (migration `migrations/2026-11-17_dhruva.sql`).
 `id, name, venue, event_date (YYYY-MM-DD or null), event_date_text (as typed), phone, alt_phone,
 phone_e164, alt_phone_e164, event_type, source (manual | bulk_upload), created_by_name, created_at,
 updated_at, archived, update_status (null = Pending), additional_comments, quoted_amount,
-conversion_amount, follow_up_date, status_updated_at, status_updated_by_name`. Admins also get
-`created_by` and `status_updated_by` (user ids).
+conversion_amount, follow_up_date, status_updated_at, status_updated_by_name`. Dhruva logins and
+admins get `status_updated_by` (user id) on list/detail responses and in the export; admins also get
+`created_by`. The status and amount fields remain read-only for Dhruva logins.
 
 ### Values (upload, add and edit)
 
@@ -1346,11 +1348,11 @@ conversion_amount, follow_up_date, status_updated_at, status_updated_by_name`. A
 | `date` | Kept as typed (`event_date_text`, spacing collapsed). `event_date` is filled when the text is one clear date: a real Excel date, `DD-MM-YYYY`, `YYYY-MM-DD`, or one day and one month in any order ("Dec 4th", "12th Dec", "Feb 28th, Tentative date", "April 23rd 2027"). **Without a year: the next time that day comes** (today included), counted from the day it's entered, and not recalculated later. Text only (no `event_date`): a month alone ("March"), ranges and choices ("Jan 22nd -24th 2027", "Feb 24&25th 2027", "Dec 5th or 6th", "10th & 11th Feb 2027"), "Nil". An impossible date (`31-02-2026`): error |
 | A lead | Needs a name or a phone. **Without a phone it's allowed** and flagged `no_phone` |
 
-**Duplicates** (archived leads count):
-- with a phone: the phone or alt phone matches an existing lead's phone or alt phone (`existing`),
-  or an earlier row of the same file or request (`in_file`);
-- without a phone: the same name (any case or spacing) and event date (the date when known, else
-  the date text).
+**Duplicates** (archived leads count): a lead is a duplicate only when its phone or alt phone in
+E.164 form matches another lead's phone or alt phone **and** its name, venue, date text, and event
+type all match after trimming, collapsing whitespace, and ignoring case. This applies to an earlier
+row of the same file/request (`in_file`) and saved leads (`existing`). A lead without a phone is not
+a duplicate. `allow_duplicate: true` skips the duplicate rejection on single add and edit.
 
 ### Endpoints
 
@@ -1361,7 +1363,7 @@ conversion_amount, follow_up_date, status_updated_at, status_updated_by_name`. A
 | `POST /leads` | admin, Dhruva | One lead (same fields, plus `allow_duplicate`). 201 with the lead; 422 `[{field, message}]`; 409 `{message, duplicate}` unless `allow_duplicate: true` |
 | `GET /leads/template` | admin, Dhruva | `format=xlsx` (default) or `csv`: Name, Venue, Date, Phone, Alt phone, Event type and one example row (uploaded unchanged, it's an error: "This is the example row from the template; delete it") |
 | `GET /leads/{id}` | admin, Dhruva | One lead (archived ones too). 404 if unknown |
-| `PATCH /leads/{id}` | admin, Dhruva | Only the fields sent change; `null` clears one. Basic fields: both (the same rules as above; a changed phone is checked for duplicates, 409 unless `allow_duplicate`). Admin fields: admins only; Dhruva logins get `403 "Only admins can change …"` and nothing is saved. Admin fields record `status_updated_by` / `status_updated_at`. Unknown fields: 422 |
+| `PATCH /leads/{id}` | admin, Dhruva | Only the fields sent change; `null` clears one. Basic fields: both (the same duplicate rule as above is rechecked when basic fields change; 409 unless `allow_duplicate`). Admin fields: admins only; Dhruva logins get `403 "Only admins can change …"` and nothing is saved. Admin fields record `status_updated_by` / `status_updated_at`. Unknown fields: 422 |
 | `POST /leads/{id}/archive`, `/unarchive` | admin | Archived leads leave the list, stats, export and dashboard but still count as duplicates |
 
 **Upload preview response:**
@@ -1379,8 +1381,8 @@ conversion_amount, follow_up_date, status_updated_at, status_updated_by_name`. A
     {"row": 13, "status": "duplicate", "duplicate": {"reason": "in_file", "duplicate_of_row": 3}},
     {"row": 16, "status": "error", "errors": [{"field": "phone", "message": "Not a valid phone number"}]}
   ],
-  "counts": {"total": 13, "valid": 10, "needs_fixing": 1, "duplicates": 2, "no_phone": 3,
-             "duplicates_by_reason": {"in_file": 2, "existing": 0}}
+  "counts": {"total": 13, "valid": 11, "needs_fixing": 1, "duplicates": 1, "no_phone": 3,
+             "duplicates_by_reason": {"in_file": 1, "existing": 0}}
 }
 ```
 
@@ -1434,11 +1436,14 @@ of the other lists. Unknown `update_status` / `sort`: 422.
 | `GET /leads/filter-options` | `{venues, event_types, updates, has_phone, sources}`, each `[{value, count}]` over every listed lead. Venues and event types: spellings that differ only in case or spacing are one value, shown as written most often; an event type like "engagement, wedding" counts for both |
 
 **Export columns** (the same for admins and Dhruva logins, who see the admin fields): Sl. No, Name,
-Venue, Date (a date cell when the date is known, else the text as typed), Phone, Alt phone (E.164,
+Venue, Date (the date text as stored), Phone, Alt phone (E.164,
 or as written when unreadable), Event type, Update (`Pending`, `Converted`, …), Additional
 comments, Follow-up date, Quoted amount, Conversion amount (₹ number cells; CSV plain numbers),
-Received, Updated by (a name), Updated at (IST). Formats and formula safety as the other exports.
-An export uploads back: every row is then a duplicate.
+Received, Updated by (a name), Updated by ID (`status_updated_by`), Updated at (`status_updated_at`,
+IST). Dhruva logins receive these fields read-only; PATCH of admin fields remains 403. Formats and
+formula safety as the other exports.
+An export preserves the identifying fields so rows with a phone upload back as duplicates; leads
+without a phone are never duplicates.
 
 ### Dashboard: `GET /api/v1/analytics/dhruva`
 

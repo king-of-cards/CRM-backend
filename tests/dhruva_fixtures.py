@@ -8,7 +8,7 @@ odd spacing and line breaks; a name with a line break.
 """
 import io
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from unittest import mock
 
 from openpyxl import Workbook
@@ -32,7 +32,7 @@ SHEET1 = [
     (8, "Range Fake", None, "Jan 22nd -24th 2027", 9800000008, "wedding \nsangeeth"),
     (9, "Excel Date", "Hall Fake", datetime(2026, 12, 20), 9800000009, "after muhurtham lunch"),
     (10, "Nil Date", None, "Nil", 9800000010, None),
-    (11, "Repeat In File", None, "Dec 4th", 9800000001, "wedding"),        # same phone as row 3 (Asha)
+    (11, "Asha Fake", "Main Palace", "Dec 4th", 9800000001, "wedding"),  # normalized-identical repeat of row 1
     (12, "No Phone One", None, "Nov 22nd", None, None),                     # same name + date as SL 4
     (13, None, None, None, None, None),                                    # empty row: skipped
     (14, "Bad Phone", None, "Dec 1st", "12345", None),                      # needs fixing
@@ -72,6 +72,9 @@ class DhruvaTestBase(ApiTestBase):
         super().setUp()
         self.today_patch = mock.patch.object(periods, "today_ist", lambda: TODAY)
         self.today_patch.start()
+        self.utcnow_patch = mock.patch("app.crud.dhruva.utcnow",
+                                       lambda: datetime(2026, 11, 16, 12, 0, tzinfo=timezone.utc))
+        self.utcnow_patch.start()
         with Session(self.engine, expire_on_commit=False) as s:
             for who in ("dhruva", "dhruva2"):
                 self.users[who] = User(name=who.title(), email=f"{who}@example.com", hashed_password="x", role="dhruva")
@@ -81,6 +84,7 @@ class DhruvaTestBase(ApiTestBase):
                 s.refresh(self.users[who])
 
     def tearDown(self):
+        self.utcnow_patch.stop()
         self.today_patch.stop()
         super().tearDown()
 

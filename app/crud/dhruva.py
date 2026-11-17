@@ -12,7 +12,7 @@ from sqlmodel import Session, col, select
 from app.models.dhruva import DhruvaLead
 from app.models.user import User
 from app.models.vendor_to_koc import CLOSED_STATUSES, UpdateStatus
-from app.services.dhruva_import import CleanLead, name_date_key
+from app.services.dhruva_import import CleanLead
 
 DUPLICATE_REASONS = ("in_file", "existing")
 
@@ -22,64 +22,52 @@ def utcnow() -> datetime:
 
 
 # ── Duplicates ─────────────────────────────────────────────────────────
-def existing_phones(db: Session, e164s: set[str], exclude_id: int | None = None) -> dict[str, int]:
-    """{e164: lead id} for existing leads (archived included) whose phone or alt phone is one of these."""
-    found: dict[str, int] = {}
+def _duplicate_text(value: str | None) -> str:
+    """Normalize the four identifying text fields for Dhruva's duplicate rule."""
+    return re.sub(r"\s+", " ", value or "").strip().casefold()
+
+
+def _duplicate_details(lead: CleanLead) -> tuple[str, str, str, str]:
+    return tuple(_duplicate_text(value) for value in
+                 (lead.name, lead.venue, lead.event_date_text, lead.event_type))
+
+
+def _matching_existing(db: Session, leads: list[CleanLead], exclude_id: int | None = None) -> list[DhruvaLead]:
+    e164s = set().union(*(lead.e164s for lead in leads)) if leads else set()
+    rows: list[DhruvaLead] = []
     numbers = sorted(e164s)
     for i in range(0, len(numbers), 500):
         chunk = numbers[i:i + 500]
-        stmt = select(DhruvaLead.id, DhruvaLead.phone_e164, DhruvaLead.alt_phone_e164).where(
+        stmt = select(DhruvaLead).where(
             or_(col(DhruvaLead.phone_e164).in_(chunk), col(DhruvaLead.alt_phone_e164).in_(chunk)))
-        for lead_id, phone, alt in db.exec(stmt):
-            if lead_id == exclude_id:
-                continue
-            for e in (phone, alt):
-                if e in e164s:
-                    found.setdefault(e, lead_id)
-    return found
-
-
-def existing_name_dates(db: Session, exclude_id: int | None = None) -> dict[tuple, int]:
-    """{(name, date) key: lead id} over every existing lead with a name (archived included)."""
-    out: dict[tuple, int] = {}
-    stmt = select(DhruvaLead.id, DhruvaLead.name, DhruvaLead.event_date, DhruvaLead.event_date_text).where(
-        col(DhruvaLead.name).is_not(None))
-    for lead_id, name, event_date, text in db.exec(stmt):
-        key = name_date_key(name, event_date, text)
-        if key and lead_id != exclude_id:
-            out.setdefault(key, lead_id)
-    return out
+        rows.extend(row for row in db.exec(stmt) if row.id != exclude_id)
+    return rows
 
 
 def check_duplicates(db: Session, leads: list[CleanLead], exclude_id: int | None = None) -> list[dict | None]:
     """One entry per lead: None, or {"reason": "existing", "lead_id"} / {"reason": "in_file", "row_index"}.
-    With a phone: phone or alt phone matches an existing lead or an earlier lead of the list.
-    Without a phone: the same name and event date."""
-    phones_found = existing_phones(db, set().union(*(l.e164s for l in leads)) if leads else set(), exclude_id)
-    name_dates = existing_name_dates(db, exclude_id) if any(l.no_phone for l in leads) else {}
-    seen_phone: dict[str, int] = {}
-    seen_name: dict[tuple, int] = {}
+    A phone/alt phone match is a duplicate only when name, venue, date text, and event type also
+    match after whitespace and case normalization. Leads without a phone are never duplicates."""
+    existing = _matching_existing(db, leads, exclude_id)
+    seen: dict[tuple[str, tuple[str, str, str, str]], int] = {}
     out: list[dict | None] = []
     for index, lead in enumerate(leads):
         dup = None
-        if not lead.no_phone:
-            hit = next((phones_found[e] for e in sorted(lead.e164s) if e in phones_found), None)
+        details = _duplicate_details(lead)
+        if lead.e164s:
+            hit = next((row for row in existing
+                        if lead.e164s.intersection({row.phone_e164, row.alt_phone_e164})
+                        and details == tuple(_duplicate_text(value) for value in
+                            (row.name, row.venue, row.event_date_text, row.event_type))), None)
             if hit is not None:
-                dup = {"reason": "existing", "lead_id": hit}
+                dup = {"reason": "existing", "lead_id": hit.id}
             else:
-                earlier = next((seen_phone[e] for e in sorted(lead.e164s) if e in seen_phone), None)
+                earlier = next((seen[(phone, details)] for phone in sorted(lead.e164s)
+                                if (phone, details) in seen), None)
                 if earlier is not None:
                     dup = {"reason": "in_file", "row_index": earlier}
-            for e in lead.e164s:
-                seen_phone.setdefault(e, index)
-        else:
-            key = name_date_key(lead.name, lead.event_date, lead.event_date_text)
-            if key is not None:
-                if key in name_dates:
-                    dup = {"reason": "existing", "lead_id": name_dates[key]}
-                elif key in seen_name:
-                    dup = {"reason": "in_file", "row_index": seen_name[key]}
-                seen_name.setdefault(key, index)
+            for phone in lead.e164s:
+                seen.setdefault((phone, details), index)
         out.append(dup)
     return out
 
@@ -144,9 +132,10 @@ def _iso(value: datetime | date | None) -> str | None:
     return value.isoformat()
 
 
-def serialize(row: DhruvaLead, creator_name: str | None, updater_name: str | None, admin: bool) -> dict:
-    """The lead object. Everyone gets the admin fields (Dhruva logins read-only); user ids of the
-    updater only for admins."""
+def serialize(row: DhruvaLead, creator_name: str | None, updater_name: str | None, admin: bool,
+             expose_status_updater_id: bool = False) -> dict:
+    """The lead object. Dhruva list/detail routes can include the updater id read-only; creator
+    ids are limited to admins."""
     out = {
         "id": row.id, "name": row.name, "venue": row.venue,
         "event_date": _iso(row.event_date), "event_date_text": row.event_date_text,
@@ -161,6 +150,7 @@ def serialize(row: DhruvaLead, creator_name: str | None, updater_name: str | Non
     }
     if admin:
         out["created_by"] = row.created_by
+    if admin or expose_status_updater_id:
         out["status_updated_by"] = row.status_updated_by
     return out
 
@@ -273,7 +263,8 @@ def list_page(db: Session, f: DhruvaFilters, sort: str, order: str, page: int, p
     total = count(db, f)
     offset = (page - 1) * page_size
     rows = db.exec(with_names().where(*conditions(f)).order_by(*order_by(sort, order)).offset(offset).limit(page_size)).all()
-    items = [{"sl_no": offset + i + 1, **serialize(*row, admin=admin)} for i, row in enumerate(rows)]
+    items = [{"sl_no": offset + i + 1, **serialize(*row, admin=admin, expose_status_updater_id=True)}
+             for i, row in enumerate(rows)]
     return {"items": items, "total": total, "page": page, "page_size": page_size,
             "pages": math.ceil(total / page_size)}
 
