@@ -171,6 +171,7 @@ def common_filter_params(allowed_origins: tuple[str, ...], source_label: str):
         also_in: Literal["yes", "no"] | None = Query(None, description="The phone also exists in another source "
                                                      "or Vendor -> KOC (that you may see)"),
         hot: Literal["yes", "no"] | None = Query(None, description="Only hot leads (yes) or non-hot leads (no)"),
+        follow_up: Literal["due", "overdue", "today", "upcoming"] | None = Query(None),
         interest: list[str] | None = Query(None, include_in_schema=False),      # replaced: 400
         converted: str | None = Query(None, include_in_schema=False),           # replaced: 400
     ):
@@ -179,7 +180,7 @@ def common_filter_params(allowed_origins: tuple[str, ...], source_label: str):
                                      "(e.g. update_status=interested or update_status=converted)")
         return lead_filters.common_filters(period, search, event_from, event_to, upcoming_days, vendor_id, unassigned,
                                            update_status, quote, conversion, origin, allowed_origins, source_label,
-                                           also_in, hot)
+                                           also_in, hot, follow_up)
     return dependency
 
 

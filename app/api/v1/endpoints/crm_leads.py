@@ -42,6 +42,7 @@ from app.services.crm_leads.fields import (
 from app.services.branches import branches_by_id
 from app.services.lead_crm import active_vendors
 from app.services import hot_leads
+from app.services import lead_activity
 from app.services.stores import branch_names
 
 router = APIRouter(prefix="/crm-leads", tags=["crm leads (add, import, export)"])
@@ -164,6 +165,11 @@ def import_rows(source: Source, body: ImportBody, user: AdminUser, db: DbSession
                                 crm={k: c.values.get(k) for k in UPLOAD_CRM_KEYS})
         imported += 1
     db.commit()
+    for result in results:
+        if result.get("status") == "imported":
+            lead_activity.log_action(db, source=source, lead_key=result["lead_key"], action="created",
+                field="lead", old=None, new="created", actor_user_id=user.id,
+                actor_name=user.name, actor_role=user.role)
     if imported:
         service.clear_caches()
     counts["imported"] = imported
@@ -294,6 +300,8 @@ def add_lead(source: Source, body: AddBody, user: AdminUser, db: DbSession):
                             empty_means_unassigned=False)
     db.commit()
     db.refresh(lead)
+    lead_activity.log_action(db, source=source, lead_key=service.lead_key_of(source, lead), action="created",
+        field="lead", old=None, new="created", actor_user_id=user.id, actor_name=user.name, actor_role=user.role)
     service.clear_caches()
     warnings = [{"type": "other_source", "sources": others}] if others else []
     if duplicate:
@@ -321,7 +329,7 @@ class EditBody(BaseModel):
 
 
 @router.patch("/{source}/{lead_key}")
-def edit_lead(source: Source, lead_key: str, body: EditBody, _: AdminUser, db: DbSession):
+def edit_lead(source: Source, lead_key: str, body: EditBody, user: AdminUser, db: DbSession):
     lead = _crm_lead_or_error(db, source, lead_key)
     raw = {k: v for k, v in body.values.items() if k in {f.key for f in FIELDS[source]} and k != "assigned_to"}
     if not raw:
@@ -339,28 +347,39 @@ def edit_lead(source: Source, lead_key: str, body: EditBody, _: AdminUser, db: D
             raise _workflow_down()
         if duplicate:
             raise _duplicate_409(duplicate, others)
+    before = service.out(source, lead)
     service.update(db, source, lead, c)
     db.commit()
     db.refresh(lead)
+    after = service.out(source, lead)
+    lead_activity.log_changes(db, source=source, lead_key=lead_key,
+        changes={field: (before.get(field), after.get(field)) for field in raw}, actor_user_id=user.id,
+        actor_name=user.name, actor_role=user.role)
     service.clear_caches()
     return {"lead": _lead_out(db, source, lead)}
-
-
 @router.post("/{source}/{lead_key}/archive")
-def archive_lead(source: Source, lead_key: str, _: AdminUser, db: DbSession):
+def archive_lead(source: Source, lead_key: str, user: AdminUser, db: DbSession):
     """Hidden from lists, counts and exports. The phone still counts in duplicate checks and
     the lead's CRM details (crm_lead_meta) are kept."""
     lead = _crm_lead_or_error(db, source, lead_key)
+    was_archived = bool(lead.is_deleted)
     service.set_archived(db, lead, True)
     db.commit()
+    if not was_archived:
+        lead_activity.log_action(db, source=source, lead_key=lead_key, action="archived", field="archived",
+            old=False, new=True, actor_user_id=user.id, actor_name=user.name, actor_role=user.role)
     service.clear_caches()
     return {"lead": _lead_out(db, source, lead)}
 
 
 @router.post("/{source}/{lead_key}/unarchive")
-def unarchive_lead(source: Source, lead_key: str, _: AdminUser, db: DbSession):
+def unarchive_lead(source: Source, lead_key: str, user: AdminUser, db: DbSession):
     lead = _crm_lead_or_error(db, source, lead_key)
+    was_archived = bool(lead.is_deleted)
     service.set_archived(db, lead, False)
     db.commit()
+    if was_archived:
+        lead_activity.log_action(db, source=source, lead_key=lead_key, action="unarchived", field="archived",
+            old=True, new=False, actor_user_id=user.id, actor_name=user.name, actor_role=user.role)
     service.clear_caches()
     return {"lead": _lead_out(db, source, lead)}

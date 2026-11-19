@@ -11,6 +11,7 @@ import logging
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
+from sqlmodel import select
 
 from app.api.deps import AdminUser, DbSession, LeadViewer, NotDhruvaUser, OptionalPeriod, PageSize
 from app.crud import vendor_to_koc as crud
@@ -19,10 +20,12 @@ from app.models.user import Role, User
 from app.models.vendor import Vendor
 from app.models.vendor_to_koc import (
     LeadBulkCreate, LeadCreate, LeadUpdate, UpdateStatus, VendorCreate, VendorRead, VendorUpdate, VendorUserLink,
+    VendorToKocLead,
 )
 from app.services import periods
 from app.services import also_in as also_in_service
 from app.services import notifications
+from app.services import lead_activity
 from app.services.access import Viewer
 from app.services.vendor_lead_import import (
     MAX_FILE_BYTES, PHONE_RE, ImportFileError, flag_template_example, parse_file_date,
@@ -140,6 +143,14 @@ def bulk_create_leads(body: LeadBulkCreate, db: DbSession, scope: VendorLogin):
     existing = crud.existing_phones(db, vendor.id, {lead.phone for lead in valid})
     new = [lead for lead in valid if lead.phone not in existing]
     added = crud.insert_ignoring_duplicates(db, vendor.id, new, scope.user.id) if new else 0
+    if added:
+        saved = list(db.exec(select(VendorToKocLead).where(VendorToKocLead.vendor_id == vendor.id,
+            VendorToKocLead.phone.in_([item.phone for item in new]),
+            VendorToKocLead.source == "bulk_upload", VendorToKocLead.created_by == scope.user.id)))
+        for row in saved:
+            lead_activity.log_action(db, source="vendor_to_koc", lead_key=str(row.id), action="created",
+                field="name", old=None, new=row.name, actor_user_id=scope.user.id,
+                actor_name=scope.user.name, actor_role=scope.user.role)
     duplicates += len(valid) - added           # in the database before, or saved meanwhile
     if added:
         try:
@@ -168,6 +179,9 @@ def create_lead(body: LeadCreate, db: DbSession, scope: VendorLogin):
     lead, vendor_name, updater_name = crud.get_lead(db, lead_id)
     response = crud.serialize(lead, vendor_name, False, updater_name)
     lead_name = lead.name
+    lead_activity.log_action(db, source="vendor_to_koc", lead_key=str(lead_id), action="created",
+        field="name", old=None, new=lead.name, actor_user_id=scope.user.id,
+        actor_name=scope.user.name, actor_role=scope.user.role)
     try:
         notifications.notify_admins_vendor_added(
             db, vendor_id=vendor.id, actor_user_id=scope.user.id, actor_name=scope.user.name,
@@ -317,7 +331,11 @@ def mark_vendor_lead_hot(lead_id: int, db: DbSession, scope: LeadViewer):
     found = crud.get_lead(db, lead_id, vendor_id=None if scope.is_admin else scope.vendor_id)
     if found is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Lead not found")
+    was_hot = found[0].is_hot
     crud.set_hot(db, found[0], scope.user.id, True)
+    if not was_hot:
+        lead_activity.log_action(db, source="vendor_to_koc", lead_key=str(lead_id), action="hot_on", field="is_hot",
+            old=False, new=True, actor_user_id=scope.user.id, actor_name=scope.user.name, actor_role=scope.user.role)
     marked_at = found[0].hot_marked_at
     marked_at = marked_at if marked_at.tzinfo else marked_at.replace(tzinfo=timezone.utc)
     return {"id": lead_id, "is_hot": True, "hot_marked_by": scope.user.id,
@@ -329,7 +347,11 @@ def unmark_vendor_lead_hot(lead_id: int, db: DbSession, scope: LeadViewer):
     found = crud.get_lead(db, lead_id, vendor_id=None if scope.is_admin else scope.vendor_id)
     if found is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Lead not found")
+    was_hot = found[0].is_hot
     crud.set_hot(db, found[0], scope.user.id, False)
+    if was_hot:
+        lead_activity.log_action(db, source="vendor_to_koc", lead_key=str(lead_id), action="hot_off", field="is_hot",
+            old=True, new=False, actor_user_id=scope.user.id, actor_name=scope.user.name, actor_role=scope.user.role)
     return {"id": lead_id, "is_hot": False, "hot_marked_by": None, "hot_marked_at": None}
 
 
@@ -345,9 +367,23 @@ def update_lead(lead_id: int, body: LeadUpdate, db: DbSession, admin: AdminUser)
     found = crud.get_lead(db, lead_id)
     if found is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Lead not found")
+    before = {k: getattr(found[0], k) for k in changes}
     crud.update_lead(db, found[0], changes, admin.id)
+    lead_activity.log_changes(db, source="vendor_to_koc", lead_key=str(lead_id),
+        changes={k: (before[k], getattr(found[0], k)) for k in changes}, actor_user_id=admin.id,
+        actor_name=admin.name, actor_role=admin.role)
     lead, vendor_name, updater_name = crud.get_lead(db, lead_id)
     return crud.serialize(lead, vendor_name, True, updater_name)
+
+
+@router.get("/leads/{lead_id}/activity")
+def get_lead_activity(lead_id: int, db: DbSession, scope: LeadViewer,
+                      page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100)):
+    found = crud.get_lead(db, lead_id, vendor_id=None if scope.is_admin else scope.vendor_id)
+    if found is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Lead not found")
+    return lead_activity.list_activity(db, source="vendor_to_koc", lead_key=str(lead_id), page=page,
+        page_size=page_size, allowed_fields=None if scope.is_admin else lead_activity.VTK_VISIBLE_FIELDS)
 
 
 # ── Vendors (admin only) ───────────────────────────────────────────────

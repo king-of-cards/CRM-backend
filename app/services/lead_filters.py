@@ -60,11 +60,12 @@ class CommonFilters:
     conversion: tuple[str, int | None] | None = None       # same, on the conversion amount
     also_in: str | None = None                             # yes | no
     hot: bool | None = None
+    follow_up: str | None = None
     origins: list[str] = field(default_factory=list)
 
     @property
     def has_crm_filters(self) -> bool:
-        return bool(self.updates or self.quote or self.conversion or self.also_in or self.hot is not None)
+        return bool(self.updates or self.quote or self.conversion or self.also_in or self.hot is not None or self.follow_up)
 
     @property
     def has_event_filter(self) -> bool:
@@ -111,6 +112,7 @@ def common_filters(
     source_label: str,
     also_in: str | None = None,
     hot: str | None = None,
+    follow_up: str | None = None,
 ) -> CommonFilters:
     """Validate and build the common filters (the endpoints declare the query parameters)."""
     start, end = _event_day(event_from, "event_from"), _event_day(event_to, "event_to")
@@ -137,6 +139,8 @@ def common_filters(
 
     if hot not in (None, "yes", "no"):
         raise bad_request("hot must be yes or no")
+    if follow_up not in (None, "due", "overdue", "today", "upcoming"):
+        raise bad_request("follow_up must be due, overdue, today or upcoming")
 
     return CommonFilters(
         search=(search or "").strip() or None,
@@ -150,6 +154,7 @@ def common_filters(
         conversion=parse_quote(conversion, "conversion"),
         also_in=also_in,
         hot=None if hot is None else hot == "yes",
+        follow_up=follow_up,
         origins=origins,
     )
 
@@ -207,6 +212,22 @@ def allowed_keys(db: Session, source: str, viewer, f: CommonFilters) -> set[str]
 
             marked = hot_leads.hot_keys(db, source)
             sets.append(universe & marked if f.hot else universe - marked)
+        if f.follow_up:
+            from app.models.vendor_to_koc import CLOSED_STATUSES
+            today = periods.today_ist()
+            dated = {m.lead_key: m for m in metas.values() if m.follow_up_date is not None}
+            def matches_follow_up(key: str) -> bool:
+                meta = dated.get(key)
+                if meta is None:
+                    return False
+                value = meta.follow_up_date
+                if meta.update_status in CLOSED_STATUSES:
+                    return False
+                return ((f.follow_up == "due" and value <= today) or
+                        (f.follow_up == "overdue" and value < today) or
+                        (f.follow_up == "today" and value == today) or
+                        (f.follow_up == "upcoming" and value > today))
+            sets.append({k for k in universe if matches_follow_up(k)})
     if not sets:
         return None
     keys = sets[0]

@@ -13,6 +13,7 @@ from sqlmodel import Session
 
 from app.api.v1.endpoints import analytics
 from app.models.crm_spin_lead import CrmSpinLead
+from app.models.hot_lead import CrmHotLead
 from app.models.wedding_lead import WeddingLead
 from app.models.wedding_plan import WeddingPlan
 from app.models.whatsapp_lead import WhatsAppLead
@@ -123,7 +124,7 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
                                                      "wedding_planner": {"shareable": 1, "not_shared": 1, "shared": 0}})
         self.assertEqual(o["photography_budget"]["count"], 1)
         self.assertEqual(o["budget_fit"], {"over": 1})
-        self.assertEqual([c["value"] for c in o["top_cities"]], ["Bangalore", "Udaipur"])
+        self.assertEqual([c["city"] for c in o["top_cities"]], ["Bengaluru", "Udaipur"])
 
     def test_totals_are_the_leads_that_arrived_in_the_period(self):
         o = self.overview(date_from="2026-11-01", date_to="2026-11-10")
@@ -258,20 +259,27 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
 
     def test_outcomes_per_source(self):
         self.add_outcomes()
-        def k(total, interested=0, not_interested=0, quoted=(0, 0), converted=0, conversion=(0, 0)):
+        with Session(self.engine) as s:
+            s.add(CrmHotLead(source="wedding", lead_key="WD_10", hot_marked_by=self.users["admin"].id,
+                             hot_marked_at=NOW))
+            s.add(CrmHotLead(source="wedding", lead_key="WD_OCT", hot_marked_by=self.users["admin"].id,
+                             hot_marked_at=NOW))
+            s.commit()
+        def k(total, interested=0, not_interested=0, quoted=(0, 0), converted=0, conversion=(0, 0), hot_count=0):
             return {"leads": total, "total": total, "interested": interested, "not_interested": not_interested,
                     "quoted_count": quoted[0], "quoted_total": quoted[1], "converted": converted,
                     "converted_pct": round(converted / total * 100, 1) if total else None,
-                    "conversion_count": conversion[0], "conversion_total": conversion[1]}
+                    "conversion_count": conversion[0], "conversion_total": conversion[1],
+                    "quotes_count": quoted[0], "hot_count": hot_count}
 
         overview = self.overview(date_from="2026-11-10", date_to="2026-11-16")
         o = overview["outcomes"]
         self.assertEqual(o["whatsapp"], k(2, quoted=(1, 40000), converted=1))
-        self.assertEqual(o["wedding"], k(1, quoted=(1, 50000), converted=1, conversion=(1, 45000)))
+        self.assertEqual(o["wedding"], k(1, quoted=(1, 50000), converted=1, conversion=(1, 45000), hot_count=1))
         self.assertEqual(o["wedding_planner"], k(1, not_interested=1, quoted=(1, 1_000_000)))
         self.assertEqual(o["spin"], k(2, interested=1, converted=1))
         self.assertEqual(o["all"], k(6, interested=1, not_interested=1, quoted=(3, 1_090_000), converted=3,
-                                     conversion=(1, 45000)))
+                                     conversion=(1, 45000), hot_count=1))
         # The top-level KPIs: every source combined (= outcomes.all without "leads")
         self.assertEqual(overview["kpis"], {key: v for key, v in o["all"].items() if key != "leads"})
         # A period with no leads
@@ -281,6 +289,7 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
         # All time: the October wedding lead's interest counts too
         everything = self.overview(period="all")["outcomes"]
         self.assertEqual(everything["wedding"]["interested"], 1)
+        self.assertEqual(everything["wedding"]["hot_count"], 2)
         self.assertEqual(everything["all"]["leads"], 11)
         self.assertEqual(everything["all"]["converted_pct"], round(3 / 11 * 100, 1))
 
@@ -307,7 +316,8 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
                     for source, url in stats_url.items():
                         stats = self.client.get(f"{API}{url}", params=dates)
                         self.assertEqual(stats.status_code, 200, stats.text)
-                        expected = {k: v for k, v in outcomes[source].items() if k != "leads"}
+                        expected = {k: v for k, v in outcomes[source].items()
+                                    if k not in ("leads", "quotes_count", "hot_count")}
                         self.assertEqual(stats.json()["kpis"], expected, (who, dates, source))
 
     def test_outcomes_vendor_scope(self):

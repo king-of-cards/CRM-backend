@@ -30,6 +30,8 @@ per-vendor access rules, and the CRM details endpoint `PUT /leads/{source}/{lead
 11. [Vendor → KOC](#11-vendor--koc)
 12. [Users and vendor logins](#12-users-and-vendor-logins)
 13. [Dhruva leads](#13-dhruva-leads)
+14. [Notifications and hot leads](#14-notifications-and-hot-leads)
+15. [Activity and follow-up reminders](#15-activity-and-follow-up-reminders)
 
 ---
 
@@ -58,7 +60,7 @@ details endpoint (`PUT /leads/{source}/{lead_key}/crm`).
 Workflow spin leads keep their numeric id (`101`) and sheet leads keep their sheet key, so a
 `crm-` key never clashes with them.
 
-**CRM fields are separate.** Assigned vendor, Update, quoted date/amount, conversion amount and notes
+**CRM fields are separate.** Assigned vendor, Update, quoted date/amount, conversion amount, follow-up date and notes
 are **not** lead fields. They are stored in `crm_lead_meta` and edited only through
 `PUT /leads/{source}/{lead_key}/crm` (see [Access](#5-access-who-sees-and-edits-what) for who may
 change which field).
@@ -812,6 +814,7 @@ can't see.
 | `update_status` (`converted`, `not_converted`, `purchased_elsewhere`, `purchased_with_us`, `will_call_back`, `interested`, `not_interested`; `null` = Pending), `quoted_amount`, `quoted_date`, `conversion_amount` (rupees, 0–100,000,000) | ✔ | ✔ | **404** |
 | `vendor_id` (a vendor = manual; `null` = automatic) | ✔ | **403** `Only an admin can assign leads.` | **404** |
 | `notes` | ✔ | ✔ | **404** |
+| `follow_up_date` (`YYYY-MM-DD` or `null`) | ✔ | ✔ | **404** |
 
 - `updated_by` records the login that made the last change (admin or vendor).
 - `interest` and `converted` were replaced by `update_status`: sending either answers **422**
@@ -962,7 +965,7 @@ separate "submitted" time. Leads with no arrival time are never in a period, so 
 
 ### KPIs: the same six everywhere
 
-Every lead screen's stats and both dashboards return a `kpis` object with the same keys, computed
+Every lead screen's stats and dashboards return a `kpis` object with the same core keys, computed
 the same way over the leads they cover:
 
 ```json
@@ -985,8 +988,8 @@ Pending, without amounts); Vendor → KOC from its own columns.
 |---|---|
 | `GET /spin-leads/stats`, `/whatsapp-leads/stats`, `/wedding-leads/stats`, `/wedding-plans/stats` | The list's leads for the same filters (vendor users: their own) |
 | `GET /vendor-to-koc/leads/stats` | The same filtered Vendor → KOC leads (vendors: their own) |
-| `GET /analytics/overview` | `kpis`: every source combined, the period's leads. **Drill-down:** `outcomes.<source>` has every KPI per source (`interested`, `not_interested`, `quoted_count` / `quoted_total`, `converted`, `conversion_count` / `conversion_total`), and `sharing.by_source` / `needs_attention.by_source` split those |
-| `GET /analytics/vendor-to-koc` | The period's Vendor → KOC leads (admins: all; vendors: their own) |
+| `GET /analytics/overview` | `kpis`: every source combined, the period's leads. Dashboard-only `quotes_count` is amount-only and `hot_count` counts hot leads; `outcomes.<source>` has those counts per source, all following the date period |
+| `GET /analytics/vendor-to-koc` | Period's Vendor → KOC leads (admins: all; vendors: their own); dashboard `kpis` adds amount-only `quotes_count` and date-filtered `hot_count` |
 
 ### What each number covers (`/analytics/overview`)
 
@@ -1004,7 +1007,10 @@ Pending, without amounts); Vendor → KOC from its own columns.
 | `trend` | Lead inflow | `[{date, end, <source counts>}]`: one point per day; for periods over 90 days, 7-day buckets starting at `date_from` (the last may be shorter). `period.granularity` says which |
 | `photography_budget`, `guests`, `budget_fit`, `repeats` | Budgets & size | Leads that arrived in the period |
 | `sharing` | Shared with partners, Partners callout | Wedding and planner leads that arrived in the period. `by_source`: `{wedding, wedding_planner}`, each `{shareable, shared, not_shared}` (they add up to the totals) |
-| `top_cities`, `top_countries`, `occasions`, `partners` | Lists | Leads that arrived in the period |
+| `top_cities` | Top 10 `[{city, count, by_source}]` | Wedding, Wedding planner and Vendor → KOC city leads that arrived in the period; existing cleanup plus alias merging. `top_cities_no_city` counts included-source leads with blank city. Spin is omitted because workflow city/location is unpopulated; WhatsApp country and Dhruva are not cities |
+| City alias normalization | Top cities | Bangalore/Bengaluru, Hyderabad/Hydrabad/Hyderbad, Gurgaon/Gurugram, Bombay/Mumbai, Madras/Chennai, Calcutta/Kolkata, Mysore/Mysuru, Trivandrum/Thiruvananthapuram, Cochin/Kochi, Pune/Poona; observed `Banglore` and `@Bengaluru` also normalize to Bengaluru |
+| City aliases |  | Bangalore/Bengaluru, Hyderabad/Hydrabad/Hyderbad, Gurgaon/Gurugram, Bombay/Mumbai, Madras/Chennai, Calcutta/Kolkata, Mysore/Mysuru, Trivandrum/Thiruvananthapuram, Cochin/Kochi, Pune/Poona; observed `Banglore` and `@Bengaluru` also normalize to Bengaluru |
+| `top_countries`, `occasions`, `partners` | Lists | Leads that arrived in the period |
 | `upcoming_by_month` | Upcoming events by month | Leads that arrived in the period, by event month (from this month) |
 | `needs_attention` | Needs attention | `{not_shared, over_budget, total}` among the leads that arrived in the period. `by_source`: `{wedding, wedding_planner}`, each `{not_shared, over_budget, total}` (wedding leads have no budget fit, so their `over_budget` is 0) |
 | `outcomes` | CRM results per source | `{spin, whatsapp, wedding, wedding_planner, all}`, each [the six KPIs](#kpis-the-same-six-everywhere) plus `leads` (= `total`, kept for the current screen) over the leads that arrived in the period (all of the viewer's leads for `period=all`). `interested` / `converted`: the Update is "interested" / "converted".  The values come from the CRM details (`crm_lead_meta`) with the same lead keys as the lists, so they equal the list totals for `update_status=interested`, `update_status=not_interested`, `update_status=converted`, `quote=has` and `conversion=has` with the same dates, and each list's stats `kpis`. `spin` is `null` (and left out of `all`) when the workflow database can't be read |
@@ -1050,6 +1056,7 @@ leads, whatever they send.
 | Parameter | Spin | International | Wedding | Planner | Meaning |
 |---|---|---|---|---|---|
 | `hot` | yes / no | yes / no | yes / no | yes / no | Whether the lead is marked hot; workflow Spin rows use the CRM hot flag sidecar |
+| `follow_up` | `due`, `overdue`, `today`, `upcoming` | same | same | same | Follow-up date relative to today (IST); no-date and closed leads do not match |
 | `search` | ✔ | ✔ | ✔ | ✔ | Text match. Name and email where the source has them, and the phone by its digits (`+91 98450` finds `919845…`). Spin: every visible text field. International: phone, country and event-date text. Wedding: name, email, city, occasion, leads shared. Planner: name, email, city, plan ID, traditions, leads shared |
 | `date_from`, `date_to` | ✔ | ✔ | ✔ | ✔ | Arrival date, IST days, inclusive (see [Dashboard](#9-dashboard-date-filter)) |
 | `event_from`, `event_to` | ✔ | ✔ | ✔ | ✔ | Event date, `YYYY-MM-DD`, inclusive. Spin: occasion date. International and Wedding: the event date when it reads as a date (text such as "April 2027" never matches). Planner: wedding date (first day, else the 1st of the month) |
@@ -1508,3 +1515,37 @@ other vendors receive 404. Dhruva logins receive 403. Apply
 `migrations/2026-11-19_notifications_hot.sql` to the CRM MySQL database before deploying; do not
 apply it to the read-only Spin workflow database. `create_all()` creates the new tables at startup,
 but does not add the Vendor → KOC columns to an existing table.
+
+## 15. Activity and follow-up reminders
+
+Activity is recorded for app-created leads, app field edits, real vendor assignment changes,
+archive/unarchive and hot on/off actions. Unchanged fields are omitted. Activity writes are
+best-effort and a logging failure does not fail the lead action. Vendor users see only fields
+visible to them in the section; assignment entries are hidden. Dhruva users can read all activity
+for Dhruva leads, including admin-field changes. Sheet sync updates and edits made directly in
+Google Sheets are not logged.
+
+| Method and path | Who | What |
+|---|---|---|
+| `GET /leads/{source}/{lead_key}/activity` | admin, vendor who can see the lead | Newest first; `page` (default 1), `page_size` (default 25, max 100); items include `actor_name`, `actor_role`, `action`, `field`, `old_value`, `new_value`, `created_at` (ISO UTC) |
+| `GET /vendor-to-koc/leads/{id}/activity` | admin, owning vendor | Same paging and item shape; vendor sees lead fields and KOC fields shown read-only |
+| `GET /dhruva/leads/{id}/activity` | admin, Dhruva | Same paging and item shape; Dhruva activity is read-only |
+| `GET /reminders/follow-ups?days=7` | admin, vendor | Overdue, today and upcoming follow-ups through N days (0–30, default 7); overdue first, oldest first. Includes counts `{overdue, today, upcoming}` |
+| `GET /dhruva/reminders/follow-ups?days=7` | admin, Dhruva | Same reminder format over Dhruva leads; Dhruva logins do not receive the admin-only status field |
+
+Reminder items contain `source`, `lead_key`, `name`, `phone`, `follow_up_date`, and `days_overdue`
+(positive overdue, zero today, negative upcoming). Admins also receive `update_status` and, outside
+Dhruva, `vendor_name`. Archived, converted and not-interested leads are excluded. Vendors see only
+their assigned CRM leads and their own Vendor → KOC leads. The general reminders endpoint returns
+403 to Dhruva logins. Spin workflow names and phones are loaded in batches of at most 200 items.
+
+Follow-up dates for Spin, International, Wedding and Wedding planner live in `crm_lead_meta`.
+Apply the reviewed migration once to the CRM MySQL database; do not apply it to the read-only Spin
+workflow database:
+
+```powershell
+mysql --host=<host> --user=<user> --password <database> < migrations/2026-11-19_lead_activity.sql
+```
+
+The migration's `ALTER TABLE crm_lead_meta ADD COLUMN follow_up_date` runs only once.
+`create_all()` creates `crm_lead_activity` at startup, but does not add columns to an existing table.

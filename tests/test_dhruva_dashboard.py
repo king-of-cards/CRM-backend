@@ -59,7 +59,7 @@ class DhruvaDashboardTest(DhruvaTestBase, unittest.TestCase):
         self.assertEqual(o["kpis"], {"total": 4, "interested": 1, "not_interested": 1, "quoted_count": 2,
                                      "quoted_total": 250000, "converted": 1, "converted_pct": 25.0,
                                      "conversion_count": 1, "conversion_total": 180000, "pending": 1,
-                                     "upcoming_30_days": 2})
+                                 "upcoming_30_days": 2, "quotes_count": 2})
         self.assertEqual(o["by_event_type"], [{"value": "wedding", "count": 2}, {"value": "engagement", "count": 1},
                                               {"value": "reception", "count": 1}])
         self.assertEqual(o["top_venues"], [{"value": "Main Palace", "count": 2}, {"value": "Hall", "count": 1}])

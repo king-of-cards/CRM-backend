@@ -29,6 +29,7 @@ from app.models.lead_meta import LeadMeta
 from app.models.wedding_lead import WeddingLead
 from app.models.wedding_plan import WeddingPlan
 from app.models.whatsapp_lead import WhatsAppLead
+from app.models.vendor_to_koc import VendorToKocLead
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,34 @@ def _clean_place(text: str | None) -> str | None:
     return part.title() if part else None
 
 
+_CITY_ALIASES = {
+    "bangalore": "Bengaluru", "bengaluru": "Bengaluru", "banglore": "Bengaluru",
+    "@bengaluru": "Bengaluru",
+    "hyderabad": "Hyderabad", "hydrabad": "Hyderabad", "hyderbad": "Hyderabad",
+    "gurgaon": "Gurugram", "gurugram": "Gurugram", "bombay": "Mumbai", "mumbai": "Mumbai",
+    "madras": "Chennai", "chennai": "Chennai", "calcutta": "Kolkata", "kolkata": "Kolkata",
+    "mysore": "Mysuru", "mysuru": "Mysuru", "trivandrum": "Thiruvananthapuram",
+    "thiruvananthapuram": "Thiruvananthapuram", "cochin": "Kochi", "kochi": "Kochi",
+    "pune": "Pune", "poona": "Pune",
+}
+
+
+def _city_key(value: str | None) -> str | None:
+    cleaned = _clean_place(value)
+    return _CITY_ALIASES.get(cleaned.casefold(), cleaned) if cleaned else None
+
+
+def _top_cities(rows: list[tuple[str, str | None]]) -> list[dict]:
+    counts: dict[str, Counter] = defaultdict(Counter)
+    for source, value in rows:
+        city = _city_key(value)
+        if city:
+            counts[city][source] += 1
+    ranked = sorted(counts.items(), key=lambda pair: (-sum(pair[1].values()), pair[0].casefold()))[:10]
+    return [{"city": city, "count": sum(by_source.values()), "by_source": dict(by_source)}
+            for city, by_source in ranked]
+
+
 def _top(counter: Counter, n: int = 8) -> list[dict]:
     return [{"value": k, "count": v} for k, v in counter.most_common(n)]
 
@@ -87,6 +116,7 @@ def _spin_rows(db: Session) -> list[dict] | None:
             "created": lead.created_at,
             "occasion_type": details.get("occasionType"),
             "occasion_date": details.get("occasionDate"),
+            "is_workflow": False,
         })
     return rows
 
@@ -105,6 +135,8 @@ def _workflow_spin_rows() -> list[dict] | None:
         created_col = next((table.c[c] for c in ("created_at", "createdAt", "created") if c in table.c), None)
         type_field = next((fields[k] for k in ("occasiontype", "eventtype", "occasion") if k in fields), None)
         date_field = next((fields[k] for k in ("occasiondate", "eventdate", "weddingdate") if k in fields), None)
+        city_column = next((c for c in table.columns if sl._norm_name(c.name) in ("city", "location")), None)
+        city_field = next((fields[k] for k in ("city", "location") if k in fields), None)
 
         pk = list(table.primary_key.columns)[0]
         exprs = [pk.label("key")]
@@ -118,12 +150,18 @@ def _workflow_spin_rows() -> list[dict] | None:
         if date_field is not None:
             exprs.append(sl._json_text_expr(table, date_field).label("occasion_date"))
             names.append("occasion_date")
+        if city_column is not None:
+            exprs.append(city_column.label("city"))
+            names.append("city")
+        elif city_field is not None:
+            exprs.append(sl._json_text_expr(table, city_field).label("city"))
+            names.append("city")
         if len(exprs) == 1:
             return []
 
         with read_engine.connect() as conn:
             rows = conn.execute(sa_select(*exprs).select_from(table).where(*base)).all()
-        return [{**dict(zip(names, r)), "key": str(r[0])} for r in rows]
+        return [{**dict(zip(names, r)), "key": str(r[0]), "is_workflow": True} for r in rows]
     except Exception:  # noqa: BLE001
         logger.warning("Spin analytics unavailable", exc_info=True)
         return None
@@ -134,11 +172,11 @@ def _counts(rows_by_source: dict[str, list], keep) -> dict[str, int]:
     return {s: sum(1 for arrival in rows if keep(arrival)) for s, rows in rows_by_source.items()}
 
 
-def _outcome(metas: list) -> dict:
+def _outcome(metas: list, hot_count: int = 0) -> dict:
     """The KPIs (app/services/kpis.py) over a set of leads (one LeadMeta or None per lead), plus
     "leads" (= total, kept for the existing screen)."""
     numbers = kpis.compute(metas)
-    return {"leads": numbers["total"], **numbers}
+    return {"leads": numbers["total"], **numbers, "quotes_count": numbers["quoted_count"], "hot_count": hot_count}
 
 
 def _outcomes(db: Session, keys_by_source: dict[str, list[str]], spin_available: bool) -> dict:
@@ -151,9 +189,14 @@ def _outcomes(db: Session, keys_by_source: dict[str, list[str]], spin_available:
             continue
         metas = {m.lead_key: m for m in db.exec(select(LeadMeta).where(LeadMeta.source == source))}
         per_lead = [metas.get(k) for k in keys_by_source[source]]
-        out[source] = _outcome(per_lead)
+        from app.services import hot_leads
+        hot = hot_leads.hot_keys(db, source)
+        hot_count = sum(1 for key in keys_by_source[source] if str(key) in hot)
+        out[source] = _outcome(per_lead, hot_count)
         every += per_lead
-    out["all"] = _outcome(every)
+    from app.services import hot_leads
+    all_hot = sum((part or {}).get("hot_count", 0) for part in out.values())
+    out["all"] = _outcome(every, all_hot)
     return out
 
 
@@ -162,7 +205,7 @@ def _change(new: int, previous: int) -> int | None:
 
 
 def _build(db: Session, keys: dict[str, set[str]] | None = None,
-           period: periods.Period | periods.AllTime | None = None) -> dict:
+           period: periods.Period | periods.AllTime | None = None, vtk_vendor_id: int | None = None) -> dict:
     """keys: {source: lead keys} to limit every number to (a vendor's own leads); None = all.
     period: the dashboard's date range (default: the last 30 days).
 
@@ -277,8 +320,19 @@ def _build(db: Session, keys: dict[str, set[str]] | None = None,
     }
     outcomes = _outcomes(db, period_keys, spin_available=spin is not None)
 
-    cities = Counter(c for c in (_clean_place(r[2]) for r in wd_p) if c)
-    cities.update(c for c in (_clean_place(r[2]) for r in wp_p) if c)
+    city_rows: list[tuple[str, str | None]] = [("wedding", r[2]) for r in wd_p]
+    city_rows += [("wedding_planner", r[2]) for r in wp_p]
+    # The live workflow currently has no city/location values (verified separately); only
+    # nonblank workflow values enter the city aggregation.
+    city_rows += [("spin", r.get("city")) for r in spin_p if r.get("is_workflow") and (r.get("city") or "").strip()]
+    vtk_stmt = select(VendorToKocLead.created_at, VendorToKocLead.city)
+    if vtk_vendor_id is not None:
+        vtk_stmt = vtk_stmt.where(VendorToKocLead.vendor_id == vtk_vendor_id)
+    vtk_rows = [(created, city) for created, city in db.exec(vtk_stmt).all()
+                if in_period(periods.ist_date(created))]
+    city_rows += [("vendor_to_koc", city) for _, city in vtk_rows]
+    top_cities = _top_cities(city_rows)
+    cities_no_city = sum(1 for _, city in city_rows if not _city_key(city))
     countries = Counter((r[2] or "").strip() for r in wa_p if r[2])
     occasions = Counter((r[3] or "").strip().title() for r in wd_p if r[3])
     occasions.update((str(r.get("occasion_type") or "")).strip().title() for r in spin_p if r.get("occasion_type"))
@@ -335,7 +389,8 @@ def _build(db: Session, keys: dict[str, set[str]] | None = None,
         "change_pct": ({**{s: _change(new[s], before[s]) for s in SOURCES}, "all": _change(new_all, before_all)}
                        if before is not None else None),
         # The six KPIs over every source's leads of the period (outcomes has them per source)
-        "kpis": {k: outcomes["all"][k] for k in kpis.KEYS},
+        "kpis": {**{k: outcomes["all"][k] for k in kpis.KEYS},
+                 "quotes_count": outcomes["all"]["quotes_count"], "hot_count": outcomes["all"]["hot_count"]},
         "source_mix": [
             {"source": s, "count": new[s], "pct": round(new[s] / new_all * 100) if new_all else 0} for s in SOURCES
         ],
@@ -351,7 +406,8 @@ def _build(db: Session, keys: dict[str, set[str]] | None = None,
             "total": open_not_shared + open_over_budget,
             "by_source": attention_by_source,
         },
-        "top_cities": _top(cities),
+        "top_cities": top_cities,
+        "top_cities_no_city": cities_no_city,
         "top_countries": _top(countries),
         "occasions": _top(occasions, 6),
         "partners": _top(partners, 8),
@@ -376,11 +432,11 @@ def _cache_key(scope, period) -> tuple:
     return ("analytics", "overview", scope, period.date_from.isoformat(), period.date_to.isoformat())
 
 
-def _builder(bind, keys, period):
+def _builder(bind, keys, period, vtk_vendor_id=None):
     """A build that opens its own session, so a background refresh never uses a closed one."""
     def build():
         with Session(bind) as session:
-            return _build(session, keys, period)
+            return _build(session, keys, period, vtk_vendor_id)
     return build
 
 
@@ -406,7 +462,8 @@ def analytics_overview(viewer: LeadViewer, db: DbSession, period: DashboardPerio
         return response_cache.get(_cache_key("admin", period), _builder(bind, None, period),
                                   fresh=FRESH_SECONDS, stale=STALE_SECONDS)
     keys = {source: access.visible_keys(db, viewer, source) for source in SOURCES}
-    return response_cache.get(_cache_key(("vendor", viewer.vendor_id), period), _builder(bind, keys, period),
+    return response_cache.get(_cache_key(("vendor", viewer.vendor_id), period),
+                              _builder(bind, keys, period, viewer.vendor_id),
                               fresh=FRESH_SECONDS, stale=FRESH_SECONDS)
 
 
@@ -471,6 +528,8 @@ def _vtk_build(db: Session, vendor_id: int | None, period, admin: bool) -> dict:
         "inflow": inflow,
         "inflow_vendors": [{"id": vid, "name": legend[vid]} for vid in sorted(legend, key=lambda v: legend[v].lower())],
     }
+    out["kpis"]["quotes_count"] = out["kpis"]["quoted_count"]
+    out["kpis"]["hot_count"] = sum(1 for lead, _ in current if lead.is_hot)
     def is_open(lead) -> bool:
         return lead.update_status is None or lead.update_status not in CLOSED_STATUSES
 
@@ -578,6 +637,7 @@ def dhruva_overview(user: DhruvaSectionUser, db: DbSession, period: AllTimeDefau
     before = sum(1 for d in arrival if previous.contains(d)) if previous else None
 
     numbers = kpis.compute(leads)
+    numbers["quotes_count"] = numbers["quoted_count"]
     numbers["pending"] = sum(1 for r in leads if r.update_status is None)
     numbers["upcoming_30_days"] = sum(1 for r in leads if r.event_date is not None
                                       and today <= r.event_date <= today + timedelta(days=30))

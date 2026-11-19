@@ -24,6 +24,7 @@ from app.models.vendor_to_koc import STATUS_LABELS
 from app.services import dhruva_import as parser
 from app.services import also_in as also_in_service
 from app.services import lead_filters, periods
+from app.services import lead_activity
 from app.services.access import Viewer
 from app.services import vendor_lead_export as files
 
@@ -116,6 +117,9 @@ def bulk_create(body: DhruvaBulkCreate, db: DbSession, user: DhruvaSectionUser):
             added += 1
     db.commit()
     ids = [row.id for row in saved]
+    for row in saved:
+        lead_activity.log_action(db, source="dhruva", lead_key=str(row.id), action="created", field="name",
+            old=None, new=row.name, actor_user_id=user.id, actor_name=user.name, actor_role=user.role)
     return {"added": added, "duplicates_skipped": skipped, "failed": failed, "errors": errors, "ids": ids}
 
 
@@ -130,6 +134,8 @@ def create_lead(body: DhruvaLeadCreate, db: DbSession, user: DhruvaSectionUser):
     if dup and not body.allow_duplicate:
         raise HTTPException(status.HTTP_409_CONFLICT, {"message": "This lead already exists.", "duplicate": dup})
     row = crud.create(db, lead, SOURCE_MANUAL, user.id)
+    lead_activity.log_action(db, source="dhruva", lead_key=str(row.id), action="created", field="name",
+        old=None, new=row.name, actor_user_id=user.id, actor_name=user.name, actor_role=user.role)
     return crud.serialize(*crud.get(db, row.id), admin=is_admin(user), expose_status_updater_id=True)
 
 
@@ -304,6 +310,8 @@ def update_lead(lead_id: int, body: DhruvaLeadUpdate, db: DbSession, user: Dhruv
     if found is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Lead not found")
     row = found[0]
+    before = {field: (row.event_date_text or row.event_date if field == "date" else getattr(row, field))
+              for field in sent}
     basic: dict = {}
     basic_sent = sent - set(ADMIN_FIELDS)
     if basic_sent:
@@ -326,6 +334,11 @@ def update_lead(lead_id: int, body: DhruvaLeadUpdate, db: DbSession, user: Dhruv
         basic = crud.lead_columns(lead)
     admin_changes = {k: getattr(body, k) for k in admin_sent}
     crud.update(db, row, basic, admin_changes, user.id)
+    after = {field: (row.event_date_text or row.event_date if field == "date" else getattr(row, field))
+             for field in sent}
+    lead_activity.log_changes(db, source="dhruva", lead_key=str(row.id),
+        changes={field: (before[field], after[field]) for field in sent}, actor_user_id=user.id,
+        actor_name=user.name, actor_role=user.role)
     return crud.serialize(*crud.get(db, lead_id), admin=is_admin(user), expose_status_updater_id=True)
 
 
@@ -333,17 +346,42 @@ def update_lead(lead_id: int, body: DhruvaLeadUpdate, db: DbSession, user: Dhruv
 def archive_lead(lead_id: int, db: DbSession, _admin: AdminUser):
     """Admins only. Archived leads leave the list, stats, export and dashboard; they still count as
     duplicates."""
-    return _set_archived(db, lead_id, True)
+    return _set_archived(db, lead_id, True, _admin)
 
 
 @router.post("/leads/{lead_id}/unarchive")
 def unarchive_lead(lead_id: int, db: DbSession, _admin: AdminUser):
-    return _set_archived(db, lead_id, False)
+    return _set_archived(db, lead_id, False, _admin)
 
 
-def _set_archived(db, lead_id: int, archived: bool) -> dict:
+def _set_archived(db, lead_id: int, archived: bool, user) -> dict:
     found = crud.get(db, lead_id)
     if found is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Lead not found")
+    was_archived = bool(found[0].is_deleted)
     crud.set_archived(db, found[0], archived)
+    if was_archived != archived:
+        lead_activity.log_action(db, source="dhruva", lead_key=str(lead_id),
+            action="archived" if archived else "unarchived", field="archived", old=was_archived,
+            new=archived, actor_user_id=user.id, actor_name=user.name, actor_role=user.role)
     return crud.serialize(*crud.get(db, lead_id), admin=True)
+
+
+@router.get("/leads/{lead_id}/activity")
+def get_activity(lead_id: int, db: DbSession, user: DhruvaSectionUser,
+                 page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100)):
+    found = crud.get(db, lead_id)
+    if found is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Lead not found")
+    return lead_activity.list_activity(db, source="dhruva", lead_key=str(lead_id), page=page, page_size=page_size)
+
+
+@router.get("/reminders/follow-ups")
+def dhruva_follow_up_reminders(db: DbSession, user: DhruvaSectionUser, days: int = Query(7, ge=0, le=30)):
+    if is_admin(user):
+        from app.api.v1.endpoints.reminders import _make_response, _reminder_rows
+        return _make_response([r for r in _reminder_rows(db, None, dhruva_only=True) if r["source"] == "dhruva"],
+                              days, True)
+    from app.api.v1.endpoints.reminders import _make_response, _reminder_rows
+    rows = [r for r in _reminder_rows(db, None, dhruva_only=True) if r["source"] == "dhruva"]
+    return _make_response(rows, days, False)

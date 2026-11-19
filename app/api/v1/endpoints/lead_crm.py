@@ -12,7 +12,7 @@ import logging
 from datetime import date, datetime, timezone
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field, model_validator
 from sqlmodel import select
 
@@ -21,7 +21,7 @@ from app.core import response_cache
 from app.models.lead_meta import LeadMeta
 from app.models.lead_origin import CRM_KEY_PREFIX
 from app.models.vendor import Vendor
-from app.services import access, hot_leads, lead_crm, notifications
+from app.services import access, hot_leads, lead_crm, notifications, lead_activity
 from app.services.crm_leads import service as crm_leads
 
 router = APIRouter(prefix="/leads", tags=["lead crm"])
@@ -41,6 +41,7 @@ class LeadCrmUpdate(BaseModel):
     quoted_amount: int | None = Field(default=None, ge=0, le=MAX_AMOUNT)
     conversion_amount: int | None = Field(default=None, ge=0, le=MAX_AMOUNT)
     notes: str | None = Field(default=None, max_length=5000)
+    follow_up_date: date | None = None
 
     # Optional context so the answer can include the automatic (sheet / area) vendor
     location: str | None = Field(default=None, max_length=300)
@@ -61,7 +62,7 @@ class LeadCrmUpdate(BaseModel):
         return data
 
 
-EDITABLE = ("vendor_id", "update_status", "quoted_date", "quoted_amount", "conversion_amount", "notes")
+EDITABLE = ("vendor_id", "update_status", "quoted_date", "quoted_amount", "conversion_amount", "notes", "follow_up_date")
 
 
 def _answer(db, source: str, lead_key: str, meta: LeadMeta | None, body: LeadCrmUpdate | None = None) -> dict:
@@ -121,6 +122,7 @@ def save_lead_crm(source: Source, lead_key: str, body: LeadCrmUpdate, viewer: Le
     previous_vendor_id = meta.vendor_id if meta else None
     if meta is None:
         meta = LeadMeta(source=source, lead_key=lead_key, updated_at=now)
+    old_values = {field: getattr(meta, field) for field in changes}
     for field, value in changes.items():
         setattr(meta, field, value)
     if "vendor_id" in changes:
@@ -131,6 +133,13 @@ def save_lead_crm(source: Source, lead_key: str, body: LeadCrmUpdate, viewer: Le
     db.add(meta)
     db.commit()
     db.refresh(meta)
+    for field, value in changes.items():
+        if old_values[field] == value:
+            continue
+        lead_activity.log_changes(db, source=source, lead_key=lead_key,
+            changes={field: (old_values[field], value)}, actor_user_id=viewer.user.id,
+            actor_name=viewer.user.name, actor_role=viewer.user.role,
+            action="assigned" if field == "vendor_id" else "field_changed")
 
     response_cache.clear("vendors")  # vendor numbers changed
     response_cache.clear("analytics")
@@ -150,15 +159,35 @@ def save_lead_crm(source: Source, lead_key: str, body: LeadCrmUpdate, viewer: Le
     return answer
 
 
-@router.post("/{source}/{lead_key}/hot")
-def mark_lead_hot(source: Source, lead_key: str, viewer: LeadViewer, db: DbSession):
-    if not access.can_see(db, viewer, source, lead_key) or not hot_leads.lead_exists(db, source, lead_key):
-        raise HTTPException(404, "Lead not found")
-    return hot_leads.set_hot(db, source, lead_key, viewer.user.id, True)
-
-
 @router.delete("/{source}/{lead_key}/hot")
 def unmark_lead_hot(source: Source, lead_key: str, viewer: LeadViewer, db: DbSession):
     if not access.can_see(db, viewer, source, lead_key) or not hot_leads.lead_exists(db, source, lead_key):
         raise HTTPException(404, "Lead not found")
-    return hot_leads.set_hot(db, source, lead_key, viewer.user.id, False)
+    was_hot = hot_leads.is_hot(db, source, lead_key)
+    result = hot_leads.set_hot(db, source, lead_key, viewer.user.id, False)
+    if was_hot:
+        lead_activity.log_action(db, source=source, lead_key=lead_key, action="hot_off", field="is_hot",
+            old=True, new=False, actor_user_id=viewer.user.id, actor_name=viewer.user.name, actor_role=viewer.user.role)
+    return result
+
+
+@router.post("/{source}/{lead_key}/hot")
+def mark_lead_hot(source: Source, lead_key: str, viewer: LeadViewer, db: DbSession):
+    if not access.can_see(db, viewer, source, lead_key) or not hot_leads.lead_exists(db, source, lead_key):
+        raise HTTPException(404, "Lead not found")
+    was_hot = hot_leads.is_hot(db, source, lead_key)
+    result = hot_leads.set_hot(db, source, lead_key, viewer.user.id, True)
+    if not was_hot:
+        lead_activity.log_action(db, source=source, lead_key=lead_key, action="hot_on", field="is_hot",
+            old=False, new=True, actor_user_id=viewer.user.id, actor_name=viewer.user.name, actor_role=viewer.user.role)
+    return result
+
+
+@router.get("/{source}/{lead_key}/activity")
+def get_activity(source: Source, lead_key: str, viewer: LeadViewer, db: DbSession,
+                 page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100)):
+    if lead_key not in access.assignments(db, source) or not access.can_see(db, viewer, source, lead_key):
+        raise HTTPException(404, "Lead not found")
+    allowed = None if viewer.is_admin else lead_activity.VENDOR_CRM_FIELDS
+    return lead_activity.list_activity(db, source=source, lead_key=lead_key, page=page,
+                                       page_size=page_size, allowed_fields=allowed)

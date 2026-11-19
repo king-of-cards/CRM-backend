@@ -159,6 +159,7 @@ def meta_out(
         "suggested_vendor": _vendor_out(suggested),
         "update_status": meta.update_status if meta else None,
         "quoted_date": meta.quoted_date.isoformat() if meta and meta.quoted_date else None,
+        "follow_up_date": meta.follow_up_date.isoformat() if meta and meta.follow_up_date else None,
         "quoted_amount": meta.quoted_amount if meta else None,
         "conversion_amount": meta.conversion_amount if meta else None,
         "notes": meta.notes if meta else None,
@@ -223,6 +224,7 @@ def attach(
             marked = hot_rows.get(k)
             hot = marked is not None
             crm["is_hot"] = hot
+            copy["follow_up_date"] = crm["follow_up_date"]
             copy["is_hot"] = hot
             copy["hot_marked_by"] = marked.hot_marked_by if marked else None
             copy["hot_marked_at"] = _iso(marked.hot_marked_at) if marked else None

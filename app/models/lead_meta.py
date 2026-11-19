@@ -28,6 +28,7 @@ class LeadMeta(SQLModel, table=True):
     # "Update": the same 7 values as Vendor -> KOC (app/models/vendor_to_koc.UpdateStatus); None = Pending
     update_status: str | None = Field(default=None, max_length=30, index=True)
     quoted_date: date | None = None
+    follow_up_date: date | None = None
     quoted_amount: int | None = None                                         # rupees
     conversion_amount: int | None = None                                     # rupees
     # Legacy (replaced by update_status, see migrations/2026-11-16_update_and_amounts.sql): kept in
