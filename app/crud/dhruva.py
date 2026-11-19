@@ -5,11 +5,12 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any
 
-from sqlalchemy import case, false, func, or_
+from sqlalchemy import String, case, cast, false, func, or_
 from sqlalchemy.orm import aliased
 from sqlmodel import Session, col, select
 
 from app.models.dhruva import DhruvaLead
+from app.models.hot_lead import CrmHotLead
 from app.models.user import User
 from app.models.vendor_to_koc import CLOSED_STATUSES, UpdateStatus
 from app.services.dhruva_import import CleanLead
@@ -133,7 +134,7 @@ def _iso(value: datetime | date | None) -> str | None:
 
 
 def serialize(row: DhruvaLead, creator_name: str | None, updater_name: str | None, admin: bool,
-             expose_status_updater_id: bool = False) -> dict:
+             expose_status_updater_id: bool = False, is_hot: bool = False) -> dict:
     """The lead object. Dhruva list/detail routes can include the updater id read-only; creator
     ids are limited to admins."""
     out = {
@@ -142,7 +143,7 @@ def serialize(row: DhruvaLead, creator_name: str | None, updater_name: str | Non
         "phone": row.phone, "alt_phone": row.alt_phone, "phone_e164": row.phone_e164,
         "alt_phone_e164": row.alt_phone_e164, "event_type": row.event_type, "source": row.source,
         "created_by_name": creator_name, "created_at": _iso(row.created_at), "updated_at": _iso(row.updated_at),
-        "archived": bool(row.is_deleted),
+        "archived": bool(row.is_deleted), "is_hot": bool(is_hot),
         "update_status": row.update_status, "additional_comments": row.additional_comments,
         "quoted_amount": row.quoted_amount, "conversion_amount": row.conversion_amount,
         "follow_up_date": _iso(row.follow_up_date), "status_updated_at": _iso(row.status_updated_at),
@@ -182,6 +183,7 @@ class DhruvaFilters:
     has_phone: bool | None = None
     ids_in: set[int] | None = None                # also_in=yes
     ids_not_in: set[int] | None = None            # also_in=no
+    hot: bool | None = None
 
 
 def _like(column, text: str):
@@ -241,6 +243,9 @@ def conditions(f: DhruvaFilters) -> list:
     if f.has_phone is not None:
         has = or_(col(lead.phone_e164).is_not(None), col(lead.alt_phone_e164).is_not(None))
         conds.append(has if f.has_phone else ~has)
+    if f.hot is not None:
+        marked = cast(col(lead.id), String).in_(select(CrmHotLead.lead_key).where(CrmHotLead.source == "dhruva"))
+        conds.append(marked if f.hot else ~marked)
     if f.ids_in is not None:
         conds.append(col(lead.id).in_(sorted(f.ids_in)) if f.ids_in else false())
     if f.ids_not_in:
@@ -265,6 +270,8 @@ def list_page(db: Session, f: DhruvaFilters, sort: str, order: str, page: int, p
     rows = db.exec(with_names().where(*conditions(f)).order_by(*order_by(sort, order)).offset(offset).limit(page_size)).all()
     items = [{"sl_no": offset + i + 1, **serialize(*row, admin=admin, expose_status_updater_id=True)}
              for i, row in enumerate(rows)]
+    from app.services import hot_leads
+    hot_leads.attach(db, "dhruva", items, key_of=lambda item: item["id"])
     return {"items": items, "total": total, "page": page, "page_size": page_size,
             "pages": math.ceil(total / page_size)}
 

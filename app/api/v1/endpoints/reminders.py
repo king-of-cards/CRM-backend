@@ -20,6 +20,18 @@ router = APIRouter(prefix="/reminders", tags=["follow-up reminders"])
 SOURCES = ("spin", "whatsapp", "wedding", "wedding_planner", "vendor_to_koc", "dhruva")
 
 
+def _requested_sources(value: str | None) -> set[str]:
+    if value is None:
+        return set(SOURCES)
+    requested = {part.strip().lower() for part in value.split(",") if part.strip()}
+    if not requested:
+        raise HTTPException(400, f"sources must be a comma-separated list of: {', '.join(SOURCES)}")
+    invalid = requested - set(SOURCES)
+    if invalid:
+        raise HTTPException(400, f"Unknown reminder source(s): {', '.join(sorted(invalid))}")
+    return requested
+
+
 def _details_for_crm_source(db: Session, source: str, keys: set[str]) -> dict[str, tuple[str | None, str | None]]:
     if not keys:
         return {}
@@ -147,11 +159,14 @@ def _make_response(rows: list[dict], days: int, admin: bool) -> dict:
 
 
 @router.get("/follow-ups")
-def follow_up_reminders(user: NotDhruvaUser, db: DbSession, days: int = Query(7, ge=0, le=30)):
+def follow_up_reminders(user: NotDhruvaUser, db: DbSession, days: int = Query(7, ge=0, le=30),
+                        sources: str | None = Query(None, description="Comma-separated reminder sources")):
     try:
         viewer = access.viewer_for(db, user)
     except access.NotLinked:
         raise HTTPException(403, "This login isn't linked to a vendor.")
-    return _make_response(_reminder_rows(db, viewer), days, viewer.is_admin)
+    requested = _requested_sources(sources)
+    rows = [row for row in _reminder_rows(db, viewer) if row["source"] in requested]
+    return _make_response(rows, days, viewer.is_admin)
 
 

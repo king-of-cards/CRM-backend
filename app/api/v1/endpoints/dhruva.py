@@ -25,6 +25,7 @@ from app.services import dhruva_import as parser
 from app.services import also_in as also_in_service
 from app.services import lead_filters, periods
 from app.services import lead_activity
+from app.services import hot_leads
 from app.services.access import Viewer
 from app.services import vendor_lead_export as files
 
@@ -183,6 +184,7 @@ def list_query(
     follow_up_to: date | None = Query(None),
     follow_up_due: bool = Query(False, description="Follow-up date today or earlier, open leads only"),
     has_phone: Literal["yes", "no"] | None = Query(None),
+    hot: Literal["yes", "no"] | None = Query(None, description="Hot lead filter"),
     also_in: Literal["yes", "no"] | None = Query(None, description="The phone also exists in another section "
                                                  "(admins only see them; for Dhruva logins nothing matches)"),
     sort: SortField = Query("created_at"),
@@ -211,6 +213,7 @@ def list_query(
         follow_up_from=follow_up_from, follow_up_to=follow_up_to,
         follow_up_due_by=periods.today_ist() if follow_up_due else None,
         has_phone=None if has_phone is None else has_phone == "yes",
+        hot=None if hot is None else hot == "yes",
     )
     if also_in:
         found = {int(k) for k in also_in_service.matching_keys(db, viewer_of(user), also_in_service.DHRUVA)}
@@ -248,6 +251,7 @@ EXPORT_COLUMNS = [
     files.Column("Quoted amount", "money", 16), files.Column("Conversion amount", "money", 18),
     files.Column("Received", "datetime", 18), files.Column("Updated by", "text", 20),
     files.Column("Updated by ID", "int", 14), files.Column("Updated at", "datetime", 18),
+    files.Column("Hot", "yesno", 8),
 ]
 
 
@@ -263,13 +267,14 @@ def export_leads(db: DbSession, _user: DhruvaSectionUser, query: ListQueryDep,
         raise HTTPException(400, f"The export has {total:,} leads; the limit is {files.EXPORT_MAX_ROWS:,}. "
                                  "Narrow the filters.")
     table = []
+    marked_hot = hot_leads.hot_keys(db, "dhruva")
     for i, (row, _creator, updater) in enumerate(crud.all_rows(db, query.filters, query.sort, query.order), start=1):
         table.append([
             i, row.name, row.venue, row.event_date_text or (row.event_date.isoformat() if row.event_date else None),
             row.phone_e164 or row.phone, row.alt_phone_e164 or row.alt_phone, row.event_type,
             STATUS_LABELS.get(row.update_status, row.update_status), row.additional_comments, row.follow_up_date,
             row.quoted_amount, row.conversion_amount, files.to_ist(row.created_at), updater,
-            row.status_updated_by, files.to_ist(row.status_updated_at),
+            row.status_updated_by, files.to_ist(row.status_updated_at), str(row.id) in marked_hot,
         ])
     content = files.to_xlsx(EXPORT_COLUMNS, table) if format == "xlsx" else files.to_csv(EXPORT_COLUMNS, table)
     media = files.XLSX_MEDIA_TYPE if format == "xlsx" else files.CSV_MEDIA_TYPE
@@ -291,7 +296,14 @@ def get_lead(lead_id: int, db: DbSession, user: DhruvaSectionUser):
     found = crud.get(db, lead_id)
     if found is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Lead not found")
-    return crud.serialize(*found, admin=is_admin(user), expose_status_updater_id=True)
+    return _serialize_lead(db, found, user)
+
+
+def _serialize_lead(db, found, user):
+    row, creator_name, updater_name = found
+    return crud.serialize(row, creator_name, updater_name, admin=is_admin(user),
+                          expose_status_updater_id=True,
+                          is_hot=hot_leads.is_hot(db, "dhruva", str(row.id)))
 
 
 @router.patch("/leads/{lead_id}")
@@ -339,7 +351,31 @@ def update_lead(lead_id: int, body: DhruvaLeadUpdate, db: DbSession, user: Dhruv
     lead_activity.log_changes(db, source="dhruva", lead_key=str(row.id),
         changes={field: (before[field], after[field]) for field in sent}, actor_user_id=user.id,
         actor_name=user.name, actor_role=user.role)
-    return crud.serialize(*crud.get(db, lead_id), admin=is_admin(user), expose_status_updater_id=True)
+    return _serialize_lead(db, crud.get(db, lead_id), user)
+
+
+@router.post("/leads/{lead_id}/hot")
+def mark_lead_hot(lead_id: int, db: DbSession, user: DhruvaSectionUser):
+    return _set_hot(db, lead_id, user, True)
+
+
+@router.delete("/leads/{lead_id}/hot")
+def unmark_lead_hot(lead_id: int, db: DbSession, user: DhruvaSectionUser):
+    return _set_hot(db, lead_id, user, False)
+
+
+def _set_hot(db, lead_id: int, user, hot: bool) -> dict:
+    found = crud.get(db, lead_id)
+    if found is None or found[0].is_deleted:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Lead not found")
+    row = found[0]
+    was_hot = hot_leads.is_hot(db, "dhruva", str(lead_id))
+    result = hot_leads.set_hot(db, "dhruva", str(lead_id), user.id, hot)
+    if was_hot != hot:
+        lead_activity.log_action(db, source="dhruva", lead_key=str(lead_id),
+            action="hot_on" if hot else "hot_off", field="is_hot", old=was_hot, new=hot,
+            actor_user_id=user.id, actor_name=user.name, actor_role=user.role)
+    return {"id": row.id, **result}
 
 
 @router.post("/leads/{lead_id}/archive")
@@ -364,7 +400,7 @@ def _set_archived(db, lead_id: int, archived: bool, user) -> dict:
         lead_activity.log_action(db, source="dhruva", lead_key=str(lead_id),
             action="archived" if archived else "unarchived", field="archived", old=was_archived,
             new=archived, actor_user_id=user.id, actor_name=user.name, actor_role=user.role)
-    return crud.serialize(*crud.get(db, lead_id), admin=True)
+    return _serialize_lead(db, crud.get(db, lead_id), user)
 
 
 @router.get("/leads/{lead_id}/activity")

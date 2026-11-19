@@ -112,7 +112,7 @@ class DhruvaListTest(DhruvaTestBase, unittest.TestCase):
         header = [c.value for c in ws[1]]
         self.assertEqual(header, ["Sl. No", "Name", "Venue", "Date", "Phone", "Alt phone", "Event type", "Update",
                                   "Additional comments", "Follow-up date", "Quoted amount", "Conversion amount",
-                                  "Received", "Updated by", "Updated by ID", "Updated at"])
+                                  "Received", "Updated by", "Updated by ID", "Updated at", "Hot"])
         rows = {r[1]: r for r in ws.iter_rows(min_row=2, values_only=True)}
         asha = rows["Asha Fake"]
         self.assertEqual((asha[3], asha[4], asha[7], asha[10], asha[13]),
@@ -136,6 +136,36 @@ class DhruvaListTest(DhruvaTestBase, unittest.TestCase):
         self.assertEqual(o["updates"][0], {"value": "pending", "count": 13})
         self.assertEqual(o["has_phone"], [{"value": "yes", "count": 13}, {"value": "no", "count": 4}])
         self.assertEqual(o["sources"], [{"value": "manual", "count": 0}, {"value": "bulk_upload", "count": 17}])
+
+    def test_hot_toggle_permissions_filter_export_activity_and_detail(self):
+        lead_id = self.ids["Asha Fake"]
+        self.assertFalse(self.call("dhruva", "GET", f"/leads/{lead_id}").json()["is_hot"])
+        for method in ("POST", "DELETE"):
+            self.assertEqual(self.call("phodeo", method, f"/leads/{lead_id}/hot").status_code, 403)
+        marked = self.call("dhruva", "POST", f"/leads/{lead_id}/hot")
+        self.assertEqual(marked.status_code, 200, marked.text)
+        self.assertTrue(self.call("admin", "GET", f"/leads/{lead_id}").json()["is_hot"])
+        hot_list = self.call("dhruva", "GET", "/leads", params={"hot": "yes"}).json()
+        self.assertEqual({item["name"] for item in hot_list["items"]}, {"Asha Fake"})
+        self.assertTrue(all(item["is_hot"] for item in hot_list["items"]))
+        self.assertEqual(self.call("dhruva", "GET", "/leads", params={"hot": "no"}).json()["total"], 16)
+        self.assertEqual(self.call("dhruva", "GET", "/leads/stats", params={"hot": "yes"}).json()["total"], 1)
+        exported = self.call("admin", "GET", "/leads/export", params={"hot": "yes"})
+        ws = load_workbook(io.BytesIO(exported.content)).active
+        headers = [cell.value for cell in ws[1]]
+        self.assertEqual(headers[-1], "Hot")
+        self.assertTrue(ws.cell(2, len(headers)).value)
+        off = self.call("admin", "DELETE", f"/leads/{lead_id}/hot")
+        self.assertEqual(off.status_code, 200, off.text)
+        actions = self.call("admin", "GET", f"/leads/{lead_id}/activity").json()["items"]
+        hot_actions = [entry for entry in actions if entry["action"] in {"hot_on", "hot_off"}]
+        self.assertEqual({entry["action"] for entry in hot_actions}, {"hot_on", "hot_off"})
+        self.assertEqual({entry["actor_role"] for entry in hot_actions}, {"admin", "dhruva"})
+        for method in ("POST", "DELETE"):
+            self.assertEqual(self.call("admin", method, "/leads/999999/hot").status_code, 404)
+        self.call("admin", "POST", f"/leads/{lead_id}/archive")
+        for method in ("POST", "DELETE"):
+            self.assertEqual(self.call("dhruva", method, f"/leads/{lead_id}/hot").status_code, 404)
 
     def test_archived_and_errors(self):
         self.call("admin", "POST", f"/leads/{self.ids['Asha Fake']}/archive")

@@ -58,6 +58,7 @@ class VendorDashboardTests(VendorToKocTestCase):
                     vendor_id=vendor, phone=f"90000001{i:02d}", name=key, city=city, source=source, created_at=created,
                     updated_at=created, created_by=self.ids["admin"], update_status=status, follow_up_date=follow,
                     is_hot=key in {"D1", "D3"},
+                    conversion_amount=20000 if key == "D4" else None,
                     status_updated_at=created + timedelta(days=days) if days else None,
                     status_updated_by=self.ids["admin"] if status else None,
                 )
@@ -82,7 +83,8 @@ class VendorDashboardTests(VendorToKocTestCase):
         self.assertEqual((o["received"], o["previous_received"], o["change_pct"]), (4, 1, 300))
         self.assertNotIn("average_per_day", o)
         self.assertEqual(o["kpis"], {"total": 4, "interested": 0, "not_interested": 0, "quoted_count": 0, "quoted_total": 0,
-                                    "converted": 1, "converted_pct": 25.0, "conversion_count": 0, "conversion_total": 0,
+                                    "converted": 1, "converted_pct": 25.0, "conversion_count": 1, "conversion_total": 20000,
+                                    "conversion_amount_count": 0, "conversion_amount_total": 0,
                                     "quotes_count": 0, "hot_count": 1})
         self.assertEqual((o["pending"], o["converted"], o["converted_pct"], o["purchased_with_us"]), (1, 1, 25.0, 1))
         self.assertEqual({k: v for k, v in o["by_status"].items() if v},
@@ -140,7 +142,9 @@ class VendorDashboardTests(VendorToKocTestCase):
         self.assertEqual(set(o), VENDOR_KEYS)
         self.assertEqual(o["kpis"], {"total": 3, "interested": 0, "not_interested": 0, "quoted_count": 1,
                                      "quoted_total": 100000, "converted": 1, "converted_pct": 33.3,
-                                    "conversion_count": 1, "conversion_total": 90000, "quotes_count": 1, "hot_count": 1})
+                                    "conversion_count": 1, "conversion_total": 90000,
+                                    "conversion_amount_count": 1, "conversion_amount_total": 90000,
+                                    "quotes_count": 1, "hot_count": 1})
         admin = self.dash()
         self.assertEqual((admin["kpis"]["quoted_count"], admin["kpis"]["quoted_total"]), (2, 107000))
         self.assertEqual(set(self.dash()), VENDOR_KEYS | ADMIN_ONLY_KEYS)

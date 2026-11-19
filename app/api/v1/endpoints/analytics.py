@@ -223,7 +223,12 @@ def _outcome(metas: list, hot_count: int = 0) -> dict:
     """The KPIs (app/services/kpis.py) over a set of leads (one LeadMeta or None per lead), plus
     "leads" (= total, kept for the existing screen)."""
     numbers = kpis.compute(metas)
-    return {"leads": numbers["total"], **numbers, "quotes_count": numbers["quoted_count"], "hot_count": hot_count}
+    converted_amounts = [m.conversion_amount for m in metas if m is not None
+                         and m.update_status == "converted" and m.conversion_amount is not None]
+    return {"leads": numbers["total"], **numbers,
+            "conversion_amount_count": len(converted_amounts),
+            "conversion_amount_total": sum(converted_amounts),
+            "quotes_count": numbers["quoted_count"], "hot_count": hot_count}
 
 
 def _outcomes(db: Session, keys_by_source: dict[str, list[str]], spin_available: bool) -> dict:
@@ -442,6 +447,8 @@ def _build(db: Session, keys: dict[str, set[str]] | None = None,
                        if before is not None else None),
         # The six KPIs over every source's leads of the period (outcomes has them per source)
         "kpis": {**{k: outcomes["all"][k] for k in kpis.KEYS},
+                 "conversion_amount_count": outcomes["all"]["conversion_amount_count"],
+                 "conversion_amount_total": outcomes["all"]["conversion_amount_total"],
                  "quotes_count": outcomes["all"]["quotes_count"], "hot_count": outcomes["all"]["hot_count"]},
         "source_mix": [
             {"source": s, "count": new[s], "pct": round(new[s] / new_all * 100) if new_all else 0} for s in SOURCES
@@ -585,6 +592,11 @@ def _vtk_build(db: Session, vendor_id: int | None, period, admin: bool) -> dict:
     }
     out["kpis"]["quotes_count"] = out["kpis"]["quoted_count"]
     out["kpis"]["hot_count"] = sum(1 for lead, _ in current if lead.is_hot)
+    converted_with_amount = [lead.conversion_amount for lead, _ in current
+                             if lead.update_status == UpdateStatus.CONVERTED.value
+                             and lead.conversion_amount is not None]
+    out["kpis"]["conversion_amount_count"] = len(converted_with_amount)
+    out["kpis"]["conversion_amount_total"] = sum(converted_with_amount)
     def is_open(lead) -> bool:
         return lead.update_status is None or lead.update_status not in CLOSED_STATUSES
 
@@ -694,6 +706,13 @@ def dhruva_overview(user: DhruvaSectionUser, db: DbSession, period: AllTimeDefau
 
     numbers = kpis.compute(leads)
     numbers["quotes_count"] = numbers["quoted_count"]
+    converted_with_amount = [r.conversion_amount for r in leads
+                             if r.update_status == UpdateStatus.CONVERTED.value and r.conversion_amount is not None]
+    numbers["conversion_amount_count"] = len(converted_with_amount)
+    numbers["conversion_amount_total"] = sum(converted_with_amount)
+    from app.services import hot_leads
+    hot_keys = hot_leads.hot_keys(db, "dhruva")
+    numbers["hot_count"] = sum(1 for r in leads if str(r.id) in hot_keys)
     numbers["pending"] = sum(1 for r in leads if r.update_status is None)
     numbers["upcoming_30_days"] = sum(1 for r in leads if r.event_date is not None
                                       and today <= r.event_date <= today + timedelta(days=30))
@@ -732,5 +751,5 @@ def dhruva_overview(user: DhruvaSectionUser, db: DbSession, period: AllTimeDefau
         "inflow": inflow,
         "by_status": {"pending": numbers["pending"],
                       **{s.value: sum(1 for r in leads if r.update_status == s.value) for s in UpdateStatus}},
-        "latest": [dcrud.serialize(*t, admin=admin) for t in latest],
+        "latest": [dcrud.serialize(*t, admin=admin, is_hot=str(t[0].id) in hot_keys) for t in latest],
     }

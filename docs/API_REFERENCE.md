@@ -981,6 +981,10 @@ the same way over the leads they cover:
 | `converted`, `converted_pct` | Update is "converted"; % of `total`, 1 decimal, `null` with no leads |
 | `conversion_count`, `conversion_total` | Leads with a conversion amount, and their sum (rupees) |
 
+Dashboard `kpis` and overview outcomes also include `conversion_amount_count` and
+`conversion_amount_total`: converted leads with a conversion amount and the sum for those same
+leads, within the period. Existing `conversion_count` / `conversion_total` retain their meaning.
+
 The 4 sources read Update and the amounts from `crm_lead_meta` (a lead without CRM details is
 Pending, without amounts); Vendor → KOC from its own columns.
 
@@ -988,8 +992,9 @@ Pending, without amounts); Vendor → KOC from its own columns.
 |---|---|
 | `GET /spin-leads/stats`, `/whatsapp-leads/stats`, `/wedding-leads/stats`, `/wedding-plans/stats` | The list's leads for the same filters (vendor users: their own) |
 | `GET /vendor-to-koc/leads/stats` | The same filtered Vendor → KOC leads (vendors: their own) |
-| `GET /analytics/overview` | `kpis`: every source combined, the period's leads. Dashboard-only `quotes_count` is amount-only and `hot_count` counts hot leads; `outcomes.<source>` has those counts per source, all following the date period |
-| `GET /analytics/vendor-to-koc` | Period's Vendor → KOC leads (admins: all; vendors: their own); dashboard `kpis` adds amount-only `quotes_count` and date-filtered `hot_count` |
+| `GET /analytics/overview` | `kpis`: every source combined, the period's leads. Dashboard-only `quotes_count` is amount-only and `hot_count` counts hot leads; `outcomes.<source>` has those counts per source, all following the date period. `conversion_amount_count` / `conversion_amount_total` count and sum amounts only for converted leads with an amount. Wedding + Wedding planner subtotal can be summed from those two source outcomes |
+| `GET /analytics/vendor-to-koc` | Period's Vendor → KOC leads (admins: all; vendors: their own); dashboard `kpis` adds amount-only `quotes_count`, date-filtered `hot_count`, and the converted-with-amount count and matching amount total |
+| `GET /analytics/dhruva` | Dhruva leads received in the period; dashboard `kpis` includes the converted-with-amount count and matching amount total |
 
 ### What each number covers (`/analytics/overview`)
 
@@ -1330,6 +1335,9 @@ Leads that Dhruva logins (`role: "dhruva"`, see [Users](#12-users-and-vendor-log
 upload. Table `crm_dhruva_leads` (migration `migrations/2026-11-17_dhruva.sql`). Base path:
 `/api/v1/dhruva`.
 
+Hot state uses the existing `crm_hot_leads` sidecar with `source="dhruva"` and the Dhruva lead ID
+as `lead_key`; no schema migration is needed.
+
 **Who:**
 
 | | Admins | Dhruva logins | Vendor logins |
@@ -1339,12 +1347,13 @@ upload. Table `crm_dhruva_leads` (migration `migrations/2026-11-17_dhruva.sql`).
 | Edit basic fields (name, venue, date, phone, alt phone, event type) | ✔ | ✔ (any lead) | 403 |
 | Edit admin fields (`update_status`, `additional_comments`, `quoted_amount`, `conversion_amount`, `follow_up_date`) | ✔ | **403** (read-only) | 403 |
 | Archive / unarchive | ✔ | 403 | 403 |
+| Mark / unmark hot | ✔ | ✔ | 403 |
 
 ### Lead object
 
 `id, name, venue, event_date (YYYY-MM-DD or null), event_date_text (as typed), phone, alt_phone,
 phone_e164, alt_phone_e164, event_type, source (manual | bulk_upload), created_by_name, created_at,
-updated_at, archived, update_status (null = Pending), additional_comments, quoted_amount,
+updated_at, archived, is_hot, update_status (null = Pending), additional_comments, quoted_amount,
 conversion_amount, follow_up_date, status_updated_at, status_updated_by_name`. Dhruva logins and
 admins get `status_updated_by` (user id) on list/detail responses and in the export; admins also get
 `created_by`. The status and amount fields remain read-only for Dhruva logins.
@@ -1431,6 +1440,7 @@ left out. Admins and Dhruva logins: all leads; vendor logins: 403.
 | `follow_up_from`, `follow_up_to` | Follow-up date range |
 | `follow_up_due=true` | Follow-up date today or earlier, open leads only (not converted, not converted, purchased elsewhere, purchased with us or not interested) |
 | `has_phone` | `yes` / `no` (no phone and no alt phone) |
+| `hot` | `yes` / `no`: marked hot or not hot |
 | `also_in` | `yes` / `no`: the phone or alt phone also exists in another section (see [Cross-source duplicates](#cross-source-duplicates-also_in)); admins only see other sections, so for Dhruva logins `yes` finds nothing |
 | `sort`, `order` | `created_at` (default, `desc`), `updated_at`, `event_date`, `name`, `venue`, `event_type`, `update_status`, `follow_up_date`. Empty values last |
 | `page`, `page_size` | List only. `page_size` 10, 25, 50 or 100 (default 10; others 422) |
@@ -1443,7 +1453,8 @@ of the other lists. Unknown `update_status` / `sort`: 422.
 |---|---|
 | `GET /leads` | `{items (lead objects with sl_no and `also_in`), total, page, page_size, pages}` |
 | `GET /leads/stats` | `{total, kpis, by_status (pending + the 7 values), no_phone, follow_ups_due, upcoming_30_days}`; `kpis` is [the same object as the other lists](#kpis-the-same-six-everywhere) |
-| `GET /leads/export` | `format=xlsx` (default) or `csv`, every matching lead in list order (50,000 at most; 400 above). File `dhruva_leads_YYYY-MM-DD.<ext>` |
+| `GET /leads/export` | `format=xlsx` (default) or `csv`, every matching lead in list order (50,000 at most; 400 above). Includes a `Hot` column. File `dhruva_leads_YYYY-MM-DD.<ext>` |
+| `POST /leads/{id}/hot`, `DELETE /leads/{id}/hot` | admin, Dhruva | Mark or unmark an active lead; returns `is_hot`, marker and timestamp. Archived or unknown lead: 404; vendor login: 403. Activity records `hot_on` / `hot_off` with the actor role |
 | `GET /leads/filter-options` | `{venues, event_types, updates, has_phone, sources}`, each `[{value, count}]` over every listed lead. Venues and event types: spellings that differ only in case or spacing are one value, shown as written most often; an event type like "engagement, wedding" counts for both |
 
 **Export columns** (the same for admins and Dhruva logins, who see the admin fields): Sl. No, Name,
@@ -1451,7 +1462,7 @@ Venue, Date (the date text as stored), Phone, Alt phone (E.164,
 or as written when unreadable), Event type, Update (`Pending`, `Converted`, …), Additional
 comments, Follow-up date, Quoted amount, Conversion amount (₹ number cells; CSV plain numbers),
 Received, Updated by (a name), Updated by ID (`status_updated_by`), Updated at (`status_updated_at`,
-IST). Dhruva logins receive these fields read-only; PATCH of admin fields remains 403. Formats and
+IST), Hot. Dhruva logins receive admin fields read-only; PATCH of admin fields remains 403. Formats and
 formula safety as the other exports.
 An export preserves the identifying fields so rows with a phone upload back as duplicates; leads
 without a phone are never duplicates.
@@ -1469,7 +1480,7 @@ number covers the leads received in the period.
 | `period` | As in the overview (`all_time`, `granularity` day / week / month, `previous`) |
 | `received` | Leads received in the period |
 | `previous_period`, `change_pct` | Leads in the same number of days right before, and the % change; `null` for all time (or with 0 before, `change_pct`) |
-| `kpis` | [The six KPIs](#kpis-the-same-six-everywhere) plus `pending` and `upcoming_30_days` (events from today to today + 30) |
+| `kpis` | [The six KPIs](#kpis-the-same-six-everywhere) plus `pending`, `upcoming_30_days` (events from today to today + 30), date-filtered `hot_count`, and `conversion_amount_count` / `conversion_amount_total` for converted leads with an amount |
 | `by_event_type` | `[{value, count}]`; "engagement, wedding" counts for both; values lower-case |
 | `top_venues` | Top 10 `[{value, count}]`; spellings that differ only in case or spacing are one venue |
 | `events_by_month` | `[{month: "2026-12", count}]` by event date; `no_event_date`: leads whose date is text only or empty |
@@ -1532,7 +1543,7 @@ Google Sheets are not logged.
 | `GET /leads/{source}/{lead_key}/activity` | admin, vendor who can see the lead | Newest first; `page` (default 1), `page_size` (default 25, max 100); items include `actor_name`, `actor_role`, `action`, `field`, `old_value`, `new_value`, `created_at` (ISO UTC) |
 | `GET /vendor-to-koc/leads/{id}/activity` | admin, owning vendor | Same paging and item shape; vendor sees lead fields and KOC fields shown read-only |
 | `GET /dhruva/leads/{id}/activity` | admin, Dhruva | Same paging and item shape; Dhruva activity is read-only |
-| `GET /reminders/follow-ups?days=7` | admin, vendor | Overdue, today and upcoming follow-ups through N days (0–30, default 7); overdue first, oldest first. Includes counts `{overdue, today, upcoming}` |
+| `GET /reminders/follow-ups?days=7&sources=wedding,vendor_to_koc` | admin, vendor | Optional comma-separated `sources` subset (`spin`, `whatsapp`, `wedding`, `wedding_planner`, `vendor_to_koc`, `dhruva`); items, counts and the days window apply only to requested sources. Vendors remain scoped to their own visible leads. Omit `sources` for the existing default |
 | `GET /dhruva/reminders/follow-ups?days=7` | admin, Dhruva | Same reminder format over Dhruva leads; Dhruva logins do not receive the admin-only status field |
 
 Reminder items contain `source`, `lead_key`, `name`, `phone`, `follow_up_date`, and `days_overdue`

@@ -31,7 +31,7 @@ class DhruvaDashboardTest(DhruvaTestBase, unittest.TestCase):
         admin = self.users["admin"].id
         spec = [
             ("L1", utc(2026, 11, 15, 18, 30), "Main Palace", "wedding", date(2026, 12, 4), "converted", 200000, 180000, False),
-            ("L2", utc(2026, 11, 10, 5), "Main palace", "engagement, wedding", date(2026, 12, 25), "interested", 50000, None, False),
+            ("L2", utc(2026, 11, 10, 5), "Main palace", "engagement, wedding", date(2026, 12, 25), "interested", 50000, 10000, False),
             ("L3", utc(2026, 10, 1, 5), "Hall", "reception", None, "not_interested", None, None, False),
             ("L4", utc(2026, 11, 5, 5), None, None, date(2026, 11, 22), None, None, None, False),
             ("L5", utc(2026, 9, 20, 5), "Hall", "wedding", date(2026, 12, 1), "converted", 1, 1, True),
@@ -58,7 +58,9 @@ class DhruvaDashboardTest(DhruvaTestBase, unittest.TestCase):
         self.assertEqual((o["received"], o["previous_period"], o["change_pct"]), (4, None, None))
         self.assertEqual(o["kpis"], {"total": 4, "interested": 1, "not_interested": 1, "quoted_count": 2,
                                      "quoted_total": 250000, "converted": 1, "converted_pct": 25.0,
-                                     "conversion_count": 1, "conversion_total": 180000, "pending": 1,
+                                     "conversion_count": 2, "conversion_total": 190000,
+                                     "conversion_amount_count": 1, "conversion_amount_total": 180000,
+                                     "hot_count": 0, "pending": 1,
                                  "upcoming_30_days": 2, "quotes_count": 2})
         self.assertEqual(o["by_event_type"], [{"value": "wedding", "count": 2}, {"value": "engagement", "count": 1},
                                               {"value": "reception", "count": 1}])
@@ -70,6 +72,12 @@ class DhruvaDashboardTest(DhruvaTestBase, unittest.TestCase):
                          {"pending": 1, "converted": 1, "interested": 1, "not_interested": 1})
         self.assertEqual([l["name"] for l in o["latest"]], ["L1", "L2", "L4", "L3"])
         self.assertEqual(self.dash(period="all")["kpis"], o["kpis"])
+
+    def test_hot_count_is_date_filtered(self):
+        lead_id = self.dash()["latest"][0]["id"]
+        self.call("admin", "POST", f"/leads/{lead_id}/hot")
+        self.assertEqual(self.dash(date_from="2026-11-16", date_to="2026-11-16")["kpis"]["hot_count"], 1)
+        self.assertEqual(self.dash(date_from="2026-11-10", date_to="2026-11-10")["kpis"]["hot_count"], 0)
 
     def test_period_previous_and_change(self):
         week = self.dash(date_from="2026-11-10", date_to="2026-11-16")          # previous 3-9 Nov: L4

@@ -105,10 +105,19 @@ class LeadActivityReminderTests(ApiTestBase, unittest.TestCase):
         self.assertEqual(admin.json()["counts"], {"overdue": 1, "today": 1, "upcoming": 1})
         self.assertEqual([i["lead_key"] for i in admin.json()["items"]],
                          [leads[0]["lead_key"], leads[1]["lead_key"], leads[2]["lead_key"]])
-        with self.logged_in("rj"):
-            vendor = self.client.get(f"{API}/reminders/follow-ups")
+        with self.logged_in("admin"):
+            filtered = self.client.get(f"{API}/reminders/follow-ups", params={"days": 1, "sources": "wedding"})
+            empty = self.client.get(f"{API}/reminders/follow-ups", params={"days": 7, "sources": "spin"})
+            invalid = self.client.get(f"{API}/reminders/follow-ups", params={"sources": "not_a_source"})
+        self.assertEqual(len(filtered.json()["items"]), 2)
+        self.assertEqual(filtered.json()["counts"], {"overdue": 1, "today": 1, "upcoming": 0})
+        self.assertEqual(empty.json()["counts"], {"overdue": 0, "today": 0, "upcoming": 0})
+        self.assertEqual(invalid.status_code, 400)
+        with self.logged_in("phodeo"):
+            vendor = self.client.get(f"{API}/reminders/follow-ups", params={"sources": "dhruva,wedding"})
         self.assertEqual(vendor.status_code, 200, vendor.text)
-        self.assertEqual(vendor.json()["items"], [])
+        self.assertEqual({item["source"] for item in vendor.json()["items"]}, {"wedding"})
+        self.assertEqual(len(vendor.json()["items"]), 3)
 
     def test_spin_reminder_details_are_batched_with_a_200_row_cap(self):
         calls = []
