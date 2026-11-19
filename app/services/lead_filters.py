@@ -14,6 +14,7 @@ Common parameters (every source):
   origin (repeatable)         spin: workflow | added | imported; others: sheet | added | imported
   also_in                     yes | no: the phone exists in another source or Vendor -> KOC (that the
                               viewer may see; see app/services/also_in.py)
+  hot                         yes | no: whether this lead is marked hot
 
 Different parameters combine with AND, repeated values of one parameter with OR. Vendor users
 only ever get their own leads (vendor_id / unassigned are ignored for them). Errors -> 400.
@@ -58,11 +59,12 @@ class CommonFilters:
     quote: tuple[str, int | None] | None = None            # (op, amount): has / none / gt / lt
     conversion: tuple[str, int | None] | None = None       # same, on the conversion amount
     also_in: str | None = None                             # yes | no
+    hot: bool | None = None
     origins: list[str] = field(default_factory=list)
 
     @property
     def has_crm_filters(self) -> bool:
-        return bool(self.updates or self.quote or self.conversion or self.also_in)
+        return bool(self.updates or self.quote or self.conversion or self.also_in or self.hot is not None)
 
     @property
     def has_event_filter(self) -> bool:
@@ -108,6 +110,7 @@ def common_filters(
     allowed_origins: tuple[str, ...],
     source_label: str,
     also_in: str | None = None,
+    hot: str | None = None,
 ) -> CommonFilters:
     """Validate and build the common filters (the endpoints declare the query parameters)."""
     start, end = _event_day(event_from, "event_from"), _event_day(event_to, "event_to")
@@ -132,6 +135,9 @@ def common_filters(
         if value not in allowed_origins:
             raise bad_request(f"origin '{value}' doesn't exist for {source_label}; use {', '.join(allowed_origins)}")
 
+    if hot not in (None, "yes", "no"):
+        raise bad_request("hot must be yes or no")
+
     return CommonFilters(
         search=(search or "").strip() or None,
         period=period,
@@ -143,6 +149,7 @@ def common_filters(
         quote=parse_quote(quote),
         conversion=parse_quote(conversion, "conversion"),
         also_in=also_in,
+        hot=None if hot is None else hot == "yes",
         origins=origins,
     )
 
@@ -195,6 +202,11 @@ def allowed_keys(db: Session, source: str, viewer, f: CommonFilters) -> set[str]
 
             found = also_in_service.matching_keys(db, viewer, source)
             sets.append(universe & found if f.also_in == "yes" else universe - found)
+        if f.hot is not None:
+            from app.services import hot_leads
+
+            marked = hot_leads.hot_keys(db, source)
+            sets.append(universe & marked if f.hot else universe - marked)
     if not sets:
         return None
     keys = sets[0]

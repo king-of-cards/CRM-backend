@@ -8,6 +8,7 @@ from app.api.v1.endpoints import (
     dhruva,
     health,
     lead_crm,
+    notifications,
     read_db,
     sheets,
     spin_leads,
@@ -33,6 +34,7 @@ api_router.include_router(analytics.router)
 api_router.include_router(vendors.router)
 api_router.include_router(branches.router)
 api_router.include_router(lead_crm.router)
+api_router.include_router(notifications.router)
 api_router.include_router(crm_leads.router)
 api_router.include_router(vendor_to_koc.router)
 api_router.include_router(dhruva.router)

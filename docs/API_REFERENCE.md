@@ -335,8 +335,8 @@ Field definitions for building forms and the import column mapping.
 
 ### `GET /crm-leads/{source}/template`
 
-Admin only. Downloads an import file with **the same columns as the export**, so an exported
-file can be uploaded back.
+Admin only. Downloads an import file with the uploadable columns. Exports add read-only columns
+such as `Hot`; those are recognized during preview and are not imported.
 
 | Query | Values | Default |
 |---|---|---|
@@ -1049,6 +1049,7 @@ leads, whatever they send.
 
 | Parameter | Spin | International | Wedding | Planner | Meaning |
 |---|---|---|---|---|---|
+| `hot` | yes / no | yes / no | yes / no | yes / no | Whether the lead is marked hot; workflow Spin rows use the CRM hot flag sidecar |
 | `search` | ✔ | ✔ | ✔ | ✔ | Text match. Name and email where the source has them, and the phone by its digits (`+91 98450` finds `919845…`). Spin: every visible text field. International: phone, country and event-date text. Wedding: name, email, city, occasion, leads shared. Planner: name, email, city, plan ID, traditions, leads shared |
 | `date_from`, `date_to` | ✔ | ✔ | ✔ | ✔ | Arrival date, IST days, inclusive (see [Dashboard](#9-dashboard-date-filter)) |
 | `event_from`, `event_to` | ✔ | ✔ | ✔ | ✔ | Event date, `YYYY-MM-DD`, inclusive. Spin: occasion date. International and Wedding: the event date when it reads as a date (text such as "April 2027" never matches). Planner: wedding date (first day, else the 1st of the month) |
@@ -1218,8 +1219,9 @@ same parameters, the list `total`, the stats `total` and the export's rows are e
 | `follow_up_due=true` | all | Follow-up date today or earlier, open leads only (not converted, not converted, purchased elsewhere, purchased with us or not interested) |
 | `city` | all | Contains, ignoring case |
 | `source` (repeatable) | all | `bulk_upload` / `manual` |
+| `hot` | all | `yes` / `no`: marked hot or not hot |
 | `also_in` | all | `yes` / `no`: the phone also exists in one of the 4 sources (vendors: their own leads there); see [Cross-source duplicates](#cross-source-duplicates-also_in). List items carry `also_in` |
-| `sort`, `order` | all | `created_at` (default), `updated_at`, `lead_date`, `name`, `city`, `phone`, `vendor_name`, `update_status`, `follow_up_date`. Empty values last |
+| `sort`, `order` | all | `created_at` (default), `updated_at`, `lead_date`, `name`, `city`, `phone`, `vendor_name`, `update_status`, `follow_up_date`, `is_hot` (hot first). Empty values last |
 
 ### Export
 
@@ -1228,7 +1230,7 @@ with no paging (50,000 at most; 400 above that).
 
 - **Columns:**
   - Admins: Sl. No, Vendor, Date, Name, Phone, City, Update, Additional comments, Follow-up date,
-    Quoted amount, Conversion amount, Updated by, Updated at.
+    Quoted amount, Conversion amount, Updated by, Updated at, Hot.
   - Vendor logins: the same **without Vendor** (their own leads only). Updated by is a name, never
     an email.
 - **Formats**, as this CRM's list screens and the other exports:
@@ -1465,3 +1467,44 @@ number covers the leads received in the period.
 | `inflow` | `[{date, end, total}]` by received date: days, 7-day buckets over 90 days, months for all time |
 | `by_status` | `pending` plus the 7 Update values |
 | `latest` | The 6 newest leads of the period (lead objects) |
+
+## 14. Notifications and hot leads
+
+Notifications are available to admins and linked vendor logins. Dhruva logins receive 403. Vendor
+assignment notifications are shared with every login linked to that vendor; each login has its own
+read state. Vendor-added KOC notifications are addressed to each admin login, excluding the actor.
+Expired notifications and their read records are cleaned up when notification endpoints or
+notification creation run; retention is 90 days.
+
+| Method and path | Who | What |
+|---|---|---|
+| `GET /notifications` | admin, vendor | Newest first, paged with `page`, `page_size`; optional `unread_only=true` and `type=vendor_assigned|vendor_lead_added`. Items include `id`, `type`, `title`, `body`, `created_at` (UTC ISO 8601), `read`, `source`, `lead_key`, `lead_id`, and `lead_ref` for navigation |
+| `GET /notifications/unread-count` | admin, vendor | `{unread_count}` for this login (vendor broadcasts are read per login) |
+| `POST /notifications/{id}/read` | admin, vendor | Mark one notification read; another recipient's notification is 404 |
+| `POST /notifications/read-all` | admin, vendor | Mark all visible notifications read |
+
+Notification types are `vendor_assigned` (an admin assigns or reassigns a lead to a vendor; only
+the newly assigned vendor is notified) and `vendor_lead_added` (a vendor adds a lead to KOC). A
+bulk KOC upload creates one summary notification per admin only when at least one lead was saved.
+No notification is created for a Dhruva lead action. Notification failures are logged and do not
+fail the lead action.
+
+Hot flags appear as `is_hot` on every source list item and lead object. `hot=yes|no` is supported
+by all four source lists and their stats/exports, and by Vendor → KOC list, stats and export.
+Exports include a `Hot` column. For Spin workflow rows the flag lives in the writable
+`crm_hot_leads` sidecar; the workflow database remains read-only. Spin, International, Wedding and
+Wedding Planner use that sidecar too. Vendor → KOC stores `is_hot`, `hot_marked_by` and
+`hot_marked_at` on `crm_vendor_to_koc_leads`.
+
+| Method and path | Who | What |
+|---|---|---|
+| `POST /leads/{source}/{lead_key}/hot` | admin, visible vendor | Mark a source lead hot; response includes `is_hot`, marker user and timestamp |
+| `DELETE /leads/{source}/{lead_key}/hot` | admin, visible vendor | Clear the hot flag |
+| `POST /vendor-to-koc/leads/{id}/hot` | admin, owning vendor | Mark a KOC lead hot |
+| `DELETE /vendor-to-koc/leads/{id}/hot` | admin, owning vendor | Clear the hot flag |
+
+Admins can toggle any listed lead. Vendor logins can toggle only leads visible to that vendor;
+other vendors receive 404. Dhruva logins receive 403. Apply
+`migrations/2026-11-19_notifications_hot.sql` to the CRM MySQL database before deploying; do not
+apply it to the read-only Spin workflow database. `create_all()` creates the new tables at startup,
+but does not add the Vendor → KOC columns to an existing table.

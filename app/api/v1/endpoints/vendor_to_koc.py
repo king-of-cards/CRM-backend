@@ -6,7 +6,8 @@ status_updated_at, status_updated_by_name) read-only and may filter and sort by 
 every vendor and edit those fields (PATCH).
 """
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timezone
+import logging
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
@@ -21,6 +22,7 @@ from app.models.vendor_to_koc import (
 )
 from app.services import periods
 from app.services import also_in as also_in_service
+from app.services import notifications
 from app.services.access import Viewer
 from app.services.vendor_lead_import import (
     MAX_FILE_BYTES, PHONE_RE, ImportFileError, flag_template_example, parse_file_date,
@@ -28,6 +30,7 @@ from app.services.vendor_lead_import import (
 )
 
 router = APIRouter(prefix="/vendor-to-koc", tags=["vendor to KOC"])
+logger = logging.getLogger(__name__)
 
 StatusFilter = Literal[
     "pending", "converted", "not_converted", "purchased_elsewhere", "purchased_with_us",
@@ -35,7 +38,7 @@ StatusFilter = Literal[
 ]
 SortField = Literal[
     "created_at", "updated_at", "lead_date", "name", "city", "phone", "vendor_name",
-    "update_status", "follow_up_date",
+    "update_status", "follow_up_date", "is_hot",
 ]
 
 LEAD_RESPONSE_DOC = ("Admins get every field. Vendor users get the same object without "
@@ -138,6 +141,14 @@ def bulk_create_leads(body: LeadBulkCreate, db: DbSession, scope: VendorLogin):
     new = [lead for lead in valid if lead.phone not in existing]
     added = crud.insert_ignoring_duplicates(db, vendor.id, new, scope.user.id) if new else 0
     duplicates += len(valid) - added           # in the database before, or saved meanwhile
+    if added:
+        try:
+            notifications.notify_admins_vendor_added(
+                db, vendor_id=vendor.id, actor_user_id=scope.user.id, actor_name=scope.user.name, added=added,
+            )
+        except Exception:
+            db.rollback()
+            logger.exception("Could not create vendor bulk-add notification")
     return {"added": added, "duplicates_skipped": duplicates, "failed": failed, "errors": errors}
 
 
@@ -155,7 +166,17 @@ def create_lead(body: LeadCreate, db: DbSession, scope: VendorLogin):
         raise HTTPException(status.HTTP_409_CONFLICT,
                             "A lead with this phone already exists for this vendor")
     lead, vendor_name, updater_name = crud.get_lead(db, lead_id)
-    return crud.serialize(lead, vendor_name, False, updater_name)
+    response = crud.serialize(lead, vendor_name, False, updater_name)
+    lead_name = lead.name
+    try:
+        notifications.notify_admins_vendor_added(
+            db, vendor_id=vendor.id, actor_user_id=scope.user.id, actor_name=scope.user.name,
+            added=1, lead_id=lead_id, lead_name=lead_name,
+        )
+    except Exception:
+        db.rollback()
+        logger.exception("Could not create vendor lead notification")
+    return response
 
 
 @dataclass(frozen=True)
@@ -179,6 +200,7 @@ def lead_query(
     follow_up_due: bool = Query(False, description="Follow-up date today or earlier, open leads"),
     city: str | None = Query(None, max_length=100, description="City contains (case-insensitive)"),
     source: list[Literal["bulk_upload", "manual"]] | None = Query(None, description="Repeatable"),
+    hot: Literal["yes", "no"] | None = Query(None, description="Hot lead filter"),
     also_in: Literal["yes", "no"] | None = Query(None, description="The phone also exists in one of the 4 "
                                                  "sources (vendors: their own leads there)"),
     sort: SortField = Query("created_at"),
@@ -198,6 +220,7 @@ def lead_query(
         follow_up_from=follow_up_from, follow_up_to=follow_up_to,
         follow_up_due_by=periods.today_ist() if follow_up_due else None,
         city=(city or "").strip() or None, sources=source or None,
+        hot=None if hot is None else hot == "yes",
     )
     if also_in:
         found = {int(k) for k in also_in_service.matching_keys(db, scope, also_in_service.VTK)}
@@ -287,6 +310,27 @@ def get_lead(lead_id: int, db: DbSession, scope: LeadViewer):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Lead not found")
     lead, vendor_name, updater_name = found
     return crud.serialize(lead, vendor_name, scope.is_admin, updater_name)
+
+
+@router.post("/leads/{lead_id}/hot")
+def mark_vendor_lead_hot(lead_id: int, db: DbSession, scope: LeadViewer):
+    found = crud.get_lead(db, lead_id, vendor_id=None if scope.is_admin else scope.vendor_id)
+    if found is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Lead not found")
+    crud.set_hot(db, found[0], scope.user.id, True)
+    marked_at = found[0].hot_marked_at
+    marked_at = marked_at if marked_at.tzinfo else marked_at.replace(tzinfo=timezone.utc)
+    return {"id": lead_id, "is_hot": True, "hot_marked_by": scope.user.id,
+            "hot_marked_at": marked_at.isoformat() if marked_at else None}
+
+
+@router.delete("/leads/{lead_id}/hot")
+def unmark_vendor_lead_hot(lead_id: int, db: DbSession, scope: LeadViewer):
+    found = crud.get_lead(db, lead_id, vendor_id=None if scope.is_admin else scope.vendor_id)
+    if found is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Lead not found")
+    crud.set_hot(db, found[0], scope.user.id, False)
+    return {"id": lead_id, "is_hot": False, "hot_marked_by": None, "hot_marked_at": None}
 
 
 @router.patch("/leads/{lead_id}")

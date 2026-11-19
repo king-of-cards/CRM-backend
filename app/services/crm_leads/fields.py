@@ -145,12 +145,12 @@ FIELDS: dict[str, list[FieldDef]] = {
     ],
 }
 
-# Columns of the export/template that are shown but never read back from an upload
+# Read-only columns present in exports and/or templates; never read back from an upload
 READ_ONLY_COLUMNS: dict[str, tuple[str, ...]] = {
-    "spin": ("Branch code", "Quoted date"),
-    "whatsapp": ("Quoted date",),
-    "wedding": ("Quoted date",),
-    "wedding_planner": ("Estimate", "Fits budget", "Quoted date", "Last step"),
+    "spin": ("Branch code", "Quoted date", "Hot"),
+    "whatsapp": ("Quoted date", "Hot"),
+    "wedding": ("Quoted date", "Hot"),
+    "wedding_planner": ("Estimate", "Fits budget", "Quoted date", "Last step", "Hot"),
 }
 UPDATE_HELP = ("Empty or Pending, Converted, Not converted, Already purchased somewhere else, Already purchased "
                "with us, Will call back, Interested or Not interested.")

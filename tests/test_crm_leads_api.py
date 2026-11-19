@@ -550,7 +550,7 @@ class CrmLeadsApiTest(ApiTestBase, unittest.TestCase):
         self.assertIn("content-disposition", resp.headers["access-control-expose-headers"].lower())
         ws = load_workbook(io.BytesIO(resp.content)).active
         header = [c.value for c in ws[1]]
-        self.assertEqual(header, headers)                   # same columns as the template
+        self.assertEqual(header, [*headers, "Hot"])         # export adds the read-only Hot column
         rows = {r[header.index("Contact")].value: r for r in ws.iter_rows(min_row=2)}
         self.assertEqual(len(rows), 4)                      # 1 workflow + 3 CRM
         row = rows["+919845020001"]
@@ -678,7 +678,7 @@ class CrmLeadsApiTest(ApiTestBase, unittest.TestCase):
         out = self.export_rows("wedding", "csv")
         header = out[0]
         self.assertEqual(header, ["Lead", "Email", "Contact", "Occasion", "Event date", "City", "Budget", "Assigned to",
-                                  "Update", "Quoted amount", "Quoted date", "Conversion amount", "Submitted"])
+                                  "Update", "Quoted amount", "Quoted date", "Conversion amount", "Submitted", "Hot"])
         first = next(r for r in out[1:] if r[header.index("Email")] == "x@example.com")
         self.assertEqual(first[header.index("Lead")], "'=cmd|' /C calc'!A0")       # apostrophe: not a formula
         self.assertEqual(first[header.index("Contact")], "'+919845030001")          # text, formula-safe

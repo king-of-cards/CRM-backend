@@ -187,6 +187,8 @@ def attach(
     branch_vendor: Callable[[dict], int | None] = lambda _: None,
 ) -> list[dict]:
     """Return copies of `items`, each with a "crm" object. One query for the whole page."""
+    from app.models.hot_lead import CrmHotLead
+
     vendors = active_vendors(session)
     by_id = {v.id: v for v in vendors}
     keys = [str(key(i)) for i in items if key(i) is not None]
@@ -196,15 +198,21 @@ def attach(
             m.lead_key: m
             for m in session.exec(select(LeadMeta).where(LeadMeta.source == source, LeadMeta.lead_key.in_(keys)))
         }
+    hot_rows = {}
+    if keys:
+        hot_rows = {r.lead_key: r for r in session.exec(select(CrmHotLead).where(
+            CrmHotLead.source == source, CrmHotLead.lead_key.in_(keys)
+        ))}
     out = []
     for item in items:
         k = key(item)
         copy = dict(item)
         if k is None:
             copy["crm"] = None
+            copy["is_hot"] = False
         else:
             k = str(k)
-            copy["crm"] = meta_out(
+            crm = meta_out(
                 metas.get(k),
                 k,
                 by_id,
@@ -212,6 +220,13 @@ def attach(
                 suggest_vendor(vendors, location(item), pincode(item)),
                 by_id.get(branch_vendor(item)),
             )
+            marked = hot_rows.get(k)
+            hot = marked is not None
+            crm["is_hot"] = hot
+            copy["is_hot"] = hot
+            copy["hot_marked_by"] = marked.hot_marked_by if marked else None
+            copy["hot_marked_at"] = _iso(marked.hot_marked_at) if marked else None
+            copy["crm"] = crm
         out.append(copy)
     return out
 

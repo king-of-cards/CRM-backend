@@ -8,6 +8,7 @@ source: spin | whatsapp | wedding | wedding_planner
 lead_key: the "crm.lead_key" value that every lead row in the lists carries.
 The leads themselves are never modified: these details live in crm_lead_meta (sidecar).
 """
+import logging
 from datetime import date, datetime, timezone
 from typing import Literal
 
@@ -20,10 +21,11 @@ from app.core import response_cache
 from app.models.lead_meta import LeadMeta
 from app.models.lead_origin import CRM_KEY_PREFIX
 from app.models.vendor import Vendor
-from app.services import access, lead_crm
+from app.services import access, hot_leads, lead_crm, notifications
 from app.services.crm_leads import service as crm_leads
 
 router = APIRouter(prefix="/leads", tags=["lead crm"])
+logger = logging.getLogger(__name__)
 
 Source = Literal["spin", "whatsapp", "wedding", "wedding_planner"]
 MAX_AMOUNT = 100_000_000          # rupees, for quoted_amount and conversion_amount
@@ -82,7 +84,9 @@ def _find(db, source: str, lead_key: str) -> LeadMeta | None:
 def get_lead_crm(source: Source, lead_key: str, viewer: LeadViewer, db: DbSession):
     if not access.can_see(db, viewer, source, lead_key):
         raise HTTPException(404, "Lead not found")
-    return _answer(db, source, lead_key, _find(db, source, lead_key))
+    answer = _answer(db, source, lead_key, _find(db, source, lead_key))
+    answer["is_hot"] = hot_leads.is_hot(db, source, lead_key)
+    return answer
 
 
 @router.put("/{source}/{lead_key}/crm")
@@ -112,7 +116,9 @@ def save_lead_crm(source: Source, lead_key: str, body: LeadCrmUpdate, viewer: Le
         changes["notes"] = changes["notes"].strip() or None
 
     now = datetime.now(timezone.utc)
+    # Read before mutating so notifications are tied only to a real new assignment.
     meta = _find(db, source, lead_key)
+    previous_vendor_id = meta.vendor_id if meta else None
     if meta is None:
         meta = LeadMeta(source=source, lead_key=lead_key, updated_at=now)
     for field, value in changes.items():
@@ -129,4 +135,30 @@ def save_lead_crm(source: Source, lead_key: str, body: LeadCrmUpdate, viewer: Le
     response_cache.clear("vendors")  # vendor numbers changed
     response_cache.clear("analytics")
     access.forget()                  # who may see the lead can have changed
-    return _answer(db, source, lead_key, meta, body)
+    answer = _answer(db, source, lead_key, meta, body)
+    answer["is_hot"] = hot_leads.is_hot(db, source, lead_key)
+    if ("vendor_id" in changes and changes["vendor_id"] is not None
+            and changes["vendor_id"] != previous_vendor_id):
+        try:
+            notifications.notify_vendor_assigned(
+                db, source=source, lead_key=lead_key, vendor_id=changes["vendor_id"],
+                actor_user_id=viewer.user.id, actor_name=viewer.user.name,
+            )
+        except Exception:
+            db.rollback()
+            logger.exception("Could not create vendor assignment notification")
+    return answer
+
+
+@router.post("/{source}/{lead_key}/hot")
+def mark_lead_hot(source: Source, lead_key: str, viewer: LeadViewer, db: DbSession):
+    if not access.can_see(db, viewer, source, lead_key) or not hot_leads.lead_exists(db, source, lead_key):
+        raise HTTPException(404, "Lead not found")
+    return hot_leads.set_hot(db, source, lead_key, viewer.user.id, True)
+
+
+@router.delete("/{source}/{lead_key}/hot")
+def unmark_lead_hot(source: Source, lead_key: str, viewer: LeadViewer, db: DbSession):
+    if not access.can_see(db, viewer, source, lead_key) or not hot_leads.lead_exists(db, source, lead_key):
+        raise HTTPException(404, "Lead not found")
+    return hot_leads.set_hot(db, source, lead_key, viewer.user.id, False)

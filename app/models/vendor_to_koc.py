@@ -71,6 +71,9 @@ class VendorToKocLead(SQLModel, table=True):
     conversion_amount: int | None = None                   # rupees; admins set it (PATCH)
     status_updated_by: int | None = Field(default=None, foreign_key="crm_users.id")
     status_updated_at: datetime | None = None
+    is_hot: bool = Field(default=False, sa_column_kwargs={"server_default": "0", "nullable": False})
+    hot_marked_by: int | None = Field(default=None, foreign_key="crm_users.id")
+    hot_marked_at: datetime | None = None
     source: str = Field(max_length=20)                     # LeadSource value
     created_by: int = Field(foreign_key="crm_users.id")
     created_at: datetime
@@ -163,6 +166,7 @@ class VendorLeadRead(SQLModel):
     source: str
     created_by: int
     created_at: datetime
+    is_hot: bool = False
     updated_at: datetime
     update_status: str | None          # null = pending
     additional_comments: str | None

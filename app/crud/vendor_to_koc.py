@@ -98,6 +98,7 @@ SORT_COLUMNS = {
     "created_at": VendorToKocLead.created_at,
     "updated_at": VendorToKocLead.updated_at,
     "vendor_name": Vendor.name,
+    "is_hot": VendorToKocLead.is_hot,
 }
 
 
@@ -117,6 +118,7 @@ class LeadFilters:
     sources: list[str] | None = None         # bulk_upload / manual
     ids_in: set[int] | None = None           # only these lead ids (also_in=yes)
     ids_not_in: set[int] | None = None       # never these lead ids (also_in=no)
+    hot: bool | None = None
 
 
 def _conditions(f: LeadFilters) -> list:
@@ -159,6 +161,8 @@ def _conditions(f: LeadFilters) -> list:
         conds.append(col(lead.city).ilike(f"%{escaped_city}%", escape=LIKE_ESCAPE))
     if f.sources:
         conds.append(col(lead.source).in_(f.sources))
+    if f.hot is not None:
+        conds.append(col(lead.is_hot).is_(f.hot))
     if f.ids_in is not None:
         conds.append(col(lead.id).in_(sorted(f.ids_in)) if f.ids_in else false())
     if f.ids_not_in:
@@ -173,6 +177,8 @@ def _conditions(f: LeadFilters) -> list:
 def _order_by(sort: str, order: str) -> list:
     desc = order == "desc"
     column = SORT_COLUMNS[sort]
+    if sort == "is_hot":
+        return [column.desc(), col(VendorToKocLead.id).desc() if desc else col(VendorToKocLead.id).asc()]
     # Empty values last in both directions. MySQL has no NULLS LAST, so sort on
     # "is empty" first; this works on MySQL and SQLite alike.
     return [
@@ -243,11 +249,19 @@ def export_rows(db: Session, f: LeadFilters, sort: str, order: str, admin: bool)
         select(Vendor.name, lead.lead_date, lead.name, lead.phone, lead.city,
                lead.update_status, lead.additional_comments, lead.follow_up_date,
                lead.quoted_amount, lead.conversion_amount,
-               updater.name, updater.email if admin else updater.name, lead.status_updated_at)
+               updater.name, updater.email if admin else updater.name, lead.status_updated_at, lead.is_hot)
         .join(Vendor, col(Vendor.id) == lead.vendor_id)
         .outerjoin(updater, col(updater.id) == lead.status_updated_by)
     )
     return list(db.exec(stmt.where(*_conditions(f)).order_by(*_order_by(sort, order))).all())
+
+
+def set_hot(db: Session, lead: VendorToKocLead, actor_user_id: int, hot: bool) -> None:
+    lead.is_hot = hot
+    lead.hot_marked_by = actor_user_id if hot else None
+    lead.hot_marked_at = utcnow() if hot else None
+    db.add(lead)
+    db.commit()
 
 
 def list_leads(db: Session, f: LeadFilters, sort: str, order: str,

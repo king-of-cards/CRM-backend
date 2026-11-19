@@ -3,6 +3,7 @@ list filters, vendors and vendor logins. In-memory SQLite and fake data only."""
 import csv
 import io
 import unittest
+from unittest import mock
 from datetime import date, datetime, timedelta
 
 from tests.base import ORIGIN, PASSWORD, AuthTestCase
@@ -18,6 +19,7 @@ from app.models.user import User  # noqa: E402
 from app.models.vendor import Vendor  # noqa: E402
 from app.models.vendor_to_koc import ADMIN_ONLY_FIELDS, VendorToKocLead  # noqa: E402
 from app.models.vendor_user import VendorUser  # noqa: E402
+from app.services import notifications as notification_service  # noqa: E402
 from app.api.v1.endpoints.vendor_to_koc import ONLY_VENDORS_ADD  # noqa: E402
 from app.services.vendor_lead_import import clean_phone, parse_file_date  # noqa: E402
 
@@ -157,6 +159,54 @@ class VendorToKocTestCase(AuthTestCase):
 
     def assert_no_admin_fields(self, obj: dict):
         self.assertEqual(set(obj) & ADMIN_FIELDS, set(), obj)
+
+
+class NotificationsAndHotTests(VendorToKocTestCase):
+    def test_single_and_bulk_add_create_admin_notifications_once_per_admin(self):
+        single = self.client.post(f"{BASE}/leads", headers=self.phodeo,
+                                  json={"name": "Single", "date": "2026-12-20",
+                                        "phone": "9876543210", "city": "Mysuru"})
+        self.assertEqual(single.status_code, 201, single.text)
+        rows = self.client.get(f"/api/v1/notifications", headers=self.admin).json()["items"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["type"], "vendor_lead_added")
+        self.assertIn("Single", rows[0]["body"])
+        self.assertEqual(self.client.get("/api/v1/notifications", headers=self.phodeo).json()["items"], [])
+        bulk = self.client.post(f"{BASE}/leads/bulk", headers=self.phodeo, json={"leads": [
+            {"name": "Bulk One", "date": "2026-12-21", "phone": "9876543211", "city": "Mysuru"},
+            {"name": "Bulk Two", "date": "2026-12-22", "phone": "9876543212", "city": "Mysuru"},
+        ]})
+        self.assertEqual((bulk.status_code, bulk.json()["added"]), (200, 2), bulk.text)
+        rows = self.client.get("/api/v1/notifications", headers=self.admin).json()["items"]
+        self.assertEqual(len(rows), 2)   # one single notification and one bulk summary
+        self.assertIn("2 leads", rows[0]["body"])
+        self.assertEqual(self.client.post(f"{BASE}/leads/bulk", headers=self.phodeo,
+                                          json={"leads": [
+                                              {"name": "Bulk One", "date": "2026-12-21", "phone": "9876543211", "city": "Mysuru"},
+                                              {"name": "Bulk Two", "date": "2026-12-22", "phone": "9876543212", "city": "Mysuru"},
+                                          ]}).json()["added"], 0)
+        self.assertEqual(len(self.client.get("/api/v1/notifications", headers=self.admin).json()["items"]), 2)
+
+    def test_notification_failure_does_not_fail_vendor_add(self):
+        with mock.patch.object(notification_service, "notify_admins_vendor_added", side_effect=RuntimeError("offline")):
+            response = self.client.post(f"{BASE}/leads", headers=self.phodeo,
+                                        json={"name": "Saved", "date": "2026-12-20",
+                                              "phone": "9876543213", "city": "Mysuru"})
+        self.assertEqual(response.status_code, 201, response.text)
+
+    def test_hot_filter_export_column_and_vendor_permissions(self):
+        lead_id = self.add_lead(self.phodeo_id, "9876543214", name="Hot", city="Mysuru")
+        url = f"{BASE}/leads/{lead_id}/hot"
+        self.assertEqual(self.client.post(url, headers=self.phodeo).status_code, 200)
+        listed = self.client.get(f"{BASE}/leads", headers=self.phodeo, params={"hot": "yes"}).json()
+        self.assertTrue(any(item["id"] == lead_id and item["is_hot"] for item in listed["items"]))
+        cold = self.client.get(f"{BASE}/leads", headers=self.phodeo, params={"hot": "no"}).json()
+        self.assertFalse(any(item["id"] == lead_id for item in cold["items"]))
+        denied = self.client.delete(url, headers=self.other)
+        self.assertEqual(denied.status_code, 404)
+        exported = self.client.get(f"{BASE}/leads/export", headers=self.phodeo, params={"format": "csv", "hot": "yes"})
+        self.assertEqual(exported.status_code, 200, exported.text)
+        self.assertIn("Hot", exported.text.splitlines()[0])
 
 
 # ── Preview ─────────────────────────────────────────────────────────────

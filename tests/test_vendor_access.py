@@ -45,14 +45,14 @@ WORKFLOW_ROWS = [
 
 HEADERS = {
     "spin": ["Lead", "Email", "Contact", "Branch", "Branch code", "Location", "Occasion", "Event date", "Budget",
-             "Assigned to", "Update", "Quoted amount", "Quoted date", "Conversion amount", "Created"],
+             "Assigned to", "Update", "Quoted amount", "Quoted date", "Conversion amount", "Created", "Hot"],
     "whatsapp": ["Lead", "Country", "Event date", "Assigned to", "Update", "Quoted amount", "Quoted date",
-                 "Conversion amount", "Submitted"],
+                 "Conversion amount", "Submitted", "Hot"],
     "wedding": ["Lead", "Email", "Contact", "Occasion", "Event date", "City", "Budget", "Assigned to", "Update",
-                "Quoted amount", "Quoted date", "Conversion amount", "Submitted"],
+                "Quoted amount", "Quoted date", "Conversion amount", "Submitted", "Hot"],
     "wedding_planner": ["Lead", "Role", "Email", "Contact", "Wedding date", "Wedding city", "Guests",
                         "Guests staying", "Budget", "Budget range", "Estimate", "Fits budget", "Assigned to",
-                        "Update", "Quoted amount", "Quoted date", "Conversion amount", "Updated", "Last step"],
+                        "Update", "Quoted amount", "Quoted date", "Conversion amount", "Updated", "Last step", "Hot"],
 }
 
 

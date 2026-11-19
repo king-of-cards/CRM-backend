@@ -41,6 +41,7 @@ from app.services.crm_leads.fields import (
 )
 from app.services.branches import branches_by_id
 from app.services.lead_crm import active_vendors
+from app.services import hot_leads
 from app.services.stores import branch_names
 
 router = APIRouter(prefix="/crm-leads", tags=["crm leads (add, import, export)"])
@@ -191,7 +192,7 @@ def _sheet_export(db, source: str, model, module, filters, sort: str, order: str
     _check_cap(db.exec(select(func.count()).select_from(model).where(*filters)).one())
     rows = db.exec(select(model).where(*filters).order_by(*module.ordering(sort, order))).all()
     items = module.attach_crm(db, [module._out(r) for r in rows])
-    return _export(source, format, export_cols.SHEET_COLUMNS[source], items, viewer)
+    return _export(source, format, [*export_cols.SHEET_COLUMNS[source], export_cols.HOT_COLUMN], items, viewer)
 
 
 @router.get("/whatsapp/export")
@@ -251,7 +252,8 @@ def export_spin(
     _check_cap(total)
     data = spin_ep.merged_page(db, 0, total, f.common.search, sort, order, f.branch, filters, use_cache=False)
     branches = list(branches_by_id(db).values())       # + the built-in stores, as the screen shows them
-    return _export("spin", format, export_cols.spin_columns(data["columns"], branches), data["items"], viewer)
+    return _export("spin", format, [*export_cols.spin_columns(data["columns"], branches), export_cols.HOT_COLUMN],
+                    data["items"], viewer)
 
 
 # ── Single lead ────────────────────────────────────────────────────────
@@ -266,6 +268,12 @@ def _duplicate_409(duplicate: dict, others: list[str]) -> HTTPException:
         "duplicate": duplicate,
         "warnings": [{"type": "other_source", "sources": others}] if others else [],
     })
+
+
+def _lead_out(db, source: str, lead):
+    item = service.out(source, lead)
+    item["is_hot"] = hot_leads.is_hot(db, source, item["lead_key"])
+    return item
 
 
 @router.post("/{source}", status_code=201)
@@ -290,7 +298,7 @@ def add_lead(source: Source, body: AddBody, user: AdminUser, db: DbSession):
     warnings = [{"type": "other_source", "sources": others}] if others else []
     if duplicate:
         warnings.append({"type": "duplicate_allowed", "duplicate": duplicate})
-    return {"lead": service.out(source, lead), "warnings": warnings}
+    return {"lead": _lead_out(db, source, lead), "warnings": warnings}
 
 
 def _crm_lead_or_error(db, source: str, lead_key: str):
@@ -305,7 +313,7 @@ def _crm_lead_or_error(db, source: str, lead_key: str):
 
 @router.get("/{source}/{lead_key}")
 def get_lead(source: Source, lead_key: str, _: AdminUser, db: DbSession):
-    return service.out(source, _crm_lead_or_error(db, source, lead_key))
+    return _lead_out(db, source, _crm_lead_or_error(db, source, lead_key))
 
 
 class EditBody(BaseModel):
@@ -335,7 +343,7 @@ def edit_lead(source: Source, lead_key: str, body: EditBody, _: AdminUser, db: D
     db.commit()
     db.refresh(lead)
     service.clear_caches()
-    return {"lead": service.out(source, lead)}
+    return {"lead": _lead_out(db, source, lead)}
 
 
 @router.post("/{source}/{lead_key}/archive")
@@ -346,7 +354,7 @@ def archive_lead(source: Source, lead_key: str, _: AdminUser, db: DbSession):
     service.set_archived(db, lead, True)
     db.commit()
     service.clear_caches()
-    return {"lead": service.out(source, lead)}
+    return {"lead": _lead_out(db, source, lead)}
 
 
 @router.post("/{source}/{lead_key}/unarchive")
@@ -355,4 +363,4 @@ def unarchive_lead(source: Source, lead_key: str, _: AdminUser, db: DbSession):
     service.set_archived(db, lead, False)
     db.commit()
     service.clear_caches()
-    return {"lead": service.out(source, lead)}
+    return {"lead": _lead_out(db, source, lead)}

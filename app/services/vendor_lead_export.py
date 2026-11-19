@@ -50,7 +50,7 @@ ADMIN_COLUMNS = [
     Column("Update", "text", 30), Column("Additional comments", "text", 50),
     Column("Follow-up date", "date", 14), Column("Quoted amount", "money", 16),
     Column("Conversion amount", "money", 18), Column("Updated by", "text", 24),
-    Column("Updated at", "datetime", 18),
+    Column("Updated at", "datetime", 18), Column("Hot", "yesno", 10),
 ]
 # Vendor logins: the same without the Vendor column (only their own leads)
 VENDOR_COLUMNS = [c for c in ADMIN_COLUMNS if c.heading != "Vendor"]
@@ -99,11 +99,11 @@ def lead_table(rows: Iterable[tuple], admin: bool) -> tuple[list[Column], list[l
     the writers below format them."""
     table = []
     for i, (vendor, lead_date, name, phone, city, status, comments, follow_up, quoted, conversion,
-            updater_name, updater_email, updated_at) in enumerate(rows, start=1):
+            updater_name, updater_email, updated_at, is_hot) in enumerate(rows, start=1):
         row = [
             i, vendor, lead_date, name, display_phone(phone), city,
             STATUS_LABELS.get(status, status), comments, follow_up, quoted, conversion,
-            updater_name or updater_email, to_ist(updated_at),
+            updater_name or updater_email, to_ist(updated_at), is_hot,
         ]
         table.append(row if admin else row[:1] + row[2:])         # vendor logins: no Vendor
     return (ADMIN_COLUMNS if admin else VENDOR_COLUMNS), table

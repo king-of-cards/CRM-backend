@@ -71,6 +71,7 @@ def _g(key: str) -> Callable[[dict], Any]:
 
 
 ASSIGNED_HEADER = "Assigned to"         # left out of vendor logins' exports
+HOT_COLUMN: Col = ("Hot", lambda i: bool(i.get("is_hot")), "yesno")
 CRM_COLUMNS: list[Col] = [
     (ASSIGNED_HEADER, lambda i: assigned_label(i.get("crm")), "text"),
     ("Update", lambda i: UPDATE_LABELS.get(_crm(i, "update_status"), _crm(i, "update_status")), "text"),

@@ -18,7 +18,7 @@ XLSX_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 FORMULA_NAME = '=HYPERLINK("http://evil.example","click")'
 ADMIN_HEADINGS = ["Sl. No", "Vendor", "Date", "Name", "Phone", "City", "Update",
                   "Additional comments", "Follow-up date", "Quoted amount", "Conversion amount",
-                  "Updated by", "Updated at"]
+                  "Updated by", "Updated at", "Hot"]
 VENDOR_HEADINGS = [h for h in ADMIN_HEADINGS if h != "Vendor"]
 
 
@@ -122,7 +122,7 @@ class AdminExportTests(ExportTestCase):
         self.assertEqual(rows[1], [
             1, "Phodeo", datetime(2026, 1, 5), "Asha Rao", "+919000000001", "Bengaluru",
             "Converted", "- call later", datetime(2026, 2, 1), 150000, 140000, "Admin",
-            datetime(2026, 1, 15, 15, 0),            # 09:30 UTC -> 15:00 IST
+            datetime(2026, 1, 15, 15, 0), False,     # 09:30 UTC -> 15:00 IST; not hot
         ])
         self.assertEqual(len(rows), 2)
         pending = xlsx_rows(self.export(self.admin, "update_status=pending"))
