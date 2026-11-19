@@ -32,6 +32,7 @@ per-vendor access rules, and the CRM details endpoint `PUT /leads/{source}/{lead
 13. [Dhruva leads](#13-dhruva-leads)
 14. [Notifications and hot leads](#14-notifications-and-hot-leads)
 15. [Activity and follow-up reminders](#15-activity-and-follow-up-reminders)
+16. [View-only role](#16-view-only-role)
 
 ---
 
@@ -795,7 +796,7 @@ gets `{"type": "other_source", "sources": [...]}` with the sorted source names (
 
 ## 5. Access: who sees and edits what
 
-**Logins.** (Dhruva logins never reach these endpoints: see [Users](#12-users-and-vendor-logins).) An admin (`crm_users.role = admin`) sees every lead. A vendor user
+**Logins.** (Dhruva logins never reach these endpoints: see [Users](#12-users-and-vendor-logins).) An admin (`crm_users.role = admin`) sees every lead. A view-only login (`role = viewer`) sees exactly what an admin sees and changes nothing (see [View-only role](#16-view-only-role)). A vendor user
 (`role = vendor`) is linked to one vendor in `crm_vendor_users` and sees **only the leads whose
 assignment is that vendor** (manual, sheet, branch or area rules, the same as the "Assigned to"
 chip), in every source. Unassigned leads are visible to admins only.
@@ -1322,7 +1323,10 @@ lead objects in `next_follow_ups` have no `status_updated_by`. `previous_receive
   - with it, the login is linked to that vendor (404 if the vendor doesn't exist);
   - without it, the login is created unlinked and gets 403 on lead endpoints until it's linked
     (`PUT /api/v1/vendor-to-koc/vendors/{vendor_id}/users/{user_id}`);
-  - an admin or Dhruva login with `vendor_id` gets 422.
+  - an admin, Dhruva or view-only login with `vendor_id` gets 422.
+- **View-only logins** (`role: "viewer"`, shown as "View only"; created by admins with
+  `POST /api/v1/users`, no `vendor_id`) read everything an admin reads and change nothing: see
+  [View-only role](#16-view-only-role).
 - **Dhruva logins** (`role: "dhruva"`, created by admins with `POST /api/v1/users`; several are
   allowed, no `vendor_id`) only use the Dhruva leads section (`/api/v1/dhruva/*`,
   `/api/v1/analytics/dhruva`). Every other endpoint answers
@@ -1351,6 +1355,7 @@ lead objects in `next_follow_ups` have no `status_updated_by`. `previous_receive
 |---|---|
 | List logins with role, `is_active`, `vendor_id` / `vendor_name` | `GET /api/v1/users` |
 | Create a vendor login with its vendor | `POST /api/v1/users` with `role: "vendor"`, `vendor_id` |
+| Create a view-only login | `POST /api/v1/users` with `role: "viewer"` (no `vendor_id`) |
 | Link or move a login to a vendor | `PUT /api/v1/vendor-to-koc/vendors/{vendor_id}/users/{user_id}` |
 | Unlink a login | `DELETE /api/v1/vendor-to-koc/vendors/{vendor_id}/users/{user_id}` |
 | Block / unblock | `PATCH /api/v1/users/{id}` with `is_active` |
@@ -1590,3 +1595,49 @@ mysql --host=<host> --user=<user> --password <database> < migrations/2026-11-19_
 
 The migration's `ALTER TABLE crm_lead_meta ADD COLUMN follow_up_date` runs only once.
 `create_all()` creates `crm_lead_activity` at startup, but does not add columns to an existing table.
+
+---
+
+## 16. View-only role
+
+A view-only login (`crm_users.role = "viewer"`, shown in the UI as **View only**) sees the same data
+as an admin and can't change anything. `crm_users.role` is a plain `VARCHAR(20)`, so no migration
+is needed.
+
+- **Creating one:** admins only, `POST /api/v1/users` with `role: "viewer"` and no `vendor_id`
+  (`vendor_id` → 422). Block / unblock with `PATCH /api/v1/users/{id}` works as for any login.
+- **Reads:** the same responses as an admin, admin-only fields included: the 4 sources (lists,
+  stats, filter options, `also_in`), lead details, CRM details, activity logs, Vendors → KOC
+  (leads, `status_updated_by`, vendors), Dhruva (admin fields, reminders), all three dashboards
+  (`?refresh=true` allowed: it only clears the in-memory cache), `/reminders/follow-ups`, GET
+  exports and templates, `GET /crm-leads/{source}/fields`, `GET /crm-leads/{source}/{lead_key}`,
+  `GET /vendor-to-koc/vendors`, `GET /vendors`, `GET /vendors/stats`, `GET /branches`.
+- **Denied reads (403):** `GET /users` (Team), `/sheets/*` (Settings) and `/read/*` (database
+  explorer). `GET /users/{id}` works for their own id only (other ids: 404, as for vendor logins).
+  `GET /auth/me` returns `role: "viewer"` and `vendor: null`.
+- **Writes:** every `POST`, `PUT`, `PATCH` and `DELETE` answers
+  `403 {"detail": "View-only logins cannot change data."}`, before the body is validated or the
+  lead is looked up. The only exceptions are `POST /auth/login`, `/auth/refresh` and
+  `/auth/logout`. The check sits on the whole API router, so new write endpoints are covered
+  automatically; a test sends every write operation in the OpenAPI schema as a viewer.
+- **Notifications:** `GET /notifications` is always empty (`items: []`, `total: 0`) and
+  `GET /notifications/unread-count` is `{"unread_count": 0}`. The expired-notification cleanup
+  doesn't run for them.
+- **Frontend:** a viewer's `403` with the text above can be shown as a friendly "View only" toast.
+
+### Who can do what
+
+| Action | Admin | View only | Vendor | Dhruva |
+|---|---|---|---|---|
+| Read the 4 sources, lead details, CRM, activity | all leads | all leads (admin fields) | own leads | 403 |
+| Read Vendors → KOC leads and dashboard | all, admin fields | all, admin fields | own, no admin fields | 403 |
+| Read Dhruva leads, dashboard and reminders | ✔ admin fields | ✔ admin fields | 403 | ✔ no admin fields |
+| `/analytics/overview`, `/reminders/follow-ups` | ✔ | ✔ (same as admin) | own leads | 403 |
+| GET exports and templates | ✔ | ✔ | own leads | Dhruva only |
+| `GET /crm-leads/{source}/fields`, `/{lead_key}`, `GET /vendors/stats`, `GET /vendor-to-koc/vendors` | ✔ | ✔ | 403 | 403 |
+| `GET /users`, `/sheets/*`, `/read/*` | ✔ | 403 | 403 | 403 |
+| Notifications | own inbox | always empty | vendor inbox | 403 |
+| Add, import, edit, archive leads; CRM details; hot | ✔ | 403 | own leads (CRM details, hot, Vendors → KOC add) | Dhruva leads |
+| Vendors, branches, vendor links, sheet sync | ✔ | 403 | 403 | 403 |
+| Create users, block / unblock any login | ✔ | 403 | 403 | 403 |
+| Login, refresh, logout, `GET /auth/me` | ✔ | ✔ | ✔ | ✔ |

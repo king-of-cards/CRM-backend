@@ -13,7 +13,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 from sqlmodel import select
 
-from app.api.deps import AdminUser, DbSession, LeadViewer, NotDhruvaUser, OptionalPeriod, PageSize
+from app.api.deps import AdminUser, DbSession, LeadViewer, NotDhruvaUser, OptionalPeriod, PageSize, ReadAdmin
 from app.crud import vendor_to_koc as crud
 from app.services import vendor_lead_export as lead_export
 from app.models.user import Role, User
@@ -57,8 +57,8 @@ ONLY_VENDORS_ADD = "Only vendor logins can add Vendor → KOC leads"
 
 
 def require_vendor_login(scope: LeadViewer) -> Viewer:
-    """Adding leads (preview, bulk, manual) is for vendor logins only: admins get 403."""
-    if scope.is_admin:
+    """Adding leads (preview, bulk, manual) is for vendor logins only: admins (and view only) get 403."""
+    if scope.sees_all:
         raise HTTPException(status.HTTP_403_FORBIDDEN, ONLY_VENDORS_ADD)
     return scope
 
@@ -231,7 +231,7 @@ def lead_query(
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{name}_from must be on or before {name}_to")
     created_from, created_to = period.utc_bounds() if period is not None else (None, None)
     filters = crud.LeadFilters(
-        vendor_ids=(vendor_id or None) if scope.is_admin else [scope.vendor_id],
+        vendor_ids=(vendor_id or None) if scope.sees_all else [scope.vendor_id],
         search=search, statuses=update_status, created_from=created_from, created_to=created_to,
         lead_date_from=lead_date_from, lead_date_to=lead_date_to,
         follow_up_from=follow_up_from, follow_up_to=follow_up_to,
@@ -260,7 +260,7 @@ def list_leads(
     page: int = Query(1, ge=1),
     page_size: PageSize = 10,
 ):
-    out = crud.list_leads(db, query.filters, query.sort, query.order, page, page_size, admin=scope.is_admin)
+    out = crud.list_leads(db, query.filters, query.sort, query.order, page, page_size, admin=scope.sees_all)
     also_in_service.attach(db, scope, also_in_service.VTK, out["items"], key_of=lambda i: i["id"],
                            e164_of={str(i["id"]): also_in_service.vtk_e164(i["phone"]) for i in out["items"]})
     return out
@@ -293,11 +293,11 @@ def export_leads(
                             f"The export has {total:,} leads; the limit is "
                             f"{lead_export.EXPORT_MAX_ROWS:,}. Narrow the filters, "
                             "for example by date range or vendor.")
-    rows = crud.export_rows(db, query.filters, query.sort, query.order, admin=scope.is_admin)
-    columns, table = lead_export.lead_table(rows, admin=scope.is_admin)
+    rows = crud.export_rows(db, query.filters, query.sort, query.order, admin=scope.sees_all)
+    columns, table = lead_export.lead_table(rows, admin=scope.sees_all)
     content = (lead_export.to_xlsx(columns, table) if format == "xlsx"
                else lead_export.to_csv(columns, table))
-    if scope.is_admin:
+    if scope.sees_all:
         prefix = "vendor_to_koc"
     else:
         prefix = lead_export.filename_slug(db.get(Vendor, scope.vendor_id).name)
@@ -308,7 +308,7 @@ def export_leads(
 def lead_stats(db: DbSession, scope: LeadViewer, query: LeadQueryDep):
     """Header numbers over exactly the leads GET /leads lists for the same filters: total and
     by_source, by_status (incl. pending), follow_ups_due and kpis; admins also by_vendor."""
-    return crud.lead_stats(db, query.filters, admin=scope.is_admin, today=periods.today_ist())
+    return crud.lead_stats(db, query.filters, admin=scope.sees_all, today=periods.today_ist())
 
 
 @router.get("/leads/template", response_class=Response, responses={200: {
@@ -323,16 +323,16 @@ def download_template(_user: NotDhruvaUser, format: Literal["xlsx", "csv"] = Que
 
 @router.get("/leads/{lead_id}", responses={200: {"description": LEAD_RESPONSE_DOC}})
 def get_lead(lead_id: int, db: DbSession, scope: LeadViewer):
-    found = crud.get_lead(db, lead_id, vendor_id=None if scope.is_admin else scope.vendor_id)
+    found = crud.get_lead(db, lead_id, vendor_id=None if scope.sees_all else scope.vendor_id)
     if found is None:       # also for another vendor's lead, so its existence isn't revealed
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Lead not found")
     lead, vendor_name, updater_name = found
-    return crud.serialize(lead, vendor_name, scope.is_admin, updater_name)
+    return crud.serialize(lead, vendor_name, scope.sees_all, updater_name)
 
 
 @router.post("/leads/{lead_id}/hot")
 def mark_vendor_lead_hot(lead_id: int, db: DbSession, scope: LeadViewer):
-    found = crud.get_lead(db, lead_id, vendor_id=None if scope.is_admin else scope.vendor_id)
+    found = crud.get_lead(db, lead_id, vendor_id=None if scope.sees_all else scope.vendor_id)
     if found is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Lead not found")
     was_hot = found[0].is_hot
@@ -348,7 +348,7 @@ def mark_vendor_lead_hot(lead_id: int, db: DbSession, scope: LeadViewer):
 
 @router.delete("/leads/{lead_id}/hot")
 def unmark_vendor_lead_hot(lead_id: int, db: DbSession, scope: LeadViewer):
-    found = crud.get_lead(db, lead_id, vendor_id=None if scope.is_admin else scope.vendor_id)
+    found = crud.get_lead(db, lead_id, vendor_id=None if scope.sees_all else scope.vendor_id)
     if found is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Lead not found")
     was_hot = found[0].is_hot
@@ -383,16 +383,16 @@ def update_lead(lead_id: int, body: LeadUpdate, db: DbSession, admin: AdminUser)
 @router.get("/leads/{lead_id}/activity")
 def get_lead_activity(lead_id: int, db: DbSession, scope: LeadViewer,
                       page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100)):
-    found = crud.get_lead(db, lead_id, vendor_id=None if scope.is_admin else scope.vendor_id)
+    found = crud.get_lead(db, lead_id, vendor_id=None if scope.sees_all else scope.vendor_id)
     if found is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Lead not found")
     return lead_activity.list_activity(db, source="vendor_to_koc", lead_key=str(lead_id), page=page,
-        page_size=page_size, allowed_fields=None if scope.is_admin else lead_activity.VTK_VISIBLE_FIELDS)
+        page_size=page_size, allowed_fields=None if scope.sees_all else lead_activity.VTK_VISIBLE_FIELDS)
 
 
 # ── Vendors (admin only) ───────────────────────────────────────────────
 @router.get("/vendors", response_model=list[VendorRead])
-def list_vendors(db: DbSession, _admin: AdminUser):
+def list_vendors(db: DbSession, _admin: ReadAdmin):
     """All vendors (active and inactive) with their lead counts, sorted by name."""
     return crud.list_vendors(db)
 

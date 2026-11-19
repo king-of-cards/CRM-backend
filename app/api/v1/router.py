@@ -1,4 +1,6 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+
+from app.api.deps import block_viewer_writes
 
 from app.api.v1.endpoints import (
     analytics,
@@ -21,7 +23,8 @@ from app.api.v1.endpoints import (
     whatsapp_leads,
 )
 
-api_router = APIRouter()
+# View-only logins: every write answers 403 (see deps.block_viewer_writes)
+api_router = APIRouter(dependencies=[Depends(block_viewer_writes)])
 api_router.include_router(health.router)
 api_router.include_router(auth.router)
 api_router.include_router(users.router)

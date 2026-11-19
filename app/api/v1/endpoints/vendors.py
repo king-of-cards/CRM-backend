@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
-from app.api.deps import AdminUser, DbSession, LeadViewer
+from app.api.deps import AdminUser, DbSession, LeadViewer, ReadAdmin
 from app.core import response_cache
 from app.db.session import engine, read_engine
 from app.models.vendor import Vendor
@@ -100,7 +100,7 @@ def _changed():
 def list_vendors(viewer: LeadViewer, db: DbSession, include_inactive: bool = False):
     """Admins: all vendors. Vendor users: only their own vendor."""
     query = select(Vendor).order_by(Vendor.priority, Vendor.id)
-    if not viewer.is_admin:
+    if not viewer.sees_all:
         query = query.where(Vendor.id == viewer.vendor_id)
     elif not include_inactive:
         query = query.where(Vendor.is_active == True)  # noqa: E712
@@ -272,5 +272,5 @@ def _build_stats() -> dict:
 
 
 @router.get("/stats")
-def vendor_stats(_: AdminUser):
+def vendor_stats(_: ReadAdmin):
     return response_cache.get(("vendors", "stats"), _build_stats, fresh=60, stale=1800)

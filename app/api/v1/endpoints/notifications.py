@@ -4,6 +4,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Query, status
 
 from app.api.deps import DbSession, LeadViewer, PageSize
+from app.models.user import Role
 from app.services import notifications as service
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
@@ -19,12 +20,16 @@ def list_notifications(
     unread_only: bool = False,
     type: NotificationType | None = None,
 ):
+    if viewer.user.role == Role.VIEWER.value:       # view only: no notifications (and no cleanup run)
+        return {"items": [], "total": 0, "page": page, "page_size": page_size, "pages": 0}
     return service.list_notifications(db, viewer.user, viewer.vendor_id, page=page, page_size=page_size,
                                       unread_only=unread_only, type_=type)
 
 
 @router.get("/unread-count")
 def unread_count(viewer: LeadViewer, db: DbSession):
+    if viewer.user.role == Role.VIEWER.value:
+        return {"unread_count": 0}
     return {"unread_count": service.unread_count(db, viewer.user, viewer.vendor_id)}
 
 

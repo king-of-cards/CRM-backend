@@ -63,7 +63,7 @@ class _Visibility:
         self._keys: dict[str, set[str] | None] = {}
 
     def sees(self, place: str, key: str, vendor_id: int | None = None) -> bool:
-        if self.viewer.is_admin:
+        if self.viewer.sees_all:
             return True
         if self.viewer.vendor_id is None or place == DHRUVA:
             return False                     # Dhruva logins: no other section; vendors: never Dhruva
@@ -145,7 +145,7 @@ def attach(db: Session, viewer, place: str, items: list[dict], key_of: Callable[
             seen.add((other, other_key))
             entry = found.setdefault(other, {"source": other, "count": 0})
             entry["count"] += 1
-            if other == VTK and viewer.is_admin:
+            if other == VTK and viewer.sees_all:
                 entry.setdefault("vendors", set()).add(vendor_name)
         item["also_in"] = [
             {**found[p], **({"vendors": sorted(found[p]["vendors"])} if "vendors" in found[p] else {})}

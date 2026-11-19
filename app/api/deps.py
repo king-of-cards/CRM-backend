@@ -51,12 +51,50 @@ def require_admin(user: CurrentUser) -> User:
 AdminUser = Annotated[User, Depends(require_admin)]
 
 
+def require_read_admin(user: CurrentUser) -> User:
+    """Admin-only reads that view-only logins may also use (writes stay AdminUser)."""
+    if user.role not in (Role.ADMIN.value, Role.VIEWER.value):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
+    return user
+
+
+ReadAdmin = Annotated[User, Depends(require_read_admin)]
+
+
+VIEW_ONLY = "View-only logins cannot change data."
+SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+# Writes a view-only login may still make: its own session
+VIEWER_WRITE_EXCEPTIONS = frozenset({"/auth/login", "/auth/refresh", "/auth/logout"})
+
+
+def block_viewer_writes(request: Request, db: DbSession) -> None:
+    """Set on the whole API router: a view-only login gets 403 on every POST / PUT / PATCH / DELETE
+    (except login, refresh, logout), so a new write endpoint is covered without any change. Requests
+    without a valid token are left to the endpoint's own checks (401 as before)."""
+    if request.method in SAFE_METHODS:
+        return
+    route = request.scope.get("route")
+    path = getattr(route, "path", request.url.path)
+    if any(path.endswith(allowed) for allowed in VIEWER_WRITE_EXCEPTIONS):
+        return
+    scheme, _, token = request.headers.get("authorization", "").partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        return
+    try:
+        user_id = int(decode_access_token(token)["sub"])
+    except (jwt.InvalidTokenError, KeyError, ValueError):
+        return
+    user = crud.get_user(db, user_id)
+    if user is not None and user.is_active and user.role == Role.VIEWER.value:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=VIEW_ONLY)
+
+
 DHRUVA_ONLY = "Dhruva logins can only use the Dhruva leads section."
 
 
 def get_viewer(user: CurrentUser, db: DbSession) -> Viewer:
-    """Admin, or a vendor login linked to its vendor (see app/services/access.py).
-    Dhruva logins: 403 (they only use the Dhruva endpoints)."""
+    """Admin, view-only login (reads like an admin), or a vendor login linked to its vendor (see
+    app/services/access.py). Dhruva logins: 403 (they only use the Dhruva endpoints)."""
     try:
         return access.viewer_for(db, user)
     except access.NotLinked:
@@ -76,8 +114,8 @@ NotDhruvaUser = Annotated[User, Depends(require_not_dhruva)]
 
 
 def require_dhruva_section(user: CurrentUser) -> User:
-    """The Dhruva leads section: admins and Dhruva logins (vendor logins: 403)."""
-    if user.role not in (Role.ADMIN.value, Role.DHRUVA.value):
+    """The Dhruva leads section: admins, Dhruva logins and view-only logins (vendor logins: 403)."""
+    if user.role not in (Role.ADMIN.value, Role.DHRUVA.value, Role.VIEWER.value):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
                             detail="Only admins and Dhruva logins can use the Dhruva leads section.")
     return user
@@ -86,7 +124,7 @@ def require_dhruva_section(user: CurrentUser) -> User:
 DhruvaSectionUser = Annotated[User, Depends(require_dhruva_section)]
 
 
-# Endpoints that admins and vendor users may call; results are limited to what the viewer may see
+# Endpoints that admins, view-only and vendor users may call; results are limited to what the viewer may see
 LeadViewer = Annotated[Viewer, Depends(get_viewer)]
 
 # Lead lists: page sizes the screens offer (anything else: 422). Default 10.

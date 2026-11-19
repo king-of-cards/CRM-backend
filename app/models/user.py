@@ -10,6 +10,7 @@ class Role(str, Enum):
     ADMIN = "admin"
     VENDOR = "vendor"
     DHRUVA = "dhruva"       # the Dhruva leads section only (see app/api/v1/endpoints/dhruva.py)
+    VIEWER = "viewer"       # "View only": reads everything an admin can read, changes nothing
 
 
 # Shared fields: used by the table and by the request/response models
@@ -37,7 +38,7 @@ class UserCreate(UserBase):
     password: str = Field(min_length=8, max_length=128)
     role: Role = Role.VENDOR
     # Vendor logins: the vendor to link (optional; without it the login stays unlinked and gets
-    # 403 on lead endpoints until linked). Not allowed for admins.
+    # 403 on lead endpoints until linked). Not allowed for admins, Dhruva or view-only logins (422).
     vendor_id: int | None = None
 
     @model_validator(mode="after")

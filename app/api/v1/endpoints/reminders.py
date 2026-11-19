@@ -91,7 +91,7 @@ def _reminder_rows(db: Session, viewer: Viewer | None, dhruva_only: bool = False
         if source == "spin":
             workflow = [key for key in keys if not key.startswith("crm-") and key.isdigit()]
             details.update(_workflow_spin_details(workflow))
-        vendor_by_id = {v.id: v.name for v in db.exec(select(Vendor))} if viewer is None or viewer.is_admin else {}
+        vendor_by_id = {v.id: v.name for v in db.exec(select(Vendor))} if viewer is None or viewer.sees_all else {}
         for meta in candidate:
             detail = details.get(meta.lead_key)
             if detail is None:
@@ -100,10 +100,10 @@ def _reminder_rows(db: Session, viewer: Viewer | None, dhruva_only: bool = False
             assigned = assignments.get(meta.lead_key)
             rows.append({"source": source, "lead_key": meta.lead_key, "name": name, "phone": phone,
                          "follow_up_date": meta.follow_up_date, "update_status": meta.update_status,
-                         "vendor_name": vendor_by_id.get(assigned) if viewer is not None and viewer.is_admin else None})
+                         "vendor_name": vendor_by_id.get(assigned) if viewer is not None and viewer.sees_all else None})
 
     vtk_stmt = select(VendorToKocLead, Vendor.name).join(Vendor, Vendor.id == VendorToKocLead.vendor_id)
-    if viewer is not None and not viewer.is_admin:
+    if viewer is not None and not viewer.sees_all:
         vtk_stmt = vtk_stmt.where(VendorToKocLead.vendor_id == viewer.vendor_id)
     for lead, vendor_name in db.exec(vtk_stmt.where(VendorToKocLead.follow_up_date.is_not(None))):
         if lead.update_status in {"converted", "not_interested"}:
@@ -111,9 +111,9 @@ def _reminder_rows(db: Session, viewer: Viewer | None, dhruva_only: bool = False
         rows.append({"source": "vendor_to_koc", "lead_key": str(lead.id), "name": lead.name,
                      "phone": lead.phone, "follow_up_date": lead.follow_up_date,
                      "update_status": lead.update_status,
-                     "vendor_name": vendor_name if viewer is not None and viewer.is_admin else None})
+                     "vendor_name": vendor_name if viewer is not None and viewer.sees_all else None})
 
-    if viewer is None or viewer.is_admin or dhruva_only:
+    if viewer is None or viewer.sees_all or dhruva_only:
         dhruva_query = select(DhruvaLead).where(DhruvaLead.follow_up_date.is_not(None), DhruvaLead.is_deleted == False)  # noqa: E712
         for lead in db.exec(dhruva_query):
             if lead.update_status in {"converted", "not_interested"}:
@@ -156,6 +156,6 @@ def follow_up_reminders(user: NotDhruvaUser, db: DbSession, days: int = Query(7,
         raise HTTPException(403, "This login isn't linked to a vendor.")
     requested = parse_sources(sources)
     rows = [row for row in _reminder_rows(db, viewer) if row["source"] in requested]
-    return _make_response(rows, days, viewer.is_admin)
+    return _make_response(rows, days, viewer.sees_all)
 
 

@@ -89,7 +89,7 @@ def list_branches(viewer: LeadViewer, db: DbSession):
     """Admins: branches with their vendor and lead counts. Vendor users: names, codes and cities
     only (to show the branch on their spin leads), without other vendors' lead numbers."""
     branches = db.exec(select(Branch).order_by(Branch.is_active.desc(), Branch.city, Branch.name)).all()
-    if not viewer.is_admin:
+    if not viewer.sees_all:
         return {
             "branches": [{"id": b.id, "name": b.name, "code": b.code, "city": b.city, "is_active": b.is_active}
                          for b in branches],

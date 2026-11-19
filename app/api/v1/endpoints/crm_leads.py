@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlmodel import select
 
-from app.api.deps import AdminUser, DbSession, LeadViewer
+from app.api.deps import AdminUser, DbSession, LeadViewer, ReadAdmin
 from app.api.v1.endpoints import spin_leads as spin_ep
 from app.api.v1.endpoints import wedding_leads as wedding_ep
 from app.api.v1.endpoints import wedding_plans as planner_ep
@@ -66,7 +66,7 @@ def _branch_names(db) -> list[str]:
 
 
 @router.get("/{source}/fields")
-def fields(source: Source, _: AdminUser, db: DbSession):
+def fields(source: Source, _: ReadAdmin, db: DbSession):
     answer: dict[str, Any] = {
         "source": source,
         "label": SOURCE_LABELS[source],
@@ -79,7 +79,7 @@ def fields(source: Source, _: AdminUser, db: DbSession):
 
 
 @router.get("/{source}/template")
-def template(source: Source, _: AdminUser, db: DbSession, format: Format = "xlsx"):
+def template(source: Source, _: ReadAdmin, db: DbSession, format: Format = "xlsx"):
     content, media_type, ext = tabular.template(
         source, format, _branch_names(db) if source == "spin" else [], [v.name for v in active_vendors(db)]
     )
@@ -187,7 +187,7 @@ def _check_cap(total: int) -> None:
 
 
 def _export(source: str, format: str, columns, items, viewer) -> Response:
-    if not viewer.is_admin:               # vendor logins: no Assigned to column
+    if not viewer.sees_all:               # vendor logins: no Assigned to column
         columns = [c for c in columns if c[0] != export_cols.ASSIGNED_HEADER]
     headers, rows, kinds = export_cols.build(columns, items)
     content, media_type, ext = tabular.write_table(format, SOURCE_LABELS[source], headers, rows, kinds)
@@ -320,7 +320,7 @@ def _crm_lead_or_error(db, source: str, lead_key: str):
 
 
 @router.get("/{source}/{lead_key}")
-def get_lead(source: Source, lead_key: str, _: AdminUser, db: DbSession):
+def get_lead(source: Source, lead_key: str, _: ReadAdmin, db: DbSession):
     return _lead_out(db, source, _crm_lead_or_error(db, source, lead_key))
 
 

@@ -39,11 +39,17 @@ TEMPLATE_COLUMNS = [
 
 
 def is_admin(user) -> bool:
+    """May make admin changes (write paths)."""
     return user.role == Role.ADMIN.value
 
 
+def sees_all(user) -> bool:
+    """Reads the admin-only fields: admins and view-only logins."""
+    return user.role in (Role.ADMIN.value, Role.VIEWER.value)
+
+
 def viewer_of(user) -> Viewer:
-    """For also_in: admins see every section; a Dhruva login (no vendor) sees none."""
+    """For also_in: admins and view-only logins see every section; a Dhruva login (no vendor) sees none."""
     return Viewer(user, None)
 
 
@@ -231,7 +237,7 @@ ListQueryDep = Annotated[ListQuery, Depends(list_query)]
 def list_leads(db: DbSession, user: DhruvaSectionUser, query: ListQueryDep, page: int = Query(1, ge=1),
                page_size: PageSize = 10):
     """{items (each with sl_no), total, page, page_size, pages}."""
-    out = crud.list_page(db, query.filters, query.sort, query.order, page, page_size, admin=is_admin(user))
+    out = crud.list_page(db, query.filters, query.sort, query.order, page, page_size, admin=sees_all(user))
     also_in_service.attach(db, viewer_of(user), also_in_service.DHRUVA, out["items"], key_of=lambda i: i["id"],
                            e164_of={str(i["id"]): {i["phone_e164"], i["alt_phone_e164"]} for i in out["items"]})
     return out
@@ -301,7 +307,7 @@ def get_lead(lead_id: int, db: DbSession, user: DhruvaSectionUser):
 
 def _serialize_lead(db, found, user):
     row, creator_name, updater_name = found
-    return crud.serialize(row, creator_name, updater_name, admin=is_admin(user),
+    return crud.serialize(row, creator_name, updater_name, admin=sees_all(user),
                           expose_status_updater_id=True,
                           is_hot=hot_leads.is_hot(db, "dhruva", str(row.id)))
 
@@ -414,7 +420,7 @@ def get_activity(lead_id: int, db: DbSession, user: DhruvaSectionUser,
 
 @router.get("/reminders/follow-ups")
 def dhruva_follow_up_reminders(db: DbSession, user: DhruvaSectionUser, days: int = Query(7, ge=0, le=30)):
-    if is_admin(user):
+    if sees_all(user):
         from app.api.v1.endpoints.reminders import _make_response, _reminder_rows
         return _make_response([r for r in _reminder_rows(db, None, dhruva_only=True) if r["source"] == "dhruva"],
                               days, True)

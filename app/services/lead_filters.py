@@ -183,7 +183,7 @@ def allowed_keys(db: Session, source: str, viewer, f: CommonFilters) -> set[str]
     visible = access.visible_keys(db, viewer, source)
     if visible is not None:
         sets.append(visible)
-    if viewer.is_admin and (f.vendor_ids or f.unassigned):
+    if viewer.sees_all and (f.vendor_ids or f.unassigned):
         assignment = access.assignments(db, source)
         wanted = set(f.vendor_ids)
         sets.append({k for k, v in assignment.items() if (v is not None and v in wanted) or (f.unassigned and v is None)})
@@ -266,7 +266,7 @@ def update_options(db: Session, source: str, keys: set[str]) -> list[dict]:
 
 def vendor_options(db: Session, viewer) -> list[dict]:
     """Active vendors for admins; none for vendor users (vendor filtering is admin-only)."""
-    if not viewer.is_admin:
+    if not viewer.sees_all:
         return []
     from app.services.lead_crm import active_vendors
 

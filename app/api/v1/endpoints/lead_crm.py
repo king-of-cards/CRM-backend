@@ -188,6 +188,6 @@ def get_activity(source: Source, lead_key: str, viewer: LeadViewer, db: DbSessio
                  page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100)):
     if lead_key not in access.assignments(db, source) or not access.can_see(db, viewer, source, lead_key):
         raise HTTPException(404, "Lead not found")
-    allowed = None if viewer.is_admin else lead_activity.VENDOR_CRM_FIELDS
+    allowed = None if viewer.sees_all else lead_activity.VENDOR_CRM_FIELDS
     return lead_activity.list_activity(db, source=source, lead_key=lead_key, page=page,
                                        page_size=page_size, allowed_fields=allowed)

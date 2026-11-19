@@ -4,7 +4,9 @@
   Vendor user  (crm_users.role = vendor, linked to one vendor in crm_vendor_users) sees only the
                leads whose effective assignment is their vendor, in every source; can change
                update, quote, conversion amount and notes on those leads; can't assign.
-  Unassigned   leads are visible to admins only.
+  View only    (crm_users.role = viewer) sees everything an admin sees (Viewer.sees_all) and changes
+               nothing: every write answers 403 (app/api/deps.block_viewer_writes).
+  Unassigned   leads are visible to admins (and view-only logins) only.
 
 The effective assignment is the one shown in "Assigned to" (lead_crm.meta_out): manual, then the
 sheet's "leads shared", then the branch's vendor, then the area rules, unless the lead was
@@ -33,11 +35,17 @@ CACHE_SECONDS = 30          # rebuilt after this (never served stale); cleared o
 @dataclass(frozen=True)
 class Viewer:
     user: User
-    vendor_id: int | None          # None for admins
+    vendor_id: int | None          # None for admins and view-only logins
 
     @property
     def is_admin(self) -> bool:
+        """May change data as an admin (write paths)."""
         return self.user.role == Role.ADMIN.value
+
+    @property
+    def sees_all(self) -> bool:
+        """Reads like an admin: every lead and the admin-only fields (admins and view-only logins)."""
+        return self.user.role in (Role.ADMIN.value, Role.VIEWER.value)
 
 
 class NotLinked(Exception):
@@ -49,7 +57,7 @@ class DhruvaOnly(Exception):
 
 
 def viewer_for(db: Session, user: User) -> Viewer:
-    if user.role == Role.ADMIN.value:
+    if user.role in (Role.ADMIN.value, Role.VIEWER.value):
         return Viewer(user, None)
     if user.role == Role.DHRUVA.value:
         raise DhruvaOnly()
@@ -88,14 +96,14 @@ def assignments(db: Session, source: str) -> dict[str, int | None]:
 
 
 def visible_keys(db: Session, viewer: Viewer, source: str) -> set[str] | None:
-    """Lead keys this viewer may see in the source; None = all (admin)."""
-    if viewer.is_admin:
+    """Lead keys this viewer may see in the source; None = all (admin, view only)."""
+    if viewer.sees_all:
         return None
     return {key for key, vendor_id in assignments(db, source).items() if vendor_id == viewer.vendor_id}
 
 
 def can_see(db: Session, viewer: Viewer, source: str, lead_key: str) -> bool:
-    if viewer.is_admin:
+    if viewer.sees_all:
         return True
     return assignments(db, source).get(str(lead_key)) == viewer.vendor_id
 

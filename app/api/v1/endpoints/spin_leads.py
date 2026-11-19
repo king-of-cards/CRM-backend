@@ -641,7 +641,7 @@ def spin_leads_filter_options(viewer: LeadViewer, db: DbSession):
     from app.services.stores import store_for
 
     visible = access.visible_keys(db, viewer, "spin")
-    if viewer.is_admin:
+    if viewer.sees_all:
         base = response_cache.get(("spin", "filter-options"), spin_filter_options, fresh=600, stale=3600)
     else:
         base = spin_filter_options({k for k in visible if not k.startswith("crm-")})

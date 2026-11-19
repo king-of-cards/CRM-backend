@@ -543,7 +543,7 @@ def analytics_overview(viewer: LeadViewer, db: DbSession, period: DashboardPerio
     if refresh:
         response_cache.clear("analytics")
     bind = db.get_bind()
-    if viewer.is_admin:
+    if viewer.sees_all:
         return response_cache.get(_cache_key("admin", period, city_sources),
                                   _builder(bind, None, period, None, city_sources),
                                   fresh=FRESH_SECONDS, stale=STALE_SECONDS)
@@ -694,12 +694,12 @@ def vendor_to_koc_overview(viewer: LeadViewer, db: DbSession, period: DashboardP
     city_sources = _parse_city_sources(sources, VTK_CITY_DEFAULTS)
     if refresh:
         response_cache.clear("analytics")
-    scope = "admin" if viewer.is_admin else ("vendor", viewer.vendor_id)
+    scope = "admin" if viewer.sees_all else ("vendor", viewer.vendor_id)
     bind = db.get_bind()
 
     def build():
         with Session(bind) as session:
-            return _vtk_build(session, None if viewer.is_admin else viewer.vendor_id, period, viewer.is_admin,
+            return _vtk_build(session, None if viewer.sees_all else viewer.vendor_id, period, viewer.sees_all,
                               city_sources)
 
     key = ("analytics", "vendor-to-koc", scope) + _cache_key(scope, period, city_sources)[3:]
@@ -764,7 +764,7 @@ def dhruva_overview(user: DhruvaSectionUser, db: DbSession, period: AllTimeDefau
     venues = sorted(({"value": spellings.most_common(1)[0][0], "count": sum(spellings.values())}
                      for spellings in venue_names.values()), key=lambda v: (-v["count"], v["value"].lower()))
     months = Counter(f"{r.event_date.year:04d}-{r.event_date.month:02d}" for r in leads if r.event_date)
-    admin = user.role == Role.ADMIN.value
+    admin = user.role in (Role.ADMIN.value, Role.VIEWER.value)      # view only reads like an admin
     latest = sorted(current, key=lambda t: (t[0].created_at, t[0].id), reverse=True)[:6]
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
