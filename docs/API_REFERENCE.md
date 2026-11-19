@@ -1007,7 +1007,7 @@ Pending, without amounts); Vendor → KOC from its own columns.
 | `trend` | Lead inflow | `[{date, end, <source counts>}]`: one point per day; for periods over 90 days, 7-day buckets starting at `date_from` (the last may be shorter). `period.granularity` says which |
 | `photography_budget`, `guests`, `budget_fit`, `repeats` | Budgets & size | Leads that arrived in the period |
 | `sharing` | Shared with partners, Partners callout | Wedding and planner leads that arrived in the period. `by_source`: `{wedding, wedding_planner}`, each `{shareable, shared, not_shared}` (they add up to the totals) |
-| `top_cities` | Top 10 `[{city, count, by_source}]` | Wedding, Wedding planner and Vendor → KOC city leads that arrived in the period; existing cleanup plus alias merging. `top_cities_no_city` counts included-source leads with blank city. Spin is omitted because workflow city/location is unpopulated; WhatsApp country and Dhruva are not cities |
+| `top_cities` | Top 10 `[{city, count, by_source}]` | Spin, Wedding, Wedding planner and Vendor → KOC leads that arrived in the period; Spin uses lead city/location or pincode area, never branch fallback. `top_cities_sources` lists included sources. `top_cities_no_city` and `top_cities_no_city_by_source` count blank locations. International country and Dhruva venue are excluded |
 | City alias normalization | Top cities | Bangalore/Bengaluru, Hyderabad/Hydrabad/Hyderbad, Gurgaon/Gurugram, Bombay/Mumbai, Madras/Chennai, Calcutta/Kolkata, Mysore/Mysuru, Trivandrum/Thiruvananthapuram, Cochin/Kochi, Pune/Poona; observed `Banglore` and `@Bengaluru` also normalize to Bengaluru |
 | City aliases |  | Bangalore/Bengaluru, Hyderabad/Hydrabad/Hyderbad, Gurgaon/Gurugram, Bombay/Mumbai, Madras/Chennai, Calcutta/Kolkata, Mysore/Mysuru, Trivandrum/Thiruvananthapuram, Cochin/Kochi, Pune/Poona; observed `Banglore` and `@Bengaluru` also normalize to Bengaluru |
 | `top_countries`, `occasions`, `partners` | Lists | Leads that arrived in the period |
@@ -1227,6 +1227,8 @@ same parameters, the list `total`, the stats `total` and the export's rows are e
 | `city` | all | Contains, ignoring case |
 | `source` (repeatable) | all | `bulk_upload` / `manual` |
 | `hot` | all | `yes` / `no`: marked hot or not hot |
+| `quote` | all | `has`, `none`, `gt:<amount>` or `lt:<amount>` on `quoted_amount` |
+| `conversion` | all | `has`, `none`, `gt:<amount>` or `lt:<amount>` on `conversion_amount` |
 | `also_in` | all | `yes` / `no`: the phone also exists in one of the 4 sources (vendors: their own leads there); see [Cross-source duplicates](#cross-source-duplicates-also_in). List items carry `also_in` |
 | `sort`, `order` | all | `created_at` (default), `updated_at`, `lead_date`, `name`, `city`, `phone`, `vendor_name`, `update_status`, `follow_up_date`, `is_hot` (hot first). Empty values last |
 
@@ -1269,7 +1271,7 @@ same 400 errors. A lead's arrival date is its `created_at`. Results are cached p
 | `by_status` | all | `pending` plus every status |
 | `per_vendor` | admin | `[{vendor_id, vendor_name, leads, interested, converted, pending, converted_pct, average_days_to_update}]`. The last field is the average days from `created_at` to `status_updated_at`, over leads with a status |
 | `funnel` | all | `{received, updated (has a status), engaged (interested, will call back or converted), converted}`; `purchased_with_us` is separate |
-| `top_cities`, `by_source` | admin | Over the period's leads |
+| `top_cities`, `top_cities_sources`, `top_cities_no_city`, `top_cities_no_city_by_source`, `by_source` | admin | Top cities uses the shared Spin, Wedding, Wedding planner and Vendor → KOC period aggregation; `top_cities_sources` lists available sources |
 | `latest` | admin | The 6 newest leads of the period (lead objects) |
 | `follow_ups_due` | all | **Not limited to the period:** open leads with a follow-up date today or earlier |
 | `next_follow_ups` | all | **Not limited to the period:** up to 10 open leads by follow-up date, earliest first, overdue included |

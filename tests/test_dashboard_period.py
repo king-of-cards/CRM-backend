@@ -29,8 +29,10 @@ def utc(*args) -> datetime:
 
 # Workflow spin leads (created_at stored in UTC, without a time zone)
 SPIN_ROWS = [
-    {"key": "501", "created": datetime(2026, 11, 16, 2, 0), "occasion_type": "Wedding", "occasion_date": "2026-11-25"},
-    {"key": "502", "created": datetime(2026, 11, 5, 4, 30), "occasion_type": "Birthday", "occasion_date": None},
+    {"key": "501", "created": datetime(2026, 11, 16, 2, 0), "occasion_type": "Wedding", "occasion_date": "2026-11-25",
+     "city": "Bangalore · 560043"},
+    {"key": "502", "created": datetime(2026, 11, 5, 4, 30), "occasion_type": "Birthday", "occasion_date": None,
+     "pincode": "500084"},
 ]
 
 
@@ -125,6 +127,12 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
         self.assertEqual(o["photography_budget"]["count"], 1)
         self.assertEqual(o["budget_fit"], {"over": 1})
         self.assertEqual([c["city"] for c in o["top_cities"]], ["Bengaluru", "Udaipur"])
+        self.assertEqual(o["top_cities_sources"], ["spin", "wedding", "wedding_planner", "vendor_to_koc"])
+        bengaluru = next(city for city in o["top_cities"] if city["city"] == "Bengaluru")
+        self.assertEqual(bengaluru["by_source"]["spin"], 1)
+        hyderabad = next(city for city in self.overview()["top_cities"] if city["city"] == "Hyderabad")
+        self.assertEqual(hyderabad["by_source"]["spin"], 1)
+        self.assertEqual(o["top_cities_no_city_by_source"]["spin"], 1)
 
     def test_totals_are_the_leads_that_arrived_in_the_period(self):
         o = self.overview(date_from="2026-11-01", date_to="2026-11-10")

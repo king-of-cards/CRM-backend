@@ -13,6 +13,7 @@ from tests.test_vendor_to_koc import VendorToKocTestCase
 from sqlmodel import Session  # noqa: E402
 
 from app.core import response_cache  # noqa: E402
+from app.api.v1.endpoints import analytics  # noqa: E402
 from app.models.vendor_to_koc import VendorToKocLead  # noqa: E402
 from app.services import periods  # noqa: E402
 
@@ -21,7 +22,8 @@ URL = "/api/v1/analytics/vendor-to-koc"
 VENDOR_KEYS = {"generated_at", "today", "period", "received", "change_pct", "kpis", "inflow", "inflow_vendors",
                "not_filtered", "pending", "converted", "converted_pct", "purchased_with_us", "by_status", "funnel",
                "follow_ups_due", "next_follow_ups"}
-ADMIN_ONLY_KEYS = {"previous_received", "per_vendor", "top_cities", "by_source", "latest"}
+ADMIN_ONLY_KEYS = {"previous_received", "per_vendor", "top_cities", "top_cities_sources", "top_cities_no_city",
+                   "top_cities_no_city_by_source", "by_source", "latest"}
 
 
 def utc(*args) -> datetime:
@@ -39,6 +41,8 @@ class VendorDashboardTests(VendorToKocTestCase):
         super().setUp()
         self.today = mock.patch.object(periods, "today_ist", lambda: TODAY)
         self.today.start()
+        self.spin = mock.patch.object(analytics, "_workflow_spin_rows", lambda: None)
+        self.spin.start()
         response_cache.clear()
         spec = {
             "D1": (self.phodeo_id, utc(2026, 11, 15, 18, 0), "Bengaluru", "bulk_upload", None, None, date(2026, 11, 10)),
@@ -62,6 +66,7 @@ class VendorDashboardTests(VendorToKocTestCase):
                 self.ids_by_name[key] = lead.id
 
     def tearDown(self):
+        self.spin.stop()
         self.today.stop()
         response_cache.clear()
         super().tearDown()
@@ -84,7 +89,11 @@ class VendorDashboardTests(VendorToKocTestCase):
                          {"pending": 1, "converted": 1, "will_call_back": 1, "purchased_with_us": 1})
         self.assertEqual(o["funnel"], {"received": 4, "updated": 3, "engaged": 2, "converted": 1})
         self.assertEqual(o["by_source"], {"manual": 2, "bulk_upload": 2})
-        self.assertEqual(o["top_cities"], [{"value": "Bengaluru", "count": 3}, {"value": "Mysuru", "count": 1}])
+        self.assertEqual(o["top_cities"], [
+            {"city": "Bengaluru", "count": 3, "by_source": {"vendor_to_koc": 3}},
+            {"city": "Mysuru", "count": 1, "by_source": {"vendor_to_koc": 1}},
+        ])
+        self.assertEqual(o["top_cities_sources"], ["wedding", "wedding_planner", "vendor_to_koc"])
         vendors = {v["vendor_name"]: v for v in o["per_vendor"]}
         self.assertEqual(vendors["Phodeo"], {"vendor_id": self.phodeo_id, "vendor_name": "Phodeo", "leads": 3,
                                              "interested": 0, "converted": 1, "pending": 1, "converted_pct": 33.3,

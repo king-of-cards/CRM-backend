@@ -60,6 +60,7 @@ def _clean_place(text: str | None) -> str | None:
     if not text:
         return None
     part = re.sub(r"\d{5,6}", "", text).split(",")[-1].strip()
+    part = re.sub(r"[\s·]+$", "", part).strip()
     part = re.sub(r"\s+", " ", part)
     return part.title() if part else None
 
@@ -111,11 +112,14 @@ def _spin_rows(db: Session) -> list[dict] | None:
 
     for lead in crm_spin_leads.active(db):
         details = lead.additional_details or {}
+        from app.services.stores import pincode_area
+
         rows.append({
             "key": lead.lead_key,
             "created": lead.created_at,
             "occasion_type": details.get("occasionType"),
             "occasion_date": details.get("occasionDate"),
+            "city": details.get("city") or details.get("location") or pincode_area(details.get("pincode")),
             "is_workflow": False,
         })
     return rows
@@ -137,6 +141,10 @@ def _workflow_spin_rows() -> list[dict] | None:
         date_field = next((fields[k] for k in ("occasiondate", "eventdate", "weddingdate") if k in fields), None)
         city_column = next((c for c in table.columns if sl._norm_name(c.name) in ("city", "location")), None)
         city_field = next((fields[k] for k in ("city", "location") if k in fields), None)
+        pin_column = next((c for c in table.columns if sl._norm_name(c.name) in sl.PINCODE_FIELD_NAMES), None)
+        pin_field = next((fields[k] for k in sl.PINCODE_FIELD_NAMES if k in fields), None)
+        pin_expr = (pin_column if pin_column is not None else
+                    sl._json_text_expr(table, pin_field) if pin_field is not None else None)
 
         pk = list(table.primary_key.columns)[0]
         exprs = [pk.label("key")]
@@ -156,6 +164,9 @@ def _workflow_spin_rows() -> list[dict] | None:
         elif city_field is not None:
             exprs.append(sl._json_text_expr(table, city_field).label("city"))
             names.append("city")
+        if pin_expr is not None:
+            exprs.append(pin_expr.label("pincode"))
+            names.append("pincode")
         if len(exprs) == 1:
             return []
 
@@ -165,6 +176,42 @@ def _workflow_spin_rows() -> list[dict] | None:
     except Exception:  # noqa: BLE001
         logger.warning("Spin analytics unavailable", exc_info=True)
         return None
+
+
+def _all_source_city_data(db: Session, period, vtk_rows: list[tuple] | None = None,
+                          all_time: bool = False) -> dict:
+    """Build the shared all-source city aggregate for analytics responses that expose Top cities."""
+    wedding = db.exec(select(WeddingLead.submitted_at, WeddingLead.city).where(
+        WeddingLead.is_deleted == False  # noqa: E712
+    )).all()
+    planner = db.exec(select(WeddingPlan.updated_in_sheet_at, WeddingPlan.city).where(
+        WeddingPlan.is_deleted == False  # noqa: E712
+    )).all()
+    if vtk_rows is None:
+        vtk_rows = db.exec(select(VendorToKocLead.created_at, VendorToKocLead.city)).all()
+    spin = _spin_rows(db)
+    keep = (lambda _created: True) if all_time else (
+        lambda created: period.contains(periods.ist_date(created)))
+    city_rows = [("wedding", city) for created, city in wedding if keep(created)]
+    city_rows += [("wedding_planner", city) for created, city in planner
+                  if keep(created)]
+    city_rows += [("vendor_to_koc", city) for created, city in vtk_rows
+                  if keep(created)]
+    if spin is not None:
+        from app.services.stores import pincode_area
+        city_rows += [("spin", row.get("city") or pincode_area(row.get("pincode")))
+                      for row in spin if keep(row.get("created"))]
+    sources = (["spin", "wedding", "wedding_planner", "vendor_to_koc"] if spin is not None else
+               ["wedding", "wedding_planner", "vendor_to_koc"])
+    return {
+        "top_cities": _top_cities(city_rows),
+        "top_cities_sources": sources,
+        "top_cities_no_city": sum(1 for _, city in city_rows if not _city_key(city)),
+        "top_cities_no_city_by_source": {
+            source: sum(1 for row_source, city in city_rows if row_source == source and not _city_key(city))
+            for source in sources
+        },
+    }
 
 
 # ── Build the overview ─────────────────────────────────────────────────
@@ -322,9 +369,8 @@ def _build(db: Session, keys: dict[str, set[str]] | None = None,
 
     city_rows: list[tuple[str, str | None]] = [("wedding", r[2]) for r in wd_p]
     city_rows += [("wedding_planner", r[2]) for r in wp_p]
-    # The live workflow currently has no city/location values (verified separately); only
-    # nonblank workflow values enter the city aggregation.
-    city_rows += [("spin", r.get("city")) for r in spin_p if r.get("is_workflow") and (r.get("city") or "").strip()]
+    from app.services.stores import pincode_area
+    city_rows += [("spin", r.get("city") or pincode_area(r.get("pincode"))) for r in spin_p]
     vtk_stmt = select(VendorToKocLead.created_at, VendorToKocLead.city)
     if vtk_vendor_id is not None:
         vtk_stmt = vtk_stmt.where(VendorToKocLead.vendor_id == vtk_vendor_id)
@@ -333,6 +379,12 @@ def _build(db: Session, keys: dict[str, set[str]] | None = None,
     city_rows += [("vendor_to_koc", city) for _, city in vtk_rows]
     top_cities = _top_cities(city_rows)
     cities_no_city = sum(1 for _, city in city_rows if not _city_key(city))
+    top_cities_sources = (["spin", "wedding", "wedding_planner", "vendor_to_koc"] if spin is not None else
+                          ["wedding", "wedding_planner", "vendor_to_koc"])
+    cities_no_city_by_source = {
+        source: sum(1 for row_source, city in city_rows if row_source == source and not _city_key(city))
+        for source in top_cities_sources
+    }
     countries = Counter((r[2] or "").strip() for r in wa_p if r[2])
     occasions = Counter((r[3] or "").strip().title() for r in wd_p if r[3])
     occasions.update((str(r.get("occasion_type") or "")).strip().title() for r in spin_p if r.get("occasion_type"))
@@ -407,7 +459,9 @@ def _build(db: Session, keys: dict[str, set[str]] | None = None,
             "by_source": attention_by_source,
         },
         "top_cities": top_cities,
+        "top_cities_sources": top_cities_sources,
         "top_cities_no_city": cities_no_city,
+        "top_cities_no_city_by_source": cities_no_city_by_source,
         "top_countries": _top(countries),
         "occasions": _top(occasions, 6),
         "partners": _top(partners, 8),
@@ -477,6 +531,7 @@ def _vtk_build(db: Session, vendor_id: int | None, period, admin: bool) -> dict:
     from app.models.vendor_to_koc import CLOSED_STATUSES, LeadSource, UpdateStatus, VendorToKocLead
 
     today = periods.today_ist()
+    all_time = isinstance(period, periods.AllTime)
     from sqlalchemy.orm import aliased
     from app.models.user import User
 
@@ -580,10 +635,11 @@ def _vtk_build(db: Session, vendor_id: int | None, period, admin: bool) -> dict:
     })
     if not admin:
         return out
+    city_data = _all_source_city_data(db, period, all_time=all_time)
     out.update({
         "previous_received": before,
         "per_vendor": vendors_out,
-        "top_cities": _top(Counter(c for c in (_clean_place(lead.city) for lead, _ in current) if c)),
+        **city_data,
         "by_source": {s.value: sum(1 for lead, _ in current if lead.source == s.value) for s in LeadSource},
         "latest": [serialize(lead, name, True, updater_of[lead.id]) for lead, name in latest],
     })

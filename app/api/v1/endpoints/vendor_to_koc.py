@@ -26,6 +26,7 @@ from app.services import periods
 from app.services import also_in as also_in_service
 from app.services import notifications
 from app.services import lead_activity
+from app.services.lead_filters import parse_quote
 from app.services.access import Viewer
 from app.services.vendor_lead_import import (
     MAX_FILE_BYTES, PHONE_RE, ImportFileError, flag_template_example, parse_file_date,
@@ -215,6 +216,8 @@ def lead_query(
     city: str | None = Query(None, max_length=100, description="City contains (case-insensitive)"),
     source: list[Literal["bulk_upload", "manual"]] | None = Query(None, description="Repeatable"),
     hot: Literal["yes", "no"] | None = Query(None, description="Hot lead filter"),
+    quote: str | None = Query(None, description="Quoted amount: has, none, gt:<amount> or lt:<amount>"),
+    conversion: str | None = Query(None, description="Conversion amount: has, none, gt:<amount> or lt:<amount>"),
     also_in: Literal["yes", "no"] | None = Query(None, description="The phone also exists in one of the 4 "
                                                  "sources (vendors: their own leads there)"),
     sort: SortField = Query("created_at"),
@@ -235,6 +238,7 @@ def lead_query(
         follow_up_due_by=periods.today_ist() if follow_up_due else None,
         city=(city or "").strip() or None, sources=source or None,
         hot=None if hot is None else hot == "yes",
+        quote=parse_quote(quote), conversion=parse_quote(conversion, "conversion"),
     )
     if also_in:
         found = {int(k) for k in also_in_service.matching_keys(db, scope, also_in_service.VTK)}

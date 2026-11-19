@@ -119,6 +119,8 @@ class LeadFilters:
     ids_in: set[int] | None = None           # only these lead ids (also_in=yes)
     ids_not_in: set[int] | None = None       # never these lead ids (also_in=no)
     hot: bool | None = None
+    quote: tuple[str, int | None] | None = None       # has / none / gt / lt over quoted_amount
+    conversion: tuple[str, int | None] | None = None  # has / none / gt / lt over conversion_amount
 
 
 def _conditions(f: LeadFilters) -> list:
@@ -163,6 +165,16 @@ def _conditions(f: LeadFilters) -> list:
         conds.append(col(lead.source).in_(f.sources))
     if f.hot is not None:
         conds.append(col(lead.is_hot).is_(f.hot))
+    if f.quote:
+        op, value = f.quote
+        conds.append(col(lead.quoted_amount).is_not(None) if op == "has" else
+                     col(lead.quoted_amount).is_(None) if op == "none" else
+                     col(lead.quoted_amount) > value if op == "gt" else col(lead.quoted_amount) < value)
+    if f.conversion:
+        op, value = f.conversion
+        conds.append(col(lead.conversion_amount).is_not(None) if op == "has" else
+                     col(lead.conversion_amount).is_(None) if op == "none" else
+                     col(lead.conversion_amount) > value if op == "gt" else col(lead.conversion_amount) < value)
     if f.ids_in is not None:
         conds.append(col(lead.id).in_(sorted(f.ids_in)) if f.ids_in else false())
     if f.ids_not_in:

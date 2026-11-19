@@ -37,13 +37,17 @@ class VendorLeadFilterTests(VendorToKocTestCase):
         self.L = {}
         rows = {
             "L1": dict(vendor_id=self.phodeo_id, phone="9000000011", city="Bengaluru", source="bulk_upload",
-                       created_at=utc(2026, 11, 15, 18, 0), follow_up_date=date(2026, 11, 10), lead_date=date(2026, 11, 1)),
+                       created_at=utc(2026, 11, 15, 18, 0), follow_up_date=date(2026, 11, 10), lead_date=date(2026, 11, 1),
+                       quoted_amount=1500, conversion_amount=1000),
             "L2": dict(vendor_id=self.phodeo_id, phone="9000000012", city="Mysuru", source="manual",
-                       created_at=utc(2026, 11, 15, 19, 0), update_status="converted", follow_up_date=date(2026, 11, 1)),
+                       created_at=utc(2026, 11, 15, 19, 0), update_status="converted", follow_up_date=date(2026, 11, 1),
+                       quoted_amount=5000),
             "L3": dict(vendor_id=self.other_id, phone="9000000013", city="Pune", source="bulk_upload",
-                       created_at=utc(2026, 10, 1, 5, 0), update_status="interested", follow_up_date=date(2026, 12, 1)),
+                       created_at=utc(2026, 10, 1, 5, 0), update_status="interested", follow_up_date=date(2026, 12, 1),
+                       conversion_amount=6000),
             "L4": dict(vendor_id=self.other_id, phone="9000000014", city="Bengaluru South", source="manual",
-                       created_at=utc(2026, 11, 10, 5, 0), update_status="will_call_back", follow_up_date=TODAY),
+                       created_at=utc(2026, 11, 10, 5, 0), update_status="will_call_back", follow_up_date=TODAY,
+                       quoted_amount=2000, conversion_amount=1500),
         }
         with Session(self.engine) as s:
             for key, values in rows.items():
@@ -89,6 +93,28 @@ class VendorLeadFilterTests(VendorToKocTestCase):
         self.assertEqual((stats["kpis"]["total"], stats["kpis"]["converted"], stats["kpis"]["converted_pct"]), (2, 1, 50.0))
         self.assertEqual((stats["total"], stats["follow_ups_due"]), (2, 1))
         self.assertEqual({k: v for k, v in stats["by_status"].items() if v}, {"pending": 1, "converted": 1})
+
+    def test_quote_and_conversion_filters_match_list_stats_and_export(self):
+        for query, expected in (("quote=has", {"L1", "L2", "L4"}), ("quote=none", {"L3"}),
+                                ("quote=gt:2000", {"L2"}), ("quote=lt:2000", {"L1"}),
+                                ("conversion=has", {"L1", "L3", "L4"}), ("conversion=none", {"L2"}),
+                                ("conversion=gt:1200", {"L3", "L4"}), ("conversion=lt:1200", {"L1"})):
+            self.assertEqual(self.got(self.admin, query), expected, query)
+            stats = self.client.get(f"{BASE}/leads/stats?{query}", headers=self.admin)
+            self.assertEqual(stats.status_code, 200, stats.text)
+            self.assertEqual(stats.json()["total"], len(expected), query)
+            export = self.client.get(f"{BASE}/leads/export?{query}", headers=self.admin)
+            self.assertEqual(export.status_code, 200, export.text)
+            rows = list(openpyxl.load_workbook(io.BytesIO(export.content)).active.iter_rows(min_row=2, values_only=True))
+            self.assertEqual(len(rows), len(expected), query)
+        self.assertEqual(self.got(self.phodeo, "quote=has"), {"L1", "L2"})
+        self.assertEqual(self.got(self.phodeo, "conversion=none"), {"L2"})
+
+    def test_quote_and_conversion_validation(self):
+        for query in ("quote=bad", "quote=gt:-1", "conversion=greater:3"):
+            for path in ("leads", "leads/stats", "leads/export"):
+                resp = self.client.get(f"{BASE}/{path}?{query}", headers=self.admin)
+                self.assertEqual(resp.status_code, 400, (path, query, resp.text))
 
     def test_validation(self):
         for query, code, text in (
