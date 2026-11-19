@@ -95,7 +95,7 @@ class VendorDashboardTests(VendorToKocTestCase):
             {"city": "Bengaluru", "count": 3, "by_source": {"vendor_to_koc": 3}},
             {"city": "Mysuru", "count": 1, "by_source": {"vendor_to_koc": 1}},
         ])
-        self.assertEqual(o["top_cities_sources"], ["wedding", "wedding_planner", "vendor_to_koc"])
+        self.assertEqual(o["top_cities_sources"], ["vendor_to_koc"])                     # default: vendor_to_koc only
         vendors = {v["vendor_name"]: v for v in o["per_vendor"]}
         self.assertEqual(vendors["Phodeo"], {"vendor_id": self.phodeo_id, "vendor_name": "Phodeo", "leads": 3,
                                              "interested": 0, "converted": 1, "pending": 1, "converted_pct": 33.3,

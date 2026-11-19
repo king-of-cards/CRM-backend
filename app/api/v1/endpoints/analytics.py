@@ -24,6 +24,7 @@ from sqlmodel import Session, select
 from app.api.deps import AllTimeDefaultPeriod, DashboardPeriod, DbSession, DhruvaSectionUser, LeadViewer
 from app.core import response_cache
 from app.services import access, kpis, periods
+from app.services.lead_sources import parse_sources
 from app.db.session import engine, read_engine
 from app.models.lead_meta import LeadMeta
 from app.models.wedding_lead import WeddingLead
@@ -36,6 +37,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
 SOURCES = ("spin", "whatsapp", "wedding", "wedding_planner")
+CITY_SOURCES = ("spin", "wedding", "wedding_planner", "vendor_to_koc")
+OVERVIEW_CITY_DEFAULTS = ("spin", "wedding", "wedding_planner")
+VTK_CITY_DEFAULTS = ("vendor_to_koc",)
+SOURCES_HELP = ("Comma-separated sources for Top cities (spin, whatsapp, wedding, wedding_planner, vendor_to_koc, "
+                "dhruva; whatsapp and dhruva have no city).")
 FRESH_SECONDS = 60        # answered from memory, no rebuild
 STALE_SECONDS = 6 * 3600  # answered from memory, rebuilt in the background
 UPCOMING_MONTHS = 12
@@ -80,6 +86,14 @@ _CITY_ALIASES = {
 def _city_key(value: str | None) -> str | None:
     cleaned = _clean_place(value)
     return _CITY_ALIASES.get(cleaned.casefold(), cleaned) if cleaned else None
+
+
+def _parse_city_sources(value: str | None, defaults: tuple[str, ...]) -> tuple[str, ...]:
+    """The `sources` query parameter for Top cities (same parsing and validation as
+    GET /reminders/follow-ups). International has country only and Dhruva has venue only, so they
+    are accepted values but never take part in a city aggregate."""
+    requested = parse_sources(value, default=defaults)
+    return tuple(source for source in CITY_SOURCES if source in requested)
 
 
 def _top_cities(rows: list[tuple[str, str | None]]) -> list[dict]:
@@ -178,38 +192,36 @@ def _workflow_spin_rows() -> list[dict] | None:
         return None
 
 
-def _all_source_city_data(db: Session, period, vtk_rows: list[tuple] | None = None,
+def _all_source_city_data(db: Session, period, sources: tuple[str, ...], vtk_rows: list[tuple] | None = None,
                           all_time: bool = False) -> dict:
     """Build the shared all-source city aggregate for analytics responses that expose Top cities."""
-    wedding = db.exec(select(WeddingLead.submitted_at, WeddingLead.city).where(
+    wedding = (db.exec(select(WeddingLead.submitted_at, WeddingLead.city).where(
         WeddingLead.is_deleted == False  # noqa: E712
-    )).all()
-    planner = db.exec(select(WeddingPlan.updated_in_sheet_at, WeddingPlan.city).where(
+    )).all() if "wedding" in sources else [])
+    planner = (db.exec(select(WeddingPlan.updated_in_sheet_at, WeddingPlan.city).where(
         WeddingPlan.is_deleted == False  # noqa: E712
-    )).all()
-    if vtk_rows is None:
+    )).all() if "wedding_planner" in sources else [])
+    if "vendor_to_koc" in sources and vtk_rows is None:
         vtk_rows = db.exec(select(VendorToKocLead.created_at, VendorToKocLead.city)).all()
-    spin = _spin_rows(db)
+    vtk_rows = vtk_rows or []
+    spin = _spin_rows(db) if "spin" in sources else None
     keep = (lambda _created: True) if all_time else (
         lambda created: period.contains(periods.ist_date(created)))
     city_rows = [("wedding", city) for created, city in wedding if keep(created)]
-    city_rows += [("wedding_planner", city) for created, city in planner
-                  if keep(created)]
-    city_rows += [("vendor_to_koc", city) for created, city in vtk_rows
-                  if keep(created)]
-    if spin is not None:
+    city_rows += [("wedding_planner", city) for created, city in planner if keep(created)]
+    city_rows += [("vendor_to_koc", city) for created, city in vtk_rows if keep(created)]
+    included_sources = [source for source in sources if source != "spin" or spin is not None]
+    if "spin" in included_sources:
         from app.services.stores import pincode_area
         city_rows += [("spin", row.get("city") or pincode_area(row.get("pincode")))
                       for row in spin if keep(row.get("created"))]
-    sources = (["spin", "wedding", "wedding_planner", "vendor_to_koc"] if spin is not None else
-               ["wedding", "wedding_planner", "vendor_to_koc"])
     return {
         "top_cities": _top_cities(city_rows),
-        "top_cities_sources": sources,
+        "top_cities_sources": included_sources,
         "top_cities_no_city": sum(1 for _, city in city_rows if not _city_key(city)),
         "top_cities_no_city_by_source": {
             source: sum(1 for row_source, city in city_rows if row_source == source and not _city_key(city))
-            for source in sources
+            for source in included_sources
         },
     }
 
@@ -257,9 +269,11 @@ def _change(new: int, previous: int) -> int | None:
 
 
 def _build(db: Session, keys: dict[str, set[str]] | None = None,
-           period: periods.Period | periods.AllTime | None = None, vtk_vendor_id: int | None = None) -> dict:
+           period: periods.Period | periods.AllTime | None = None, vtk_vendor_id: int | None = None,
+           city_sources: tuple[str, ...] = OVERVIEW_CITY_DEFAULTS) -> dict:
     """keys: {source: lead keys} to limit every number to (a vendor's own leads); None = all.
     period: the dashboard's date range (default: the last 30 days).
+    city_sources: the sources Top cities is computed over (see `_parse_city_sources`).
 
     Arrival date of a lead (India calendar day): spin created_at, International and Wedding
     submitted_at, Wedding planner updated_in_sheet_at (the sheet's "Last updated"); added and
@@ -372,20 +386,24 @@ def _build(db: Session, keys: dict[str, set[str]] | None = None,
     }
     outcomes = _outcomes(db, period_keys, spin_available=spin is not None)
 
-    city_rows: list[tuple[str, str | None]] = [("wedding", r[2]) for r in wd_p]
-    city_rows += [("wedding_planner", r[2]) for r in wp_p]
-    from app.services.stores import pincode_area
-    city_rows += [("spin", r.get("city") or pincode_area(r.get("pincode"))) for r in spin_p]
-    vtk_stmt = select(VendorToKocLead.created_at, VendorToKocLead.city)
-    if vtk_vendor_id is not None:
-        vtk_stmt = vtk_stmt.where(VendorToKocLead.vendor_id == vtk_vendor_id)
-    vtk_rows = [(created, city) for created, city in db.exec(vtk_stmt).all()
-                if in_period(periods.ist_date(created))]
-    city_rows += [("vendor_to_koc", city) for _, city in vtk_rows]
+    # Top cities: only the requested sources (Spin drops out when its database is unavailable)
+    top_cities_sources = [source for source in city_sources if source != "spin" or spin is not None]
+    city_rows: list[tuple[str, str | None]] = []
+    if "wedding" in top_cities_sources:
+        city_rows += [("wedding", r[2]) for r in wd_p]
+    if "wedding_planner" in top_cities_sources:
+        city_rows += [("wedding_planner", r[2]) for r in wp_p]
+    if "spin" in top_cities_sources:
+        from app.services.stores import pincode_area
+        city_rows += [("spin", r.get("city") or pincode_area(r.get("pincode"))) for r in spin_p]
+    if "vendor_to_koc" in top_cities_sources:
+        vtk_stmt = select(VendorToKocLead.created_at, VendorToKocLead.city)
+        if vtk_vendor_id is not None:
+            vtk_stmt = vtk_stmt.where(VendorToKocLead.vendor_id == vtk_vendor_id)
+        city_rows += [("vendor_to_koc", city) for created, city in db.exec(vtk_stmt).all()
+                      if in_period(periods.ist_date(created))]
     top_cities = _top_cities(city_rows)
     cities_no_city = sum(1 for _, city in city_rows if not _city_key(city))
-    top_cities_sources = (["spin", "wedding", "wedding_planner", "vendor_to_koc"] if spin is not None else
-                          ["wedding", "wedding_planner", "vendor_to_koc"])
     cities_no_city_by_source = {
         source: sum(1 for row_source, city in city_rows if row_source == source and not _city_key(city))
         for source in top_cities_sources
@@ -486,18 +504,20 @@ def _build(db: Session, keys: dict[str, set[str]] | None = None,
     }
 
 
-def _cache_key(scope, period) -> tuple:
-    """Per viewer scope (admin, or the vendor: its logins see the same leads) and per period."""
+def _cache_key(scope, period, city_sources: tuple[str, ...] = OVERVIEW_CITY_DEFAULTS) -> tuple:
+    """Per viewer scope (admin, or the vendor: its logins see the same leads), per period and per
+    Top cities source selection."""
+    selection = ("sources",) + tuple(sorted(city_sources))
     if isinstance(period, periods.AllTime):
-        return ("analytics", "overview", scope, "all", periods.today_ist().isoformat())
-    return ("analytics", "overview", scope, period.date_from.isoformat(), period.date_to.isoformat())
+        return ("analytics", "overview", scope, "all", periods.today_ist().isoformat()) + selection
+    return ("analytics", "overview", scope, period.date_from.isoformat(), period.date_to.isoformat()) + selection
 
 
-def _builder(bind, keys, period, vtk_vendor_id=None):
+def _builder(bind, keys, period, vtk_vendor_id=None, city_sources: tuple[str, ...] = OVERVIEW_CITY_DEFAULTS):
     """A build that opens its own session, so a background refresh never uses a closed one."""
     def build():
         with Session(bind) as session:
-            return _build(session, keys, period, vtk_vendor_id)
+            return _build(session, keys, period, vtk_vendor_id, city_sources)
     return build
 
 
@@ -507,29 +527,35 @@ def build_overview() -> dict:
 
 
 def warm_overview() -> None:
-    """Rebuild the admin's default period in the background (at startup and after every sheet sync)."""
+    """Rebuild the admin's default period (default Top cities sources) in the background (at startup
+    and after every sheet sync)."""
     period = periods.default_period()
     response_cache.warm(_cache_key("admin", period), _builder(engine, None, period))
 
 
 @router.get("/overview")
-def analytics_overview(viewer: LeadViewer, db: DbSession, period: DashboardPeriod, refresh: bool = Query(False)):
+def analytics_overview(viewer: LeadViewer, db: DbSession, period: DashboardPeriod, refresh: bool = Query(False),
+                       sources: str | None = Query(None, description=SOURCES_HELP + " Default: spin,wedding,wedding_planner")):
     """Admins: every lead. Vendor users: only their own leads. date_from / date_to: the period
-    (IST days, inclusive; default the last 30 days); see `_build` for what each number covers."""
+    (IST days, inclusive; default the last 30 days); see `_build` for what each number covers.
+    sources: the sources Top cities is computed over."""
+    city_sources = _parse_city_sources(sources, OVERVIEW_CITY_DEFAULTS)
     if refresh:
         response_cache.clear("analytics")
     bind = db.get_bind()
     if viewer.is_admin:
-        return response_cache.get(_cache_key("admin", period), _builder(bind, None, period),
+        return response_cache.get(_cache_key("admin", period, city_sources),
+                                  _builder(bind, None, period, None, city_sources),
                                   fresh=FRESH_SECONDS, stale=STALE_SECONDS)
     keys = {source: access.visible_keys(db, viewer, source) for source in SOURCES}
-    return response_cache.get(_cache_key(("vendor", viewer.vendor_id), period),
-                              _builder(bind, keys, period, viewer.vendor_id),
+    return response_cache.get(_cache_key(("vendor", viewer.vendor_id), period, city_sources),
+                              _builder(bind, keys, period, viewer.vendor_id, city_sources),
                               fresh=FRESH_SECONDS, stale=FRESH_SECONDS)
 
 
 # ── Vendor -> KOC dashboard ────────────────────────────────────────────
-def _vtk_build(db: Session, vendor_id: int | None, period, admin: bool) -> dict:
+def _vtk_build(db: Session, vendor_id: int | None, period, admin: bool,
+               city_sources: tuple[str, ...] = VTK_CITY_DEFAULTS) -> dict:
     """GET /analytics/vendor-to-koc. Arrival date = created_at (IST day). vendor_id: a vendor
     login's own leads only (no previous_received, per_vendor, top_cities, by_source, latest);
     admin: every vendor and every number."""
@@ -647,7 +673,7 @@ def _vtk_build(db: Session, vendor_id: int | None, period, admin: bool) -> dict:
     })
     if not admin:
         return out
-    city_data = _all_source_city_data(db, period, all_time=all_time)
+    city_data = _all_source_city_data(db, period, city_sources, all_time=all_time)
     out.update({
         "previous_received": before,
         "per_vendor": vendors_out,
@@ -659,10 +685,13 @@ def _vtk_build(db: Session, vendor_id: int | None, period, admin: bool) -> dict:
 
 
 @router.get("/vendor-to-koc")
-def vendor_to_koc_overview(viewer: LeadViewer, db: DbSession, period: DashboardPeriod, refresh: bool = Query(False)):
+def vendor_to_koc_overview(viewer: LeadViewer, db: DbSession, period: DashboardPeriod, refresh: bool = Query(False),
+                           sources: str | None = Query(None, description=SOURCES_HELP + " Default: vendor_to_koc")):
     """Vendor -> KOC dashboard for a period (same rules as /analytics/overview). Admins: every vendor
     and every number. Vendor logins: their own leads, without previous_received, per_vendor,
-    top_cities, by_source and latest."""
+    top_cities, by_source and latest. sources: the sources Top cities is computed over (admins;
+    still validated for vendor logins, who get no Top cities fields)."""
+    city_sources = _parse_city_sources(sources, VTK_CITY_DEFAULTS)
     if refresh:
         response_cache.clear("analytics")
     scope = "admin" if viewer.is_admin else ("vendor", viewer.vendor_id)
@@ -670,9 +699,10 @@ def vendor_to_koc_overview(viewer: LeadViewer, db: DbSession, period: DashboardP
 
     def build():
         with Session(bind) as session:
-            return _vtk_build(session, None if viewer.is_admin else viewer.vendor_id, period, viewer.is_admin)
+            return _vtk_build(session, None if viewer.is_admin else viewer.vendor_id, period, viewer.is_admin,
+                              city_sources)
 
-    key = ("analytics", "vendor-to-koc", scope) + _cache_key(scope, period)[3:]
+    key = ("analytics", "vendor-to-koc", scope) + _cache_key(scope, period, city_sources)[3:]
     return response_cache.get(key, build, fresh=FRESH_SECONDS, stale=FRESH_SECONDS)
 
 

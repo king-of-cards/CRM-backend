@@ -920,6 +920,7 @@ optional. Admins and vendor users; vendor users only ever get their own leads.
 | `date_from` | `YYYY-MM-DD` | First day of the period (India calendar day), included |
 | `date_to` | `YYYY-MM-DD` | Last day, included |
 | `period` | `all` | Dashboard only: **all time**, instead of `date_from` / `date_to` (see below) |
+| `sources` | comma-separated | Dashboard only: the sources **Top cities** is computed over (see [Top cities sources](#top-cities-sources-sources)) |
 
 - **Defaults:** with neither date, `/analytics/overview` covers the **last 30 days including
   today**; the four lists apply **no filter** (the list pages are unchanged).
@@ -996,6 +997,31 @@ Pending, without amounts); Vendor → KOC from its own columns.
 | `GET /analytics/vendor-to-koc` | Period's Vendor → KOC leads (admins: all; vendors: their own); dashboard `kpis` adds amount-only `quotes_count`, date-filtered `hot_count`, and the converted-with-amount count and matching amount total |
 | `GET /analytics/dhruva` | Dhruva leads received in the period; dashboard `kpis` includes the converted-with-amount count and matching amount total |
 
+### Top cities sources (`sources`)
+
+`GET /analytics/overview` and `GET /analytics/vendor-to-koc` take an optional `sources`: a
+comma-separated list of `spin`, `whatsapp`, `wedding`, `wedding_planner`, `vendor_to_koc`, `dhruva`
+(the same parsing and validation as `GET /reminders/follow-ups`: spaces and capitals are ignored).
+Only the Top cities fields (`top_cities`, `top_cities_sources`, `top_cities_no_city`,
+`top_cities_no_city_by_source`) follow it; every other number is unchanged.
+
+| Endpoint | Default (no `sources`) |
+|---|---|
+| `/analytics/overview` | `spin,wedding,wedding_planner` |
+| `/analytics/vendor-to-koc` | `vendor_to_koc` |
+
+- `whatsapp` (country only) and `dhruva` (venue only) are accepted but have no city, so they never
+  appear in `top_cities_sources`; `?sources=whatsapp` gives `top_cities: []`, `top_cities_sources: []`.
+- `top_cities_sources` lists the included sources in the order `spin`, `wedding`, `wedding_planner`,
+  `vendor_to_koc`. Spin is left out when the workflow database can't be read.
+- Vendor logins: on the overview every source covers only their own leads (`vendor_to_koc`: their
+  vendor's leads). On `/analytics/vendor-to-koc` they still get no Top cities fields; `sources` is
+  validated but changes nothing for them.
+- Results are cached per viewer, period **and** source selection (`spin,wedding` and `wedding,spin`
+  share one entry).
+- **400 errors:** `sources must be a comma-separated list of: spin, whatsapp, wedding, wedding_planner, vendor_to_koc, dhruva`
+  (empty list such as `?sources=,`), or `Unknown source(s): <names>. Allowed: spin, whatsapp, wedding, wedding_planner, vendor_to_koc, dhruva`.
+
 ### What each number covers (`/analytics/overview`)
 
 **Every number follows the period:** it counts only leads that arrived in it. The only exception is
@@ -1012,7 +1038,7 @@ Pending, without amounts); Vendor → KOC from its own columns.
 | `trend` | Lead inflow | `[{date, end, <source counts>}]`: one point per day; for periods over 90 days, 7-day buckets starting at `date_from` (the last may be shorter). `period.granularity` says which |
 | `photography_budget`, `guests`, `budget_fit`, `repeats` | Budgets & size | Leads that arrived in the period |
 | `sharing` | Shared with partners, Partners callout | Wedding and planner leads that arrived in the period. `by_source`: `{wedding, wedding_planner}`, each `{shareable, shared, not_shared}` (they add up to the totals) |
-| `top_cities` | Top 10 `[{city, count, by_source}]` | Spin, Wedding, Wedding planner and Vendor → KOC leads that arrived in the period; Spin uses lead city/location or pincode area, never branch fallback. `top_cities_sources` lists included sources. `top_cities_no_city` and `top_cities_no_city_by_source` count blank locations. International country and Dhruva venue are excluded |
+| `top_cities` | Top 10 `[{city, count, by_source}]` | Leads of the [selected sources](#top-cities-sources-sources) (default Spin, Wedding and Wedding planner; vendors: their own leads) that arrived in the period; Spin uses lead city/location or pincode area, never branch fallback. `top_cities_sources` lists the sources actually included. `top_cities_no_city` and `top_cities_no_city_by_source` count blank locations. International country and Dhruva venue are never counted |
 | City alias normalization | Top cities | Bangalore/Bengaluru, Hyderabad/Hydrabad/Hyderbad, Gurgaon/Gurugram, Bombay/Mumbai, Madras/Chennai, Calcutta/Kolkata, Mysore/Mysuru, Trivandrum/Thiruvananthapuram, Cochin/Kochi, Pune/Poona; observed `Banglore` and `@Bengaluru` also normalize to Bengaluru |
 | City aliases |  | Bangalore/Bengaluru, Hyderabad/Hydrabad/Hyderbad, Gurgaon/Gurugram, Bombay/Mumbai, Madras/Chennai, Calcutta/Kolkata, Mysore/Mysuru, Trivandrum/Thiruvananthapuram, Cochin/Kochi, Pune/Poona; observed `Banglore` and `@Bengaluru` also normalize to Bengaluru |
 | `top_countries`, `occasions`, `partners` | Lists | Leads that arrived in the period |
@@ -1262,7 +1288,9 @@ with no paging (50,000 at most; 400 above that).
 
 The same period rules as `/analytics/overview` ([Dashboard](#9-dashboard-date-filter)):
 `date_from` / `date_to` (IST), `period=all`, the default last 30 days, the previous period, and the
-same 400 errors. A lead's arrival date is its `created_at`. Results are cached per viewer and period.
+same 400 errors. A lead's arrival date is its `created_at`. Optional `sources` picks the Top cities
+sources (default `vendor_to_koc`; see [Top cities sources](#top-cities-sources-sources)). Results are
+cached per viewer, period and source selection.
 
 | Field | Who | Covers |
 |---|---|---|
@@ -1276,7 +1304,7 @@ same 400 errors. A lead's arrival date is its `created_at`. Results are cached p
 | `by_status` | all | `pending` plus every status |
 | `per_vendor` | admin | `[{vendor_id, vendor_name, leads, interested, converted, pending, converted_pct, average_days_to_update}]`. The last field is the average days from `created_at` to `status_updated_at`, over leads with a status |
 | `funnel` | all | `{received, updated (has a status), engaged (interested, will call back or converted), converted}`; `purchased_with_us` is separate |
-| `top_cities`, `top_cities_sources`, `top_cities_no_city`, `top_cities_no_city_by_source`, `by_source` | admin | Top cities uses the shared Spin, Wedding, Wedding planner and Vendor → KOC period aggregation; `top_cities_sources` lists available sources |
+| `top_cities`, `top_cities_sources`, `top_cities_no_city`, `top_cities_no_city_by_source`, `by_source` | admin | Top cities covers the period's leads of the selected `sources` (default Vendor → KOC only, every vendor); `top_cities_sources` lists the sources included |
 | `latest` | admin | The 6 newest leads of the period (lead objects) |
 | `follow_ups_due` | all | **Not limited to the period:** open leads with a follow-up date today or earlier |
 | `next_follow_ups` | all | **Not limited to the period:** up to 10 open leads by follow-up date, earliest first, overdue included |
@@ -1543,7 +1571,7 @@ Google Sheets are not logged.
 | `GET /leads/{source}/{lead_key}/activity` | admin, vendor who can see the lead | Newest first; `page` (default 1), `page_size` (default 25, max 100); items include `actor_name`, `actor_role`, `action`, `field`, `old_value`, `new_value`, `created_at` (ISO UTC) |
 | `GET /vendor-to-koc/leads/{id}/activity` | admin, owning vendor | Same paging and item shape; vendor sees lead fields and KOC fields shown read-only |
 | `GET /dhruva/leads/{id}/activity` | admin, Dhruva | Same paging and item shape; Dhruva activity is read-only |
-| `GET /reminders/follow-ups?days=7&sources=wedding,vendor_to_koc` | admin, vendor | Optional comma-separated `sources` subset (`spin`, `whatsapp`, `wedding`, `wedding_planner`, `vendor_to_koc`, `dhruva`); items, counts and the days window apply only to requested sources. Vendors remain scoped to their own visible leads. Omit `sources` for the existing default |
+| `GET /reminders/follow-ups?days=7&sources=wedding,vendor_to_koc` | admin, vendor | Optional comma-separated `sources` subset (`spin`, `whatsapp`, `wedding`, `wedding_planner`, `vendor_to_koc`, `dhruva`); items, counts and the days window apply only to requested sources. Vendors remain scoped to their own visible leads. Omit `sources` for the existing default. Bad values: 400 `Unknown source(s): <names>. Allowed: …` |
 | `GET /dhruva/reminders/follow-ups?days=7` | admin, Dhruva | Same reminder format over Dhruva leads; Dhruva logins do not receive the admin-only status field |
 
 Reminder items contain `source`, `lead_key`, `name`, `phone`, `follow_up_date`, and `days_overdue`

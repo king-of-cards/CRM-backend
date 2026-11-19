@@ -14,22 +14,11 @@ from app.models.wedding_plan import WeddingPlan
 from app.models.whatsapp_lead import WhatsAppLead
 from app.services import access, periods
 from app.services.access import Viewer
+from app.services.lead_sources import LEAD_SOURCES, parse_sources
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/reminders", tags=["follow-up reminders"])
-SOURCES = ("spin", "whatsapp", "wedding", "wedding_planner", "vendor_to_koc", "dhruva")
-
-
-def _requested_sources(value: str | None) -> set[str]:
-    if value is None:
-        return set(SOURCES)
-    requested = {part.strip().lower() for part in value.split(",") if part.strip()}
-    if not requested:
-        raise HTTPException(400, f"sources must be a comma-separated list of: {', '.join(SOURCES)}")
-    invalid = requested - set(SOURCES)
-    if invalid:
-        raise HTTPException(400, f"Unknown reminder source(s): {', '.join(sorted(invalid))}")
-    return requested
+SOURCES = LEAD_SOURCES
 
 
 def _details_for_crm_source(db: Session, source: str, keys: set[str]) -> dict[str, tuple[str | None, str | None]]:
@@ -165,7 +154,7 @@ def follow_up_reminders(user: NotDhruvaUser, db: DbSession, days: int = Query(7,
         viewer = access.viewer_for(db, user)
     except access.NotLinked:
         raise HTTPException(403, "This login isn't linked to a vendor.")
-    requested = _requested_sources(sources)
+    requested = parse_sources(sources)
     rows = [row for row in _reminder_rows(db, viewer) if row["source"] in requested]
     return _make_response(rows, days, viewer.is_admin)
 

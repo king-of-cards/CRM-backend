@@ -127,7 +127,7 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
         self.assertEqual(o["photography_budget"]["count"], 1)
         self.assertEqual(o["budget_fit"], {"over": 1})
         self.assertEqual([c["city"] for c in o["top_cities"]], ["Bengaluru", "Udaipur"])
-        self.assertEqual(o["top_cities_sources"], ["spin", "wedding", "wedding_planner", "vendor_to_koc"])
+        self.assertEqual(o["top_cities_sources"], ["spin", "wedding", "wedding_planner"])   # default: no vendor_to_koc
         bengaluru = next(city for city in o["top_cities"] if city["city"] == "Bengaluru")
         self.assertEqual(bengaluru["by_source"]["spin"], 1)
         hyderabad = next(city for city in self.overview()["top_cities"] if city["city"] == "Hyderabad")
