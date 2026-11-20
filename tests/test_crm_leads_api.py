@@ -100,11 +100,16 @@ WORKFLOW_ROWS = [
 WORKFLOW_PHONE = "+919845099999"
 
 
+def workflow_flow(row: dict) -> str:
+    """spin or wedding_gifts, by the row's otherWeddingServices (the real rule, in Python)."""
+    return spin_ep.WEDDING_GIFTS if spin_ep.is_gift(row.get("additional_details.otherWeddingServices")) else spin_ep.SPIN
+
+
 def fake_list_spin_leads(_admin=None, page=1, page_size=50, search=None, sort=None, order="asc", branch=None,
-                         filters=None, offset=None, limit=None, keys_only=False):
+                         filters=None, offset=None, limit=None, keys_only=False, flow="spin"):
     start = (page - 1) * page_size if offset is None else offset
     count = page_size if limit is None else limit
-    rows = WORKFLOW_ROWS
+    rows = [r for r in WORKFLOW_ROWS if workflow_flow(r) == flow]
     if filters and filters.get("ids_in") is not None:
         rows = [r for r in rows if str(r["id"]) in {str(i) for i in filters["ids_in"]}]
     if filters and filters.get("created_from") is not None:      # created_at in [from, to), naive UTC
@@ -128,18 +133,20 @@ def fake_list_spin_leads(_admin=None, page=1, page_size=50, search=None, sort=No
 FAKE_TABLE = Table("spin_lead", MetaData(), Column("id", BigInteger, primary_key=True))
 
 
-def fake_workflow_phone_index():
-    """also_in's whole-source index of workflow phones: {lead id: e164}."""
+def fake_workflow_phone_index(flow="spin"):
+    """also_in's whole-source index of workflow phones of one flow: {lead id: e164}."""
     from app.services import phones
-    return {str(r["id"]): phones.normalize(str(r["phone"]), lenient=True).e164 for r in WORKFLOW_ROWS}
+    return {str(r["id"]): phones.normalize(str(r["phone"]), lenient=True).e164 for r in WORKFLOW_ROWS
+            if workflow_flow(r) == flow}
 
 
 def fake_workflow_phones(e164s):
+    """Every workflow row (both flows): {e164: [(id, flow)]}."""
     found = {}
     for r in WORKFLOW_ROWS:
         e164 = phones.normalize(r["phone"], lenient=True).e164
         if e164 in e164s:
-            found.setdefault(e164, []).append(str(r["id"]))
+            found.setdefault(e164, []).append((str(r["id"]), workflow_flow(r)))
     return found
 
 
@@ -150,7 +157,7 @@ def fake_workflow_spin_rows(db):
     for r in WORKFLOW_ROWS:
         branch = branches.get(str(r["branch_id"])) if r.get("branch_id") is not None else None
         out.append((str(r["id"]), (branch or {}).get("city"), r.get("additional_details.pincode"), None,
-                    (branch or {}).get("vendor_id")))
+                    (branch or {}).get("vendor_id"), workflow_flow(r)))
     return out
 
 

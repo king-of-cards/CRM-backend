@@ -47,7 +47,7 @@ def _details_for_crm_source(db: Session, source: str, keys: set[str]) -> dict[st
     return output
 
 
-def _workflow_spin_details(keys: list[str]) -> dict[str, tuple[str | None, str | None]]:
+def _workflow_spin_details(keys: list[str], flow: str = "spin") -> dict[str, tuple[str | None, str | None]]:
     """Read workflow names and phones in capped batches through the existing Spin list query."""
     if not keys:
         return {}
@@ -56,7 +56,8 @@ def _workflow_spin_details(keys: list[str]) -> dict[str, tuple[str | None, str |
     for start in range(0, len(keys), 200):
         batch = keys[start:start + 200]
         try:
-            result = sl.list_spin_leads(None, 1, len(batch), filters={"ids_in": batch}, offset=0, limit=len(batch))
+            result = sl.list_spin_leads(None, 1, len(batch), filters={"ids_in": batch}, offset=0, limit=len(batch),
+                                        flow=flow)
         except Exception:
             logger.exception("Could not load workflow Spin reminder details")
             continue
@@ -78,7 +79,7 @@ def _workflow_spin_details(keys: list[str]) -> dict[str, tuple[str | None, str |
 def _reminder_rows(db: Session, viewer: Viewer | None, dhruva_only: bool = False) -> list[dict]:
     today = periods.today_ist()
     rows: list[dict] = []
-    for source in ("spin", "whatsapp", "wedding", "wedding_planner"):
+    for source in ("spin", "wedding_gifts", "whatsapp", "wedding", "wedding_planner"):
         visible = access.visible_keys(db, viewer, source) if viewer is not None else None
         assignments = access.assignments(db, source) if viewer is not None else {}
         metas = list(db.exec(select(LeadMeta).where(LeadMeta.source == source, LeadMeta.follow_up_date.is_not(None))))
@@ -88,9 +89,9 @@ def _reminder_rows(db: Session, viewer: Viewer | None, dhruva_only: bool = False
                      and m.update_status not in {"converted", "not_interested"}]
         keys = {m.lead_key for m in candidate}
         details = _details_for_crm_source(db, source, keys)
-        if source == "spin":
+        if source in ("spin", "wedding_gifts"):
             workflow = [key for key in keys if not key.startswith("crm-") and key.isdigit()]
-            details.update(_workflow_spin_details(workflow))
+            details.update(_workflow_spin_details(workflow, source))
         vendor_by_id = {v.id: v.name for v in db.exec(select(Vendor))} if viewer is None or viewer.sees_all else {}
         for meta in candidate:
             detail = details.get(meta.lead_key)

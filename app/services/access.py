@@ -28,7 +28,7 @@ from app.services import lead_crm
 
 logger = logging.getLogger(__name__)
 
-SOURCES = ("spin", "whatsapp", "wedding", "wedding_planner")
+SOURCES = ("spin", "wedding_gifts", "whatsapp", "wedding", "wedding_planner")
 CACHE_SECONDS = 30          # rebuilt after this (never served stale); cleared on every change
 
 
@@ -70,10 +70,10 @@ def viewer_for(db: Session, user: User) -> Viewer:
 def _rows(db: Session, source: str) -> list[tuple]:
     """(lead_key, location, pincode, sheet vendor[, branch vendor id]) for every listed lead:
     the same inputs the list endpoints give lead_crm.attach. Archived/removed leads left out."""
-    if source == "spin":
+    if source in ("spin", "wedding_gifts"):
         from app.api.v1.endpoints.vendors import _spin_rows
 
-        return _spin_rows(db)
+        return _spin_rows(db, source)
     if source == "whatsapp":
         return [(k, c, None, None) for k, c in db.exec(
             select(WhatsAppLead.sheet_key, WhatsAppLead.country).where(WhatsAppLead.is_deleted == False))]  # noqa: E712

@@ -1,7 +1,7 @@
 """Cross-source duplicates: where else a lead's phone exists ("also_in").
 
-Places: the 4 sources (spin workflow and CRM spin leads, whatsapp, wedding, wedding_planner),
-Vendor -> KOC and Dhruva leads. Phones are compared as E.164 (phone_e164; Vendor -> KOC's
+Places: the 5 sources (spin and wedding_gifts — workflow and CRM leads, each in its own flow —,
+whatsapp, wedding, wedding_planner), Vendor -> KOC and Dhruva leads. Phones are compared as E.164 (phone_e164; Vendor -> KOC's
 10-digit numbers as +91…; Dhruva: phone and alt phone). Archived and removed rows count (like
 the upload duplicate check).
 
@@ -25,7 +25,8 @@ from app.services import access, phones
 
 logger = logging.getLogger(__name__)
 
-SOURCES = ("spin", "whatsapp", "wedding", "wedding_planner")
+SOURCES = ("spin", "wedding_gifts", "whatsapp", "wedding", "wedding_planner")
+SPIN_FLOWS = ("spin", "wedding_gifts")          # both stored in crm_spin_leads / spin_lead
 VTK = "vendor_to_koc"
 DHRUVA = "dhruva"
 PLACES = (*SOURCES, VTK, DHRUVA)
@@ -39,6 +40,23 @@ def vtk_e164(phone: str | None) -> str | None:
 def _tables():
     from app.services.crm_leads.service import TABLES
     return TABLES
+
+
+def _crm_rows(db: Session, source: str, condition=None):
+    """(place, lead key, e164) of the CRM-stored leads of a source; crm_spin_leads rows are read
+    once (source "spin") and placed in their own flow."""
+    model, key_col, to_key, _ = _key_column(source)
+    if source in SPIN_FLOWS:
+        from app.services.crm_spin_leads import flow_of
+        query = select(model) if condition is None else select(model).where(condition(model))
+        return [(flow_of(lead), lead.lead_key, lead.phone_e164) for lead in db.exec(query)]
+    query = select(key_col, model.phone_e164)
+    if condition is not None:
+        query = query.where(condition(model))
+    return [(source, to_key(k), e) for k, e in db.exec(query)]
+
+
+CRM_TABLE_SOURCES = ("spin", "whatsapp", "wedding", "wedding_planner")   # one table each
 
 
 def _key_column(source: str):
@@ -85,13 +103,12 @@ def _matches(db: Session, e164s: set[str]) -> list[tuple[str, str, str, int | No
     if not e164s:
         return out
     chunk = sorted(e164s)
-    for source in SOURCES:                                   # one query per source
-        model, key_col, to_key, _ = _key_column(source)
-        for key, e164 in db.exec(select(key_col, model.phone_e164).where(col(model.phone_e164).in_(chunk))):
-            out.append((source, to_key(key), e164, None, None))
-    try:                                                     # spin workflow (read-only PostgreSQL)
-        for e164, ids in service.workflow_phones(e164s).items():
-            out += [("spin", str(i), e164, None, None) for i in ids]
+    for source in CRM_TABLE_SOURCES:                         # one query per table
+        for place, key, e164 in _crm_rows(db, source, lambda m: col(m.phone_e164).in_(chunk)):
+            out.append((place, key, e164, None, None))
+    try:                                                     # workflow (read-only PostgreSQL), per flow
+        for e164, hits in service.workflow_phones(e164s).items():
+            out += [(flow, str(i), e164, None, None) for i, flow in hits]
     except service.WorkflowUnavailable:
         logger.warning("also_in: workflow database unavailable; spin workflow leads left out")
     indian = sorted({e[3:] for e in e164s if e.startswith("+91") and len(e) == 13})
@@ -155,8 +172,8 @@ def attach(db: Session, viewer, place: str, items: list[dict], key_of: Callable[
 
 
 # ── Whole source (the also_in filter) ──────────────────────────────────
-def _workflow_index() -> dict[str, str]:
-    """{spin workflow lead id: e164} for every workflow lead (cached)."""
+def _workflow_index() -> dict[str, tuple[str, str]]:
+    """{workflow lead id: (e164, flow)} for every workflow lead (cached)."""
     def build():
         from sqlalchemy import select as sa_select
 
@@ -167,8 +184,10 @@ def _workflow_index() -> dict[str, str]:
             return {}
         table = sl._get_table()
         pk = list(table.primary_key.columns)[0]
+        gift = sl.gift_expr(table).label("is_gift")
         with read_engine.connect() as conn:
-            return {str(i): e for i, p in conn.execute(sa_select(pk, table.c.phone))
+            return {str(i): (e, sl.WEDDING_GIFTS if g else sl.SPIN)
+                    for i, p, g in conn.execute(sa_select(pk, table.c.phone, gift))
                     if (e := phones.normalize(p, lenient=True).e164)}
     try:
         return response_cache.get(("also_in", "workflow"), build, fresh=WORKFLOW_CACHE_SECONDS,
@@ -184,11 +203,13 @@ def index(db: Session) -> dict[str, list[tuple[str, str, int | None]]]:
     from app.models.dhruva import DhruvaLead
     from app.models.vendor_to_koc import VendorToKocLead
 
-    out: dict[str, list[tuple[str, str, int | None]]] = {}
-    for source in SOURCES:
-        model, key_col, to_key, _ = _key_column(source)
-        out[source] = [(to_key(k), e, None) for k, e in db.exec(select(key_col, model.phone_e164)) if e]
-    out["spin"] += [(k, e, None) for k, e in workflow_phone_index().items()]
+    out: dict[str, list[tuple[str, str, int | None]]] = {source: [] for source in SOURCES}
+    for source in CRM_TABLE_SOURCES:
+        for place, key, e164 in _crm_rows(db, source):
+            if e164:
+                out[place].append((key, e164, None))
+    for flow in SPIN_FLOWS:
+        out[flow] += [(k, e, None) for k, e in workflow_phone_index(flow).items()]
     out[VTK] = [(str(i), vtk_e164(p), v) for i, p, v in
                 db.exec(select(VendorToKocLead.id, VendorToKocLead.phone, VendorToKocLead.vendor_id)) if p]
     out[DHRUVA] = [(str(i), e, None) for i, phone, alt in
@@ -197,8 +218,9 @@ def index(db: Session) -> dict[str, list[tuple[str, str, int | None]]]:
     return out
 
 
-def workflow_phone_index() -> dict[str, str]:
-    return _workflow_index()
+def workflow_phone_index(flow: str = "spin") -> dict[str, str]:
+    """{workflow lead id: e164} for the workflow leads of one flow (spin or wedding_gifts)."""
+    return {k: e for k, (e, f) in _workflow_index().items() if f == flow}
 
 
 def matching_keys(db: Session, viewer, place: str) -> set[str]:

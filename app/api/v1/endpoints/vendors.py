@@ -149,19 +149,21 @@ def update_vendor(vendor_id: int, body: VendorPatch, _: AdminUser, db: DbSession
 
 
 # ── Statistics ─────────────────────────────────────────────────────────
-def _spin_rows(db: Session) -> list[tuple]:
-    """(lead id, location, pincode, None, branch vendor id) for every listed spin lead:
-    the workflow's and the CRM's own (crm-<id>, archived ones left out)."""
+def _spin_rows(db: Session, flow: str = "spin") -> list[tuple]:
+    """(lead id, location, pincode, None, branch vendor id) for every listed lead of a spin_lead flow
+    (spin or wedding_gifts): the workflow's and the CRM's own (crm-<id>, archived ones left out)."""
     from app.services import crm_spin_leads
     from app.services.branches import branches_by_id
 
     branches = branches_by_id(db)
     added = []
-    for lead in crm_spin_leads.active(db):
+    for lead in crm_spin_leads.active(db, flow):
         branch = branches.get(str(lead.branch_id)) if lead.branch_id is not None else None
         added.append((lead.lead_key, (branch or {}).get("city"), crm_spin_leads.pincode_of(lead), None,
                       (branch or {}).get("vendor_id")))
-    return _workflow_spin_rows(db) + added
+    # The workflow rows carry their flow as a 6th value (rows without one are spin)
+    workflow = [r[:5] for r in _workflow_spin_rows(db) if (r[5] if len(r) > 5 else "spin") == flow]
+    return workflow + added
 
 
 def _workflow_spin_rows(db: Session) -> list[tuple]:
@@ -186,6 +188,7 @@ def _workflow_spin_rows(db: Session) -> list[tuple]:
             sl._json_text_expr(table, city_field) if city_field else pk.label("no_city"),
             sl._json_text_expr(table, pin_field) if pin_field else pk.label("no_pin"),
             branch_expr.label("branch") if branch_expr is not None else pk.label("no_branch"),
+            sl.gift_expr(table).label("is_gift"),
         ]
         with read_engine.connect() as conn:
             rows = conn.execute(sa_select(*exprs).select_from(table).where(*base)).all()
@@ -200,6 +203,7 @@ def _workflow_spin_rows(db: Session) -> list[tuple]:
                     r[2] if pin_field else None,
                     None,
                     (branch or {}).get("vendor_id"),
+                    sl.WEDDING_GIFTS if r[4] else sl.SPIN,
                 )
             )
         return out
@@ -212,6 +216,7 @@ def _build_stats() -> dict:
     with Session(engine) as db:
         sources = {
             "spin": _spin_rows(db),
+            "wedding_gifts": _spin_rows(db, "wedding_gifts"),
             "whatsapp": [
                 (k, c, None, None)
                 for k, c in db.exec(select(WhatsAppLead.sheet_key, WhatsAppLead.country).where(WhatsAppLead.is_deleted == False))  # noqa: E712

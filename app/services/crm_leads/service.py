@@ -3,7 +3,10 @@
 Duplicates are found on the E.164 phone (phone_e164), within the lead's source and across the
 other sources:
   existing_sheet     same source, a row copied from the Google Sheet (also rows since removed from it)
-  existing_workflow  spin only: a lead in the workflow database (PostgreSQL spin_lead)
+  existing_workflow  spin / wedding_gifts: a lead in the workflow database (PostgreSQL spin_lead)
+
+Spin and Wedding gifts are one family for duplicates: a phone in either flow (workflow or CRM)
+blocks the upload into the other one too; the duplicate's lead key says which flow it is in.
   existing_added     same source, a lead added or imported in the CRM (archived ones too)
   in_file            the same phone earlier in the same upload (duplicate_of_row)
   other_source       not blocking: the phone exists in other sources (listed)
@@ -24,7 +27,7 @@ from app.models.wedding_plan import WeddingPlan
 from app.models.whatsapp_lead import WhatsAppLead
 from app.services import phones
 from app.services.crm_leads.fields import (
-    Cleaned, RowContext, as_text, clean_row, from_model, json_values, norm_header, to_model_kwargs,
+    SPIN_SOURCES, Cleaned, RowContext, as_text, clean_row, from_model, json_values, norm_header, to_model_kwargs,
 )
 from app.services.sheet_sync import _month_to_date
 
@@ -33,6 +36,7 @@ logger = logging.getLogger(__name__)
 # source -> (model, key column name, "created" column name)
 TABLES = {
     "spin": (CrmSpinLead, None, "created_at"),
+    "wedding_gifts": (CrmSpinLead, None, "created_at"),      # the same table: flow from additional_details
     "whatsapp": (WhatsAppLead, "sheet_key", "first_seen_at"),
     "wedding": (WeddingLead, "sheet_key", "first_seen_at"),
     "wedding_planner": (WeddingPlan, "plan_id", "first_seen_at"),
@@ -57,7 +61,7 @@ def _iso(value: datetime | None) -> str | None:
 
 
 def lead_key_of(source: str, lead) -> str:
-    if source == "spin":
+    if source in SPIN_SOURCES:
         return lead.lead_key
     return getattr(lead, TABLES[source][1])
 
@@ -72,16 +76,18 @@ def find_crm_lead(db: Session, source: str, lead_key: str):
     if not lead_key.startswith(CRM_KEY_PREFIX):
         return None
     model, key_col, _ = TABLES[source]
-    if source == "spin":
+    if source in SPIN_SOURCES:
         number = lead_key[len(CRM_KEY_PREFIX):]
-        return db.get(CrmSpinLead, int(number)) if number.isdigit() else None
+        lead = db.get(CrmSpinLead, int(number)) if number.isdigit() else None
+        from app.services.crm_spin_leads import flow_of
+        return lead if lead is not None and flow_of(lead) == source else None
     return db.exec(
         select(model).where(getattr(model, key_col) == lead_key, model.origin.in_(CRM_ORIGINS))
     ).first()
 
 
 def is_sheet_lead(db: Session, source: str, lead_key: str) -> bool:
-    if source == "spin":
+    if source in SPIN_SOURCES:
         return lead_key.isdigit()          # a workflow lead id
     model, key_col, _ = TABLES[source]
     return db.exec(
@@ -153,9 +159,11 @@ def _chunks(items: list[str], size: int = 500):
         yield items[i:i + size]
 
 
-def workflow_phones(e164s: set[str]) -> dict[str, list[str]]:
-    """{e164: [spin_lead ids]} for workflow leads with these phones. Read-only.
-    No workflow database configured = no workflow leads. Raises WorkflowUnavailable on errors."""
+def workflow_phones(e164s: set[str]) -> dict[str, list[tuple[str, str]]]:
+    """{e164: [(spin_lead id, flow)]} for workflow leads with these phones, over EVERY row of the
+    table (both flows, listed or not), so a customer in one flow can't be imported into the other.
+    flow: spin or wedding_gifts. Read-only. No workflow database configured = no workflow leads.
+    Raises WorkflowUnavailable on errors."""
     from app.db.session import read_engine
 
     if read_engine is None or not e164s:
@@ -168,13 +176,14 @@ def workflow_phones(e164s: set[str]) -> dict[str, list[str]]:
         table = sl._get_table()
         pk = list(table.primary_key.columns)[0]
         tail = func.right(func.regexp_replace(cast(table.c.phone, Text), r"\D", "", "g"), 10)
-        found: dict[str, list[str]] = {}
+        gift = sl.gift_expr(table).label("is_gift")
+        found: dict[str, list[tuple[str, str]]] = {}
         with read_engine.connect() as conn:
             for chunk in _chunks(sorted({phones.last10(e) for e in e164s})):
-                for lead_id, phone in conn.execute(sa_select(pk, table.c.phone).where(tail.in_(chunk))):
+                for lead_id, phone, is_gift in conn.execute(sa_select(pk, table.c.phone, gift).where(tail.in_(chunk))):
                     e164 = phones.normalize(phone, lenient=True).e164
                     if e164 in e164s:
-                        found.setdefault(e164, []).append(str(lead_id))
+                        found.setdefault(e164, []).append((str(lead_id), sl.WEDDING_GIFTS if is_gift else sl.SPIN))
         return found
     except Exception as exc:  # noqa: BLE001
         logger.warning("Duplicate check: workflow database unavailable (%s)", type(exc).__name__)
@@ -186,24 +195,30 @@ def lookup(db: Session, e164s: set[str]) -> dict[str, list[Match]]:
     found: dict[str, list[Match]] = {}
     if not e164s:
         return found
+    from app.services.crm_spin_leads import flow_of
+
     for source, (model, _, created_col) in TABLES.items():
+        if source == "wedding_gifts":
+            continue                                  # crm_spin_leads: read once, under "spin" below
         for chunk in _chunks(sorted(e164s)):
             for lead in db.exec(select(model).where(model.phone_e164.in_(chunk))):
                 kind = "sheet" if lead.origin == ORIGIN_SHEET else "added"
+                where = flow_of(lead) if source == "spin" else source
                 found.setdefault(lead.phone_e164, []).append(
-                    Match(source, kind, lead_key_of(source, lead), getattr(lead, created_col), bool(lead.is_deleted))
+                    Match(where, kind, lead_key_of(source, lead), getattr(lead, created_col), bool(lead.is_deleted))
                 )
-    for e164, ids in workflow_phones(e164s).items():
-        for lead_id in ids:
-            found.setdefault(e164, []).append(Match("spin", "workflow", lead_id, None, False))
+    for e164, hits in workflow_phones(e164s).items():
+        for lead_id, flow in hits:
+            found.setdefault(e164, []).append(Match(flow, "workflow", lead_id, None, False))
     return found
 
 
 def classify(source: str, e164: str, matches: dict[str, list[Match]], exclude_key: str | None = None):
     """(duplicate dict or None, [other sources where the phone exists])."""
     rows = [m for m in matches.get(e164, []) if m.lead_key != exclude_key]
-    same = [m for m in rows if m.source == source]
-    others = sorted({m.source for m in rows if m.source != source})
+    family = set(SPIN_SOURCES) if source in SPIN_SOURCES else {source}
+    same = [m for m in rows if m.source in family]
+    others = sorted({m.source for m in rows if m.source not in family})
     duplicate = None
     existing = next((m for m in same if m.kind in ("sheet", "workflow")), None)
     if existing:
@@ -297,9 +312,13 @@ def create(db: Session, source: str, c: Cleaned, origin: str, user_id: int | Non
     """Add one lead (not committed). The caller checked duplicates."""
     now = _now()
     kw = to_model_kwargs(source, c.values, c.phone)
-    if source == "spin":
+    if source in SPIN_SOURCES:
         lead = CrmSpinLead(origin=origin, phone=kw["phone"], phone_e164=kw["phone_e164"], source="crm",
                            created_at=now, created_by=user_id, updated_at=now, additional_details={})
+        if source == "wedding_gifts":
+            # The flow is read from otherWeddingServices (as for workflow rows): name the gifts
+            from app.api.v1.endpoints.spin_leads import GIFT_KEY, GIFT_PHRASE
+            kw.setdefault("_details", {})[GIFT_KEY] = GIFT_PHRASE
     elif source == "whatsapp":
         lead = WhatsAppLead(sheet_key=new_crm_key(), origin=origin, phone=kw["phone"], row_hash="",
                             first_seen_at=now, updated_at=now)

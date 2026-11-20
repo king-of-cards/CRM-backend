@@ -205,13 +205,13 @@ def spin_columns(columns_meta: list[dict], branches: list[dict] | None = None) -
 
 def headers(source: str) -> list[str]:
     """The column headers of a source's export and template."""
-    if source == "spin":
+    if source in ("spin", "wedding_gifts"):
         return [c[0] for c in spin_columns([])]
     return [c[0] for c in SHEET_COLUMNS[source]]
 
 
 def kinds(source: str) -> list[str]:
-    cols = spin_columns([]) if source == "spin" else SHEET_COLUMNS[source]
+    cols = spin_columns([]) if source in ("spin", "wedding_gifts") else SHEET_COLUMNS[source]
     return [c[2] for c in cols]
 
 

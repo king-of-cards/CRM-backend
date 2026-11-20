@@ -4,7 +4,7 @@ Each lead row sent to the frontend gets a "crm" object:
   {
     "lead_key": "...",
     "vendor": {"id": 2, "name": "Phodeo"} | None,
-    "vendor_source": "manual" | "sheet" | "branch" | "suggested" | None,
+    "vendor_source": "manual" | "sheet" | "branch" | "suggested" | "source_default" | None,
     "suggested_vendor": {...} | None,     # what the area rules say
     "update_status": "converted" | "not_converted" | "purchased_elsewhere" | "purchased_with_us"
                      | "will_call_back" | "interested" | "not_interested" | None (Pending),
@@ -17,6 +17,10 @@ Who a lead is assigned to, in order:
   2. sheet     – the sheet's "leads shared" column names a vendor
   3. branch    – spin leads: the vendor set on the lead's branch (store)
   4. suggested – the vendors' area rules (pincode / city), see Vendor
+
+Wedding gifts leads skip 2-4: after a manual choice they go to the source's default vendor
+(SOURCE_DEFAULT_VENDORS: "Kraftzy", matched by name, case-insensitive, only while active);
+"source_default". No such vendor: unassigned until one is created, then automatic.
 """
 import re
 from collections.abc import Callable, Iterable
@@ -28,7 +32,9 @@ from sqlmodel import Session, select
 from app.models.lead_meta import LeadMeta
 from app.models.vendor import Vendor
 
-SOURCES = ("spin", "whatsapp", "wedding", "wedding_planner")
+SOURCES = ("spin", "wedding_gifts", "whatsapp", "wedding", "wedding_planner")
+# Sources whose leads all go to one vendor (by name); branch / area / sheet rules don't apply
+SOURCE_DEFAULT_VENDORS = {"wedding_gifts": "Kraftzy"}
 
 # The three partners and the areas they cover. Created once if the vendors table is empty;
 # after that, edit them on the Vendors page.
@@ -138,12 +144,15 @@ def meta_out(
     sheet_vendor: Vendor | None,
     suggested: Vendor | None,
     branch_vendor: Vendor | None = None,
+    default_vendor: Vendor | None = None,
 ) -> dict:
     manual = vendors_by_id.get(meta.vendor_id) if meta and meta.vendor_id else None
     if manual:
         vendor, how = manual, "manual"
     elif meta is not None and meta.auto_assign is False:
         vendor, how = None, None                # uploaded unassigned: no automatic assignment
+    elif default_vendor:
+        vendor, how = default_vendor, "source_default"
     elif sheet_vendor:
         vendor, how = sheet_vendor, "sheet"
     elif branch_vendor:
@@ -169,12 +178,21 @@ def meta_out(
 
 
 def assigned_label(crm: dict | None) -> str:
-    """The "Assigned to" chip text on the list screens: "Phodeo", "Phodeo · auto" (area rules),
-    or "Unassigned"."""
+    """The "Assigned to" chip text on the list screens: "Phodeo", "Phodeo · auto" (area rules, or a
+    source's default vendor such as Kraftzy), or "Unassigned"."""
     vendor = (crm or {}).get("vendor")
     if not vendor:
         return "Unassigned"
-    return f"{vendor['name']} · auto" if crm.get("vendor_source") == "suggested" else vendor["name"]
+    auto = crm.get("vendor_source") in ("suggested", "source_default")
+    return f"{vendor['name']} · auto" if auto else vendor["name"]
+
+
+def source_rules(source: str, vendors: list[Vendor]) -> tuple[bool, Vendor | None]:
+    """(whether sheet / branch / area rules apply, the source's default vendor if any and active)."""
+    name = SOURCE_DEFAULT_VENDORS.get(source)
+    if name is None:
+        return True, None
+    return False, vendor_by_name(vendors, name)
 
 
 def attach(
@@ -192,6 +210,7 @@ def attach(
 
     vendors = active_vendors(session)
     by_id = {v.id: v for v in vendors}
+    rules, default = source_rules(source, vendors)
     keys = [str(key(i)) for i in items if key(i) is not None]
     metas = {}
     if keys:
@@ -217,9 +236,10 @@ def attach(
                 metas.get(k),
                 k,
                 by_id,
-                vendor_by_name(vendors, sheet_vendor(item)),
-                suggest_vendor(vendors, location(item), pincode(item)),
-                by_id.get(branch_vendor(item)),
+                vendor_by_name(vendors, sheet_vendor(item)) if rules else None,
+                suggest_vendor(vendors, location(item), pincode(item)) if rules else None,
+                by_id.get(branch_vendor(item)) if rules else None,
+                default,
             )
             marked = hot_rows.get(k)
             hot = marked is not None
@@ -238,6 +258,7 @@ def effective_vendor_counts(session: Session, source: str, rows: Iterable[tuple]
     per lead with the effective vendor and the lead's CRM status, for vendor statistics."""
     vendors = active_vendors(session)
     by_id = {v.id: v for v in vendors}
+    rules, default = source_rules(source, vendors)
     metas = {m.lead_key: m for m in session.exec(select(LeadMeta).where(LeadMeta.source == source))}
     result = []
     for row in rows:
@@ -248,9 +269,10 @@ def effective_vendor_counts(session: Session, source: str, rows: Iterable[tuple]
             meta,
             str(lead_key),
             by_id,
-            vendor_by_name(vendors, shared),
-            suggest_vendor(vendors, loc, pin),
-            by_id.get(branch_vendor_id),
+            vendor_by_name(vendors, shared) if rules else None,
+            suggest_vendor(vendors, loc, pin) if rules else None,
+            by_id.get(branch_vendor_id) if rules else None,
+            default,
         )
         result.append(info)
     return result

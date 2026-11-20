@@ -8,6 +8,10 @@ listed before the workflow leads:
 
 Paging runs over that combined list, so every lead appears exactly once across the pages
 (and in an export that walks all pages), and "total" counts both.
+
+Flows: a CRM lead whose additional_details.otherWeddingServices names "Wedding Gifts & Return
+Gifts" belongs to wedding_gifts, every other one to spin (the same rule as the workflow rows), so
+no marker column is needed.
 """
 import json
 import re
@@ -59,6 +63,17 @@ def _named_value(lead: CrmSpinLead, wanted_names: tuple[str, ...]) -> str | None
             if _norm_name(key) == wanted:
                 return None if value is None else _text(value)
     return None
+
+
+def flow_of(lead: CrmSpinLead) -> str:
+    """spin or wedding_gifts (see the module docstring)."""
+    from app.api.v1.endpoints.spin_leads import flow_of_details
+
+    return flow_of_details(_details(lead))
+
+
+def _in_flow(lead: CrmSpinLead, flow: str | None) -> bool:
+    return flow is None or flow_of(lead) == flow
 
 
 def _like(term: str, text: str) -> bool:
@@ -129,13 +144,14 @@ def matching(
     order: str,
     branch: str | None,
     flt: dict | None,
+    flow: str | None = "spin",
 ) -> list[CrmSpinLead]:
-    """CRM spin leads that pass the list's filters, in the list's sort order."""
+    """CRM leads of the flow that pass the list's filters, in the list's sort order."""
     term = (search or "").strip()
     leads = [
         lead
         for lead in session.exec(select(CrmSpinLead).where(CrmSpinLead.is_deleted == False))  # noqa: E712
-        if _matches(lead, term, branch, flt or {})
+        if _in_flow(lead, flow) and _matches(lead, term, branch, flt or {})
     ]
     desc = order == "desc"
     leads.sort(key=lambda lead: lead.id or 0, reverse=desc)         # tie-break, as the primary key
@@ -147,9 +163,11 @@ def matching(
     return leads
 
 
-def active(session: Session) -> list[CrmSpinLead]:
-    """CRM spin leads that count (archived ones are hidden from lists, counts and exports)."""
-    return list(session.exec(select(CrmSpinLead).where(CrmSpinLead.is_deleted == False)))  # noqa: E712
+def active(session: Session, flow: str | None = "spin") -> list[CrmSpinLead]:
+    """CRM leads of the flow that count (archived ones are hidden from lists, counts and exports).
+    flow None: both flows."""
+    return [lead for lead in session.exec(select(CrmSpinLead).where(CrmSpinLead.is_deleted == False))  # noqa: E712
+            if _in_flow(lead, flow)]
 
 
 def pincode_of(lead: CrmSpinLead) -> str | None:

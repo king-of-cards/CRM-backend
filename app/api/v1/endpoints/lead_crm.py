@@ -27,7 +27,7 @@ from app.services.crm_leads import service as crm_leads
 router = APIRouter(prefix="/leads", tags=["lead crm"])
 logger = logging.getLogger(__name__)
 
-Source = Literal["spin", "whatsapp", "wedding", "wedding_planner"]
+Source = Literal["spin", "wedding_gifts", "whatsapp", "wedding", "wedding_planner"]
 MAX_AMOUNT = 100_000_000          # rupees, for quoted_amount and conversion_amount
 
 
@@ -68,12 +68,15 @@ EDITABLE = ("vendor_id", "update_status", "quoted_date", "quoted_amount", "conve
 def _answer(db, source: str, lead_key: str, meta: LeadMeta | None, body: LeadCrmUpdate | None = None) -> dict:
     vendors = lead_crm.active_vendors(db)
     by_id = {v.id: v for v in vendors}
+    rules, default = lead_crm.source_rules(source, vendors)
     return lead_crm.meta_out(
         meta,
         lead_key,
         by_id,
-        lead_crm.vendor_by_name(vendors, body.sheet_vendor if body else None),
-        lead_crm.suggest_vendor(vendors, body.location if body else None, body.pincode if body else None),
+        lead_crm.vendor_by_name(vendors, body.sheet_vendor if body else None) if rules else None,
+        lead_crm.suggest_vendor(vendors, body.location if body else None,
+                                body.pincode if body else None) if rules else None,
+        default_vendor=default,
     )
 
 

@@ -20,9 +20,12 @@ from app.services import phones
 from app.services.sheet_sync import parse_budget, parse_event_date
 
 IST = timezone(timedelta(hours=5, minutes=30))
-SOURCES = ("spin", "whatsapp", "wedding", "wedding_planner")
+SOURCES = ("spin", "wedding_gifts", "whatsapp", "wedding", "wedding_planner")
+# Sources stored in crm_spin_leads (the workflow spin_lead table's two flows): same fields and storage
+SPIN_SOURCES = ("spin", "wedding_gifts")
 SOURCE_LABELS = {
     "spin": "Spin leads",
+    "wedding_gifts": "Wedding gifts",
     "whatsapp": "International (WhatsApp)",
     "wedding": "Wedding & event photography",
     "wedding_planner": "Wedding planner",
@@ -145,9 +148,12 @@ FIELDS: dict[str, list[FieldDef]] = {
     ],
 }
 
+FIELDS["wedding_gifts"] = FIELDS["spin"]      # same columns; stored in crm_spin_leads too
+
 # Read-only columns present in exports and/or templates; never read back from an upload
 READ_ONLY_COLUMNS: dict[str, tuple[str, ...]] = {
     "spin": ("Branch code", "Quoted date", "Hot"),
+    "wedding_gifts": ("Branch code", "Quoted date", "Hot"),
     "whatsapp": ("Quoted date", "Hot"),
     "wedding": ("Quoted date", "Hot"),
     "wedding_planner": ("Estimate", "Fits budget", "Quoted date", "Last step", "Hot"),
@@ -525,7 +531,7 @@ def field_defs(source: str) -> dict[str, FieldDef]:
 def to_model_kwargs(source: str, values: dict[str, Any], phone: phones.Phone | None) -> dict[str, Any]:
     """Clean form values -> column values for the source's table (only the keys present)."""
     out: dict[str, Any] = {}
-    if source == "spin":
+    if source in SPIN_SOURCES:
         details = {}
         for f in FIELDS["spin"]:
             if f.key not in values or f.key in VIRTUAL_KEYS:
@@ -586,7 +592,7 @@ def from_model(source: str, lead) -> dict[str, Any]:
         return v.isoformat() if isinstance(v, (date, datetime)) else v
 
     out: dict[str, Any] = {}
-    if source == "spin":
+    if source in SPIN_SOURCES:
         details = lead.additional_details or {}
         for f in FIELDS["spin"]:
             if f.key == "branch":

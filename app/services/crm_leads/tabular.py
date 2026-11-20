@@ -280,7 +280,7 @@ def template(source: str, fmt: str, branch_names: list[str], vendor_names: list[
 
     lists = wb.create_sheet("Lists")
     choices = {
-        "Branch": branch_names if source == "spin" else [],
+        "Branch": branch_names if source in ("spin", "wedding_gifts") else [],
         # "<vendor> · auto" isn't offered (Automatic covers it) but uploads still accept it
         "Assigned to": ["Automatic", "Unassigned"] + vendor_names,
         "Update": [label for label in UPDATE_LABELS.values()],          # Pending first
@@ -320,3 +320,4 @@ EXAMPLES: dict[str, dict[str, Any]] = {
                         "Guests staying": 120, "Budget": 2500000, "Budget range": "20L–30L", "Assigned to": "",
                         "Updated": _T},
 }
+EXAMPLES["wedding_gifts"] = {**EXAMPLES["spin"], "Occasion": "Wedding", "Assigned to": "Automatic"}

@@ -37,7 +37,8 @@ from app.models.whatsapp_lead import WhatsAppLead
 from app.services.crm_leads import export as export_cols
 from app.services.crm_leads import service, tabular
 from app.services.crm_leads.fields import (
-    FIELDS, SOURCE_LABELS, UPLOAD_CRM_KEYS, clean_row, from_model, header_map, norm_header, read_only_headers,
+    FIELDS, SOURCE_LABELS, SPIN_SOURCES, UPLOAD_CRM_KEYS, clean_row, from_model, header_map, norm_header,
+    read_only_headers,
 )
 from app.services.branches import branches_by_id
 from app.services.lead_crm import active_vendors
@@ -47,7 +48,7 @@ from app.services.stores import branch_names
 
 router = APIRouter(prefix="/crm-leads", tags=["crm leads (add, import, export)"])
 
-Source = Literal["spin", "whatsapp", "wedding", "wedding_planner"]
+Source = Literal["spin", "wedding_gifts", "whatsapp", "wedding", "wedding_planner"]
 Format = Literal["xlsx", "csv"]
 
 
@@ -72,7 +73,7 @@ def fields(source: Source, _: ReadAdmin, db: DbSession):
         "label": SOURCE_LABELS[source],
         "fields": [f.as_dict() for f in FIELDS[source]],
     }
-    if source == "spin":
+    if source in SPIN_SOURCES:
         answer["branches"] = [{"id": b.id, "name": b.name, "city": b.city}
                               for b in db.exec(select(Branch).order_by(Branch.name))]
     return answer
@@ -81,7 +82,7 @@ def fields(source: Source, _: ReadAdmin, db: DbSession):
 @router.get("/{source}/template")
 def template(source: Source, _: ReadAdmin, db: DbSession, format: Format = "xlsx"):
     content, media_type, ext = tabular.template(
-        source, format, _branch_names(db) if source == "spin" else [], [v.name for v in active_vendors(db)]
+        source, format, _branch_names(db) if source in SPIN_SOURCES else [], [v.name for v in active_vendors(db)]
     )
     return _file_response(content, media_type, tabular.filename(f"{source}-leads-template", ext))
 
@@ -161,7 +162,9 @@ def import_rows(source: Source, body: ImportBody, user: AdminUser, db: DbSession
         lead = service.create(db, source, c, ORIGIN_IMPORTED, user.id)
         result["status"] = "imported"
         result["lead_key"] = service.lead_key_of(source, lead)
-        service.save_assignment(db, source, result["lead_key"], c.assignment, user.id, empty_means_unassigned=True,
+        # Empty Assigned to: unassigned, except Wedding gifts (automatic: the source's vendor, Kraftzy)
+        service.save_assignment(db, source, result["lead_key"], c.assignment, user.id,
+                                empty_means_unassigned=source != "wedding_gifts",
                                 crm={k: c.values.get(k) for k in UPLOAD_CRM_KEYS})
         imported += 1
     db.commit()
@@ -253,13 +256,32 @@ def export_spin(
     order: Literal["asc", "desc"] = Query("asc"),
 ):
     """Exactly the requesting user's spin list: same filters (GET /spin-leads) and sort, workflow and CRM leads."""
-    filters = spin_ep.filters_for(db, viewer, f)
-    total = spin_ep.merged_page(db, 0, 0, f.common.search, sort, order, f.branch, filters, use_cache=False)["total"]
+    return _spin_flow_export(db, viewer, f, sort, order, format, "spin")
+
+
+@router.get("/wedding_gifts/export")
+def export_wedding_gifts(
+    viewer: LeadViewer,
+    db: DbSession,
+    f: spin_ep.GiftFilters,
+    format: Format = "xlsx",
+    sort: str | None = Query(None),
+    order: Literal["asc", "desc"] = Query("asc"),
+):
+    """Exactly the requesting user's Wedding gifts list: same filters (GET /wedding-gifts-leads) and sort."""
+    return _spin_flow_export(db, viewer, f, sort, order, format, "wedding_gifts")
+
+
+def _spin_flow_export(db, viewer, f, sort, order, format: str, flow: str) -> Response:
+    filters = spin_ep.filters_for(db, viewer, f, flow)
+    total = spin_ep.merged_page(db, 0, 0, f.common.search, sort, order, f.branch, filters, use_cache=False,
+                                flow=flow)["total"]
     _check_cap(total)
-    data = spin_ep.merged_page(db, 0, total, f.common.search, sort, order, f.branch, filters, use_cache=False)
+    data = spin_ep.merged_page(db, 0, total, f.common.search, sort, order, f.branch, filters, use_cache=False,
+                               flow=flow)
     branches = list(branches_by_id(db).values())       # + the built-in stores, as the screen shows them
-    return _export("spin", format, [*export_cols.spin_columns(data["columns"], branches), export_cols.HOT_COLUMN],
-                    data["items"], viewer)
+    return _export(flow, format, [*export_cols.spin_columns(data["columns"], branches), export_cols.HOT_COLUMN],
+                   data["items"], viewer)
 
 
 # ── Single lead ────────────────────────────────────────────────────────
@@ -284,8 +306,8 @@ def _lead_out(db, source: str, lead):
 
 @router.post("/{source}", status_code=201)
 def add_lead(source: Source, body: AddBody, user: AdminUser, db: DbSession):
-    if source == "spin":
-        raise HTTPException(405, "Spin leads can only be added by bulk upload", headers={"Allow": "GET"})
+    if source in SPIN_SOURCES:
+        raise HTTPException(405, f"{SOURCE_LABELS[source]} can only be added by bulk upload", headers={"Allow": "GET"})
     c = clean_row(source, body.values, service.context(db))
     if not c.ok:
         raise HTTPException(422, {"message": "Please fix the highlighted fields.", "errors": c.errors})
@@ -314,7 +336,7 @@ def _crm_lead_or_error(db, source: str, lead_key: str):
     if lead is not None:
         return lead
     if service.is_sheet_lead(db, source, lead_key):
-        where = "the workflow (spin wheel)" if source == "spin" else "the Google Sheet"
+        where = "the workflow (spin wheel)" if source in SPIN_SOURCES else "the Google Sheet"
         raise HTTPException(409, f"This lead comes from {where} and can't be changed here.")
     raise HTTPException(404, "Lead not found")
 
