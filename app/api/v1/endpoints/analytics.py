@@ -806,15 +806,30 @@ def _budget_band(budget) -> str:
     return next(label for label, low, high in BUDGET_BANDS if n >= low and (high is None or n < high))
 
 
+UPCOMING_WINDOWS = (30, 60, 90)          # days ahead for upcoming_events
+STALE_DAYS = 7                           # open leads untouched this long are stale
+LIST_SIZE = 10                           # upcoming, top value and stale lists
+
+
+def _koc_number(value):
+    """A rupee sum as an int when whole (potential values can have paise)."""
+    value = round(value, 2)
+    return int(value) if value == int(value) else value
+
+
 @router.get("/koc-to-dhruva")
 def koc_to_dhruva_overview(user: DhruvaSectionUser, db: DbSession, period: AllTimeDefaultPeriod):
     """KOC -> Dhruva dashboard (its own endpoint: the breakdowns differ from /analytics/dhruva). The
     shared period rules, all time by default; received = created_at (IST day). CRM numbers are this
-    section's own (source koc_to_dhruva). Admins, view-only and Dhruva logins; vendor logins: 403."""
-    from app.api.v1.endpoints.spin_leads import KOC_REASON_LABELS
-    from app.models.vendor_to_koc import UpdateStatus
+    section's own (source koc_to_dhruva). Admins, view-only and Dhruva logins; vendor logins: 403.
+
+    Open lead: Update none, interested or will call back (koc_dhruva.is_open). Potential value:
+    budget lower bound x quantity (koc_dhruva.potential_value). Every number covers the leads received
+    in the period, except follow_ups_due (every open lead with a follow-up due today or earlier)."""
+    from app.models.vendor_to_koc import STATUS_LABELS, UpdateStatus
     from app.services import hot_leads, koc_dhruva
-    from app.services.stores import pincode_area
+    from app.services.branches import branches_by_id
+    from app.services.stores import pincode_area, store_for
 
     rows = koc_dhruva.rows(db)
     if rows is None:
@@ -831,50 +846,160 @@ def koc_to_dhruva_overview(user: DhruvaSectionUser, db: DbSession, period: AllTi
     else:
         in_period = period.contains
         previous = period.previous()
-    current = [r for r, d in zip(rows, arrival) if in_period(d)]
+    current = [(r, d) for r, d in zip(rows, arrival) if in_period(d)]
+    leads = [r for r, _ in current]
     before = sum(1 for d in arrival if previous.contains(d)) if previous else None
 
     metas = kpis.metas_of(db, koc_dhruva.SOURCE)
     hot = hot_leads.hot_keys(db, koc_dhruva.SOURCE)
-    per_lead = [metas.get(r["key"]) for r in current]
-    numbers = _outcome(per_lead, sum(1 for r in current if r["key"] in hot))
+
+    def meta(r):
+        return metas.get(r["key"])
+
+    def status(r):
+        m = meta(r)
+        return m.update_status if m else None
+
+    def is_open(r):
+        return koc_dhruva.is_open(status(r))
+
+    def quoted(r):
+        m = meta(r)
+        return m is not None and (m.quoted_amount is not None or m.quoted_date is not None)
+
+    def entry(r, *extra):
+        out = {"lead_key": r["key"], "name": r["name"], "event_date": r["event_date"], "budget": r["budget"],
+               "quantity": r["quantity"], "potential_value": r["potential_value"], "update_status": status(r),
+               "status_label": STATUS_LABELS.get(status(r), status(r))}
+        for name in extra:
+            if name == "received":
+                out["received"] = r["created"].isoformat() if r["created"] else None
+            elif name == "last_update":
+                m = meta(r)
+                out["last_update"] = _iso_utc(m.updated_at) if m and m.updated_at else None
+        return out
+
+    # KPIs: the shared six (and AOV inputs) plus pending, follow-ups due and the open potential value
+    per_lead = [meta(r) for r in leads]
+    numbers = _outcome(per_lead, sum(1 for r in leads if r["key"] in hot))
     numbers.pop("leads", None)
-    numbers["pending"] = sum(1 for m in per_lead if m is None or m.update_status is None)
-    status_of = [m.update_status if m else None for m in per_lead]
+    open_leads = [r for r in leads if is_open(r)]
+    numbers.update({
+        "shared": len(leads),
+        "pending": sum(1 for r in leads if status(r) is None),
+        "follow_ups_due": sum(1 for r in rows if is_open(r) and meta(r) is not None
+                              and meta(r).follow_up_date is not None and meta(r).follow_up_date <= today),
+        "potential_value": _koc_number(sum(r["potential_value"] for r in open_leads
+                                           if r["potential_value"] is not None)),
+    })
+
+    # Funnel: each lead counts at every stage up to the furthest it reached
+    converted = [r for r in leads if status(r) == "converted"]
+    quoted_stage = [r for r in leads if quoted(r) or status(r) == "converted"]
+    interested_stage = [r for r in leads if quoted(r) or status(r) in
+                        ("interested", "will_call_back", "converted", "purchased_with_us")]
+    contacted = [r for r in leads if status(r) is not None or quoted(r)]
+    funnel = [{"stage": stage, "count": len(items)} for stage, items in (
+        ("shared", leads), ("contacted", contacted), ("interested", interested_stage), ("quoted", quoted_stage),
+        ("converted", converted))]
+
+    # Upcoming events of open leads (from today), and the open leads worth the most
+    events = []
+    for r in open_leads:
+        d = _parse_iso(r["event_date"])
+        if d is not None and d >= today:
+            events.append((d, r))
+    events.sort(key=lambda pair: (pair[0], pair[1]["key"]))
+    upcoming = {
+        **{f"next_{n}_days": sum(1 for d, _ in events if (d - today).days <= n) for n in UPCOMING_WINDOWS},
+        "next": [entry(r) for _, r in events[:LIST_SIZE]],
+    }
+    valued = sorted((r for r in open_leads if r["potential_value"] is not None),
+                    key=lambda r: (-r["potential_value"], r["key"]))
+
+    # Per month received: shared and (today) converted
+    months = []
+    y, m = period.date_from.year, period.date_from.month
+    while (y, m) <= (period.date_to.year, period.date_to.month):
+        months.append(f"{y:04d}-{m:02d}")
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    monthly = {k: {"month": k, "shared": 0, "converted": 0} for k in months}
+    for r, d in current:
+        if d is not None and d.strftime("%Y-%m") in monthly:
+            monthly[d.strftime("%Y-%m")]["shared"] += 1
+            monthly[d.strftime("%Y-%m")]["converted"] += status(r) == "converted"
+
+    # Per branch (resolved as the export: the Branches page, then the built-in stores)
+    known_branches = list(branches_by_id(db).values())
+    by_branch: dict = {}
+    for r in leads:
+        store = store_for(r["branch_id"], known_branches) or {}
+        key = store.get("id")
+        part = by_branch.setdefault(key, {
+            "branch_id": key, "name": store.get("name"),
+            "code": " · ".join(p for p in (store.get("code"), store.get("city")) if p) or None,
+            "leads": 0, "converted": 0, "conversion_amount": 0})
+        part["leads"] += 1
+        if status(r) == "converted":
+            part["converted"] += 1
+            part["conversion_amount"] += meta(r).conversion_amount or 0
+    branches = sorted(by_branch.values(), key=lambda b: (-b["leads"], b["name"] is None, str(b["name"] or "")))
+
+    # Per budget band
+    band_order = [label for label, _, _ in BUDGET_BANDS] + ["under_70", "not_given"]
+    bands = {b: {"band": b, "leads": 0, "converted": 0} for b in band_order}
+    for r in leads:
+        part = bands[_budget_band(r["budget"])]
+        part["leads"] += 1
+        part["converted"] += status(r) == "converted"
+    for part in bands.values():
+        part["converted_pct"] = round(part["converted"] / part["leads"] * 100, 1) if part["leads"] else None
+
+    # Stale: open leads whose last CRM change (or arrival, if never changed) is 7+ days ago
+    def last_touch(r):
+        m = meta(r)
+        return periods.ist_date(m.updated_at) if m and m.updated_at else periods.ist_date(r["created"])
+    stale = sorted(((last_touch(r), r) for r in open_leads
+                    if last_touch(r) is not None and (today - last_touch(r)).days >= STALE_DAYS),
+                   key=lambda pair: (pair[0], pair[1]["key"]))
 
     buckets = period.buckets()
     first = {start: i for i, (start, _) in enumerate(buckets)}
-    inflow = [{"date": s.isoformat(), "end": e.isoformat(), "total": 0, "budget": 0, "quantity": 0}
-              for s, e in buckets]
-    for r, d in zip(rows, arrival):
-        if d is not None and period.contains(d) and in_period(d):
-            point = inflow[first[period.bucket_start(d)]]
-            point["total"] += 1
-            point[r["reason"]] += 1
+    inflow = [{"date": s.isoformat(), "end": e.isoformat(), "total": 0} for s, e in buckets]
+    for _, d in current:
+        if d is not None and period.contains(d):
+            inflow[first[period.bucket_start(d)]]["total"] += 1
 
-    occasions = Counter(str(r["occasion"]).strip().title() for r in current if r["occasion"])
-    bands = Counter(_budget_band(r["budget"]) for r in current)
-    band_order = [label for label, _, _ in BUDGET_BANDS] + ["under_70", "not_given"]
-    latest = sorted(current, key=lambda r: (r["created"] or datetime.min, r["key"]), reverse=True)[:6]
+    statuses = [status(r) for r in leads]
+    occasions = Counter(str(r["occasion"]).strip().title() for r in leads if r["occasion"])
+    latest = sorted(leads, key=lambda r: (r["created"] or datetime.min, r["key"]), reverse=True)[:6]
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "today": today.isoformat(),
         "period": period.as_dict(),
-        "received": len(current),
+        "received": len(leads),
         "previous_period": before,
-        "change_pct": _change(len(current), before) if before is not None else None,
+        "change_pct": _change(len(leads), before) if before is not None else None,
         "kpis": numbers,
-        "by_reason": [{"reason": k, "label": label, "count": sum(1 for r in current if r["reason"] == k)}
-                      for k, label in KOC_REASON_LABELS.items()],
-        "by_budget_band": [{"band": b, "count": bands.get(b, 0)} for b in band_order],
+        "funnel": funnel,
+        "upcoming_events": upcoming,
+        "top_value_leads": [entry(r) for r in valued[:LIST_SIZE]],
+        "monthly": list(monthly.values()),
+        "by_branch": branches,
+        "by_budget_band": list(bands.values()),
+        "stale": {"count": len(stale), "oldest": [entry(r, "received", "last_update") for _, r in stale[:LIST_SIZE]]},
+        "latest": [{"lead_key": r["key"], "name": r["name"], "occasion": r["occasion"], "event_date": r["event_date"],
+                    "budget": r["budget"], "quantity": r["quantity"], "update_status": status(r),
+                    "status_label": STATUS_LABELS.get(status(r), status(r)),
+                    "received": r["created"].isoformat() if r["created"] else None} for r in latest],
+        # Kept for the current screen
         "by_occasion": _top(occasions, 10),
         "inflow": inflow,
-        "by_status": {"pending": status_of.count(None),
-                      **{s.value: status_of.count(s.value) for s in UpdateStatus}},
-        "top_cities": _top_cities([(koc_dhruva.SOURCE, r["city"] or pincode_area(r["pincode"])) for r in current]),
-        "latest": [{"lead_key": r["key"], "name": r["name"], "phone": r["phone"], "occasion": r["occasion"],
-                    "reason": r["reason"], "reason_label": r["reason_label"],
-                    "received": r["created"].isoformat() if r["created"] else None,
-                    "update_status": metas[r["key"]].update_status if r["key"] in metas else None,
-                    "is_hot": r["key"] in hot} for r in latest],
+        "by_status": {"pending": statuses.count(None), **{s.value: statuses.count(s.value) for s in UpdateStatus}},
+        "top_cities": _top_cities([(koc_dhruva.SOURCE, r["city"] or pincode_area(r["pincode"])) for r in leads]),
     }
+
+
+def _iso_utc(value: datetime) -> str:
+    """MySQL gives naive UTC datetimes."""
+    return (value if value.tzinfo else value.replace(tzinfo=timezone.utc)).isoformat()

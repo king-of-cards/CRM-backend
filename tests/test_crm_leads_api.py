@@ -160,6 +160,14 @@ def fake_list_spin_leads(_admin=None, page=1, page_size=50, search=None, sort=No
         rows = [r for r in rows if str(r.get("additional_details.pincode") or "").startswith(filters["pincode"])]
     if branch not in (None, ""):
         rows = [r for r in rows if str(r.get("branch_id")) == str(branch)]
+    if sort == "potential_value":                               # KOC -> Dhruva only; empty values last
+        from app.services import koc_dhruva
+
+        def value(r):
+            return koc_dhruva.potential_value(r.get("additional_details.estimatedBudgetPerCard"),
+                                              r.get("additional_details.quantityRequired"))
+        rows = sorted([r for r in rows if value(r) is not None], key=value, reverse=order == "desc") + \
+            [r for r in rows if value(r) is None]
     if keys_only:
         return {"keys": [str(r["id"]) for r in rows], "total": len(rows)}
     items = [{k: v for k, v in r.items() if k != "listed"} for r in rows[start:start + count]]

@@ -1742,7 +1742,8 @@ Dhruva → KOC leads.
   matter; **any date**: the spin cut-off doesn't apply) where the first number of `estimatedBudgetPerCard` is
   **≥ 70** (`70-100`, `70_100`, `100-200`, `500+`, `500_PLUS`, `400` …; `50_100` and `UNDER_50`
   count as 50), **or** `quantityRequired` is **≥ 1000** (also when the budget is empty or below 70).
-  `reason` is `budget` ("Budget ≥ ₹70", wins when both match) or `quantity` ("Quantity ≥ 1000").
+  Which rule matched is not returned; the `reason` filter (`budget`: the budget rule; `quantity`:
+  only the quantity rule) still narrows lists, stats and exports.
 - **CRM spin leads are never included** (added or uploaded, whatever their budget or quantity).
 - **In both places:** leads on or after the spin cut-off are in Spin too. This section keeps its own
   CRM details (`crm_lead_meta` with `source = "koc_to_dhruva"`), hot flags and activity, so a Dhruva
@@ -1772,18 +1773,19 @@ Dhruva → KOC leads.
 - **List items** (list, details, export): the Spin list's fields, including the branch exactly as
   Spin gives it (`branch_id`, and `branch`: `{id, name, code, city}` from the Branches page;
   `{id, name: "Branch <id>", code: null, city: null}` for an unknown id; `null` without a branch id,
-  no pincode-area fallback), plus `lead_key`, `reason`, `reason_label`, `occasion`,
+  no pincode-area fallback), plus `lead_key`, `potential_value` (see the dashboard), `occasion`,
   `event_date`, `pincode`, `estimated_budget_per_card`, `quantity_required`, `received`, the section's
   `crm` (`update_status`, `notes` = additional comments, `quoted_amount`, `quoted_date`,
   `conversion_amount`, `follow_up_date`), `is_hot` and `also_in`.
 - **Filters** (list, stats and export alike): the shared ones (`search`, `date_from`/`date_to` or
   `period` = received, `event_from`/`event_to`/`upcoming_days`, `update_status`, `quote`, `conversion`,
   `follow_up`, `hot`, `also_in`, `origin`), plus `branch`, `pincode`, `budget` (exact), `occasion`
-  (contains), `quantity_min` / `quantity_max`, `reason` (`budget` \| `quantity`); `sort` / `order`;
+  (contains), `quantity_min` / `quantity_max`, `reason` (`budget` \| `quantity`); `sort` / `order`
+  (`sort` also takes `potential_value`, empty values last);
   `page_size` 10, 25, 50 or 100. `vendor_id` and `unassigned` answer 400 (never assigned).
-- **Stats:** `{total, kpis, by_reason}`; `total` equals the list's total for the same filters.
-- **Filter options:** budgets, pincodes, branches, origins and updates (as Spin), plus `occasions`,
-  `reasons` and `quantity_range`.
+- **Stats:** `{total, kpis}`; `total` equals the list's total for the same filters.
+- **Filter options:** budgets, pincodes, branches, origins and updates (as Spin), plus `occasions`
+  and `quantity_range`.
 - **Export columns:** Sl. No, Name, Phone, Email, Occasion, Event date, Branch, Branch code, Estimated
   budget per card, Quantity required, Received, Update, Additional comments, Quoted amount, Quoted
   date, Conversion amount, Follow-up date, Hot. Branch and Branch code are resolved as in the Spin
@@ -1800,17 +1802,31 @@ A separate endpoint (not a parameter on `/analytics/dhruva`: the breakdowns diff
 period rules (`date_from` / `date_to`, `period=all`), **all time by default**; received =
 `created_at` (IST day). Admins, view-only and Dhruva logins; vendors 403.
 
+- **Open lead:** Update pending, interested or will call back. Closed: converted, purchased with us,
+  not converted, not interested, purchased elsewhere.
+- **Potential value:** budget-per-card lower bound × quantity required, in rupees. Lower bound = the
+  budget's first number (`70-100` → 70, `500_PLUS` → 500), **0** for `UNDER_…` budgets; `null` when
+  the budget or the quantity has no number.
+- **Period:** every number covers the leads received in the period, except `follow_ups_due`.
+- **List entries** (`upcoming_events.next`, `top_value_leads`, `stale.oldest`): `lead_key`, `name`,
+  `event_date`, `budget`, `quantity`, `potential_value`, `update_status` (`null` = pending),
+  `status_label`; `stale.oldest` adds `received` and `last_update` (last CRM change, `null` if never).
+
 | Field | Covers |
 |---|---|
 | `received`, `previous_period`, `change_pct` | Leads received in the period, and the comparison |
-| `kpis` | [The KPIs](#kpis-the-same-six-everywhere) from this section's CRM details, plus `quotes_count`, `conversion_amount_count` / `conversion_amount_total` (AOV inputs), `hot_count`, `pending` |
-| `by_reason` | `[{reason, label, count}]` for `budget` and `quantity` |
-| `by_budget_band` | `70-100`, `100-200`, `200-500`, `500+`, `under_70` (quantity-only leads), `not_given` |
-| `by_occasion` | Top 10 occasions |
-| `inflow` | `[{date, end, total, budget, quantity}]` per day / week / month |
-| `by_status` | `pending` plus every Update |
-| `top_cities` | City or pincode area, as the other dashboards |
-| `latest` | The 6 newest leads (`lead_key`, `name`, `phone`, `occasion`, `reason`, `received`, `update_status`, `is_hot`) |
+| `kpis` | `shared` (leads received), `pending` (no Update), `interested`, `quotes_count` / `quoted_count` and `quoted_total`, `converted` and `converted_pct` (of shared), `conversion_total`, `conversion_amount_count` / `conversion_amount_total` (AOV inputs: converted leads with an amount), `follow_ups_due` (**every** open lead with a follow-up date today or earlier, not limited to the period), `potential_value` (sum over the period's open leads), plus `total`, `not_interested`, `conversion_count`, `hot_count` |
+| `funnel` | `[{stage, count}]`: `shared` → `contacted` (any Update or quote) → `interested` (interested, will call back, quoted, converted or purchased with us) → `quoted` (quoted amount or date, or converted) → `converted`. Each lead counts at every stage up to the furthest it reached |
+| `upcoming_events` | Open leads with an event date (`YYYY-MM-DD`) from today: `next_30_days`, `next_60_days`, `next_90_days` (counts, today included), `next` (the 10 soonest, any date from today) |
+| `top_value_leads` | The 10 open leads with the highest potential value (leads without one left out) |
+| `monthly` | `[{month: "YYYY-MM", shared, converted}]` for every month of the period, by the month the lead was received (`converted` = those leads converted now) |
+| `by_branch` | `[{branch_id, name, code, leads, converted, conversion_amount}]`: branch resolved as the export (Branches page, then the built-in stores; `code` = `CHA-001 · Bangalore`); leads without a known branch in one row with `branch_id`, `name` and `code` `null`. Most leads first |
+| `by_budget_band` | `[{band, leads, converted, converted_pct}]` for `70-100`, `100-200`, `200-500`, `500+`, `under_70`, `not_given` (`converted_pct` `null` when no leads) |
+| `stale` | `{count, oldest}`: open leads whose last CRM change (or arrival, if never changed) is 7+ days before today; `oldest` = the 10 longest untouched |
+| `latest` | The 6 newest leads: `lead_key`, `name`, `occasion`, `event_date`, `budget`, `quantity`, `update_status`, `status_label`, `received` |
+| `by_occasion`, `inflow`, `by_status`, `top_cities` | Kept for the current screen: top 10 occasions; `[{date, end, total}]` per day / week / month; `pending` plus every Update; city or pincode area |
+
+No field carries the lead's reason (the `reason` list filter still works).
 
 ### Reminders and also_in
 

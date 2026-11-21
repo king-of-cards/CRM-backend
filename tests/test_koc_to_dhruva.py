@@ -8,7 +8,9 @@ details. In-memory SQLite and the fake workflow database only. Run:
 """
 import csv
 import io
+import json
 import unittest
+from datetime import date, datetime, timezone
 from unittest import mock
 
 from tests.dhruva_fixtures import DhruvaTestBase
@@ -24,10 +26,12 @@ from app.api.deps import get_current_user  # noqa: E402
 from app.api.v1.endpoints import spin_leads as sl  # noqa: E402
 from app.core.security import create_access_token  # noqa: E402
 from app.main import app  # noqa: E402
+from app.models.lead_meta import LeadMeta  # noqa: E402
 from app.models.user import User  # noqa: E402
-from app.services import lead_sources  # noqa: E402
+from app.services import koc_dhruva, lead_sources, periods  # noqa: E402
 
 K2D = "/koc-to-dhruva"
+SRC = "koc_to_dhruva"
 GIFT = "Wedding Gifts & Return Gifts"
 
 
@@ -136,10 +140,10 @@ class InBothTests(KocTestBase):
         self.get(f"{K2D}/leads/{crm['lead_key']}", status=404)
         spin = {str(i["id"]) for i in self.get("/spin-leads", page_size=100)["items"]}
         self.assertTrue({"301", "302", "305", crm["lead_key"]} <= spin)    # still in spin (302: a gift lead)
-        reasons = {i["lead_key"]: (i["reason"], i["reason_label"]) for i in
-                   self.get(f"{K2D}/leads", page_size=100)["items"]}
-        self.assertEqual(reasons["301"], ("budget", "Budget ≥ ₹70"))
-        self.assertEqual(reasons["302"], ("quantity", "Quantity ≥ 1000"))
+        items = {i["lead_key"]: i for i in self.get(f"{K2D}/leads", page_size=100)["items"]}
+        self.assertEqual({k: i["potential_value"] for k, i in items.items()},
+                         {"301": 14000, "302": 10000, "305": None, "306": None})
+        self.assertFalse({"reason", "reason_label"} & set(items["301"]))
         lead = self.get(f"{K2D}/leads/306")
         self.assertEqual((lead["quantity_required"], lead["occasion"], lead["estimated_budget_per_card"]),
                          (1500, "Birthday", None))
@@ -234,7 +238,8 @@ class FilterTests(KocTestBase):
             self.assertEqual(self.get(f"{K2D}/leads/stats", **params)["total"], len(expected), params)
             self.assertEqual(self.export_count(**params), len(expected), params)
         stats = self.get(f"{K2D}/leads/stats")
-        self.assertEqual((stats["kpis"]["converted"], stats["by_reason"]), (1, {"budget": 2, "quantity": 2}))
+        self.assertEqual(stats["kpis"]["converted"], 1)
+        self.assertNotIn("by_reason", stats)
         self.assertEqual(self.get(f"{K2D}/leads", page_size=10, page=1, sort="additional_details.quantityRequired",
                                   order="desc")["total"], 4)
         for bad in ({"vendor_id": 1}, {"unassigned": "true"}, {"quantity_min": 10, "quantity_max": 5},
@@ -303,33 +308,148 @@ class BranchTests(KocTestBase):
 
 
 # ── Dashboard ──────────────────────────────────────────────────────────
+TODAY = date(2026, 11, 21)
+
+
+def dash_row(lead_id, budget, quantity, event, created, branch):
+    return dict(row(lead_id, f"98450900{lead_id - 500:02d}", budget, quantity, created=created),
+                branch_id=branch, **{"additional_details.occasionDate": event})
+
+
+DASH_ROWS = [
+    #        budget       qty   event         created (UTC)          branch   potential
+    dash_row(501, "70-100", 1000, "2026-12-01", "2026-11-01T05:00:00", 1),     # 70000  interested, quoted
+    dash_row(502, "100-200", 500, "2027-03-01", "2026-11-05T05:00:00", 4),     # 50000  converted
+    dash_row(503, "500_PLUS", 200, "2027-01-10", "2026-10-15T05:00:00", 7),    # 100000 pending (stale)
+    dash_row(504, "UNDER_50", 1500, "2027-02-15", "2026-11-20T05:00:00", None),  # 0    pending
+    dash_row(505, None, 2000, "Dec 4th", "2026-09-10T05:00:00", 1),            # None   will call back (stale)
+    dash_row(506, "200-500", 100, "2026-11-10", "2026-11-18T05:00:00", 999),   # 20000  not interested
+    dash_row(507, "70-100", 300, "2026-12-20", "2026-11-21T03:00:00", 4),      # 21000  purchased with us
+    dash_row(508, "10-20", 100, "2026-12-20", "2026-11-21T03:00:00", 4),       # not a KOC -> Dhruva lead
+]
+
+
 class DashboardTests(KocTestBase):
-    def test_numbers(self):
-        self.put("301", {"update_status": "converted", "quoted_amount": 40000, "conversion_amount": 38000})
-        self.put("302", {"update_status": "not_interested"})
-        self.put("305", {"quoted_amount": 12000})
-        with self.logged_in("dhruva"):
-            self.client.post(f"{API}{K2D}/leads/306/hot")
+    def setUp(self):
+        super().setUp()
+        self.extra = [mock.patch.object(base, "WORKFLOW_ROWS", DASH_ROWS),
+                      mock.patch.object(periods, "today_ist", lambda: TODAY)]
+        for p in self.extra:
+            p.start()
+        recent, old = datetime(2026, 11, 21, 4, 0, tzinfo=timezone.utc), datetime(2026, 11, 1, 4, 0, tzinfo=timezone.utc)
+        metas = [
+            LeadMeta(source=SRC, lead_key="501", update_status="interested", quoted_amount=10000,
+                     follow_up_date=TODAY, updated_at=recent),
+            LeadMeta(source=SRC, lead_key="502", update_status="converted", quoted_amount=40000,
+                     conversion_amount=38000, updated_at=recent),
+            LeadMeta(source=SRC, lead_key="505", update_status="will_call_back",
+                     follow_up_date=date(2026, 11, 15), updated_at=old),
+            LeadMeta(source=SRC, lead_key="506", update_status="not_interested", updated_at=recent),
+            LeadMeta(source=SRC, lead_key="507", update_status="purchased_with_us",
+                     follow_up_date=date(2026, 11, 1), updated_at=recent),
+        ]
+        with Session(self.engine) as session:
+            session.add_all(metas)
+            session.commit()
+
+    def tearDown(self):
+        for p in self.extra:
+            p.stop()
+        super().tearDown()
+
+    def test_kpis_and_funnel(self):
         o = self.get("/analytics/koc-to-dhruva")                          # all time by default
         self.assertTrue(o["period"]["all_time"])
-        self.assertEqual(o["received"], 4)
         k = o["kpis"]
-        self.assertEqual((k["total"], k["converted"], k["not_interested"], k["quoted_count"], k["quoted_total"],
-                          k["conversion_amount_count"], k["conversion_amount_total"], k["hot_count"], k["pending"]),
-                         (4, 1, 1, 2, 52000, 1, 38000, 1, 2))
-        self.assertEqual(k["converted_pct"], 25.0)
-        self.assertEqual({r["reason"]: r["count"] for r in o["by_reason"]}, {"budget": 2, "quantity": 2})
-        bands = {b["band"]: b["count"] for b in o["by_budget_band"]}
-        self.assertEqual((bands["70-100"], bands["500+"], bands["under_70"], bands["not_given"]), (1, 1, 1, 1))
-        self.assertEqual({x["value"]: x["count"] for x in o["by_occasion"]}, {"Wedding": 2, "Reception": 1, "Birthday": 1})
-        self.assertEqual(sum(p["total"] for p in o["inflow"]), 4)
-        self.assertEqual(sum(p["quantity"] for p in o["inflow"]), 2)
-        self.assertEqual((o["by_status"]["converted"], o["by_status"]["pending"]), (1, 2))
-        self.assertEqual(o["top_cities"][0]["count"], 4)                 # pincode 560011 -> Bengaluru
-        self.assertEqual(o["latest"][0]["lead_key"], "305")
-        # A period: only November's leads (306 arrived 1 Oct)
-        nov = self.get("/analytics/koc-to-dhruva", date_from="2026-11-01", date_to="2026-11-16")
-        self.assertEqual((nov["received"], nov["kpis"]["hot_count"]), (3, 0))
+        self.assertEqual((k["shared"], k["pending"], k["interested"], k["quotes_count"], k["quoted_total"]),
+                         (7, 2, 1, 2, 50000))
+        self.assertEqual((k["converted"], k["converted_pct"], k["conversion_total"]), (1, 14.3, 38000))
+        self.assertEqual((k["conversion_amount_count"], k["conversion_amount_total"]), (1, 38000))
+        self.assertEqual(k["follow_ups_due"], 2)                    # 501 today, 505 overdue; 507 is closed
+        self.assertEqual(k["potential_value"], 170000)              # open: 501 + 503 + 504 (0); 505 has no budget
+        self.assertEqual([(f["stage"], f["count"]) for f in o["funnel"]],
+                         [("shared", 7), ("contacted", 5), ("interested", 4), ("quoted", 2), ("converted", 1)])
+
+    def test_upcoming_top_value_and_stale(self):
+        o = self.get("/analytics/koc-to-dhruva")
+        u = o["upcoming_events"]
+        self.assertEqual((u["next_30_days"], u["next_60_days"], u["next_90_days"]), (1, 2, 3))
+        self.assertEqual([e["lead_key"] for e in u["next"]], ["501", "503", "504"])   # open only, by date
+        self.assertEqual(u["next"][0], {"lead_key": "501", "name": "Lead 501", "event_date": "2026-12-01",
+                                        "budget": "70-100", "quantity": 1000, "potential_value": 70000,
+                                        "update_status": "interested", "status_label": "Interested"})
+        self.assertEqual([(e["lead_key"], e["potential_value"]) for e in o["top_value_leads"]],
+                         [("503", 100000), ("501", 70000), ("504", 0)])
+        self.assertEqual(o["stale"]["count"], 2)                    # 503 never touched, 505 untouched 20 days
+        self.assertEqual([e["lead_key"] for e in o["stale"]["oldest"]], ["503", "505"])
+        self.assertEqual((o["stale"]["oldest"][0]["last_update"], o["stale"]["oldest"][1]["last_update"][:10]),
+                         (None, "2026-11-01"))
+        self.assertEqual(o["stale"]["oldest"][0]["received"][:10], "2026-10-15")
+
+    def test_monthly_branches_bands_and_latest(self):
+        o = self.get("/analytics/koc-to-dhruva")
+        self.assertEqual(o["monthly"], [{"month": "2026-09", "shared": 1, "converted": 0},
+                                        {"month": "2026-10", "shared": 1, "converted": 0},
+                                        {"month": "2026-11", "shared": 5, "converted": 1}])
+        self.assertEqual(o["by_branch"], [
+            {"branch_id": 1, "name": "Chamrajpet", "code": "CHA-001 · Bangalore", "leads": 2, "converted": 0,
+             "conversion_amount": 0},
+            {"branch_id": 4, "name": "Jayanagar", "code": "JNG-004 · Bangalore", "leads": 2, "converted": 1,
+             "conversion_amount": 38000},
+            {"branch_id": None, "name": None, "code": None, "leads": 2, "converted": 0, "conversion_amount": 0},
+            {"branch_id": 7, "name": "Hyderabad - Kondhapur", "code": "HYB-007 · Hyderabad", "leads": 1,
+             "converted": 0, "conversion_amount": 0}])
+        bands = {b["band"]: (b["leads"], b["converted"], b["converted_pct"]) for b in o["by_budget_band"]}
+        self.assertEqual(bands, {"70-100": (2, 0, 0.0), "100-200": (1, 1, 100.0), "200-500": (1, 0, 0.0),
+                                 "500+": (1, 0, 0.0), "under_70": (1, 0, 0.0), "not_given": (1, 0, 0.0)})
+        self.assertEqual([r["lead_key"] for r in o["latest"]], ["507", "504", "506", "502", "501", "503"])
+        self.assertEqual(o["latest"][0], {"lead_key": "507", "name": "Lead 507", "occasion": "Wedding",
+                                          "event_date": "2026-12-20", "budget": "70-100", "quantity": 300,
+                                          "update_status": "purchased_with_us",
+                                          "status_label": "Already purchased with us",
+                                          "received": "2026-11-21T03:00:00"})
+        self.assertEqual(sum(p["total"] for p in o["inflow"]), 7)
+        self.assertEqual((o["by_status"]["pending"], o["by_status"]["converted"]), (2, 1))
+        self.assertNotIn("reason", json.dumps(o))                   # nowhere, also not in by_reason / inflow
+
+    def test_period_limits_everything_but_follow_ups(self):
+        o = self.get("/analytics/koc-to-dhruva", date_from="2026-11-01", date_to="2026-11-21")
+        self.assertEqual((o["kpis"]["shared"], o["kpis"]["follow_ups_due"], o["kpis"]["potential_value"]), (5, 2, 70000))
+        self.assertEqual([m["month"] for m in o["monthly"]], ["2026-11"])
+        self.assertEqual([e["lead_key"] for e in o["top_value_leads"]], ["501", "504"])
+        self.assertEqual(o["stale"]["count"], 0)
+
+    def test_list_items_and_potential_value_sort(self):
+        items = self.get(f"{K2D}/leads", page_size=100, sort="potential_value", order="desc")["items"]
+        self.assertEqual([(i["lead_key"], i["potential_value"]) for i in items],
+                         [("503", 100000), ("501", 70000), ("502", 50000), ("507", 21000), ("506", 20000),
+                          ("504", 0), ("505", None)])                # empty last
+        self.assertNotIn("reason", json.dumps(items))
+        self.assertEqual(self.get(f"{K2D}/leads/503")["potential_value"], 100000)
+        self.assertNotIn("reasons", self.get(f"{K2D}/leads/filter-options"))
+        self.assertNotIn("by_reason", self.get(f"{K2D}/leads/stats"))
+        self.assertEqual(self.get(f"{K2D}/leads/stats", reason="quantity")["total"], 2)   # filter still works
+
+
+class PotentialValueRuleTests(unittest.TestCase):
+    def test_python_rule(self):
+        cases = [("70-100", 1000, 70000), ("500_PLUS", 200, 100000), ("UNDER_50", 1500, 0), ("under 50", 10, 0),
+                 ("12.5-20", 3, 37.5), (None, 1000, None), ("70-100", None, None), ("n/a", 10, None)]
+        for budget, qty, value in cases:
+            self.assertEqual(koc_dhruva.potential_value(budget, qty), value, (budget, qty))
+        self.assertTrue(koc_dhruva.is_open(None) and koc_dhruva.is_open("interested")
+                        and koc_dhruva.is_open("will_call_back"))
+        for closed in ("converted", "purchased_with_us", "not_converted", "not_interested", "purchased_elsewhere"):
+            self.assertFalse(koc_dhruva.is_open(closed), closed)
+
+    def test_sql_rule(self):
+        table = Table("spin_lead", MetaData(), Column("id", BigInteger, primary_key=True),
+                      Column("additional_details", JSONB))
+        sql = str(sl.koc_potential_expr(table).compile(dialect=postgresql.dialect(),
+                                                        compile_kwargs={"literal_binds": True}))
+        self.assertIn("LIKE 'under%", sql)
+        self.assertIn("'estimatedBudgetPerCard'", sql)
+        self.assertIn("'quantityRequired'", sql)
 
 
 # ── Reminders and also_in ──────────────────────────────────────────────

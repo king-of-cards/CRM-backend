@@ -256,6 +256,16 @@ def koc_quantity_hit(table: Table):
     return func.coalesce(_number_expr(table, KOC_QUANTITY_KEY) >= KOC_QUANTITY_MIN, false())
 
 
+def koc_potential_expr(table: Table):
+    """KOC -> Dhruva potential value: budget lower bound x quantity (NULL when either is missing).
+    Lower bound: the budget's first number, 0 for "UNDER_…" budgets. The SQL twin of
+    koc_dhruva.potential_value (used to sort the list)."""
+    budget = _number_expr(table, KOC_BUDGET_KEY)
+    under = func.lower(func.ltrim(_detail_text(table, KOC_BUDGET_KEY))).like(bindparam(None, "under%", type_=Text))
+    low = case((under, budget * 0), else_=budget)
+    return low * _number_expr(table, KOC_QUANTITY_KEY)
+
+
 def koc_filter(table: Table) -> list[ColumnElement]:
     """KOC -> Dhruva rows: every row of the table (no required keys) matching the budget or the
     quantity rule."""
@@ -621,6 +631,9 @@ def list_spin_leads(
         sortable[col.name] = col
         if isinstance(col.type, String):
             text_exprs.append(cast(col, Text))
+
+    if flow == KOC_TO_DHRUVA:
+        sortable["potential_value"] = koc_potential_expr(table)   # computed, not a column
 
     # Sort: only names listed in "columns" (json-typed fields excluded); empty values last
     order_by = []

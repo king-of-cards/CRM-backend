@@ -82,7 +82,7 @@ def _filters_for(db, user, f: KocFilters) -> dict:
 def _enrich(item: dict) -> dict:
     row = koc_dhruva.row_of(item)
     item.update({
-        "lead_key": row["key"], "reason": row["reason"], "reason_label": row["reason_label"],
+        "lead_key": row["key"], "potential_value": row["potential_value"],
         "occasion": row["occasion"], "event_date": row["event_date"], "pincode": row["pincode"],
         "estimated_budget_per_card": row["budget"], "quantity_required": row["quantity"],
         "received": row["created"].isoformat() if row["created"] else None,
@@ -117,11 +117,12 @@ def list_leads(
     f: Filters,
     page: int = Query(1, ge=1),
     page_size: PageSize = 10,
-    sort: str | None = Query(None, description="Column name or additional_details.<key>"),
+    sort: str | None = Query(None, description="Column name, additional_details.<key>, or potential_value "
+                                                "(budget lower bound x quantity; empty values last)"),
     order: Literal["asc", "desc"] = Query("asc"),
 ):
     """KOC -> Dhruva leads (workflow rows of any date; never CRM-uploaded spin leads) with this
-    section's CRM details (crm), reason and also_in."""
+    section's CRM details (crm), potential_value and also_in."""
     data = _page(db, user, f, (page - 1) * page_size, page_size, sort, order)
     _attach_also_in(db, user, data["items"])
     return {**data, "page": page, "page_size": page_size}
@@ -129,7 +130,7 @@ def list_leads(
 
 @router.get("/leads/stats")
 def lead_stats(db: DbSession, user: DhruvaSectionUser, f: Filters):
-    """{total, kpis, by_reason} over exactly the leads the list shows for the same filters."""
+    """{total, kpis} over exactly the leads the list shows for the same filters."""
     from app.services import crm_spin_leads
 
     flt = _filters_for(db, user, f)
@@ -137,18 +138,13 @@ def lead_stats(db: DbSession, user: DhruvaSectionUser, f: Filters):
     workflow = sl.list_spin_leads(None, 1, 1, f.common.search, None, "asc", f.branch, flt or None, keys_only=True,
                                   flow=SOURCE)
     keys = [lead.lead_key for lead in added] + list(workflow["keys"])
-    reason_of = {r["key"]: r["reason"] for r in koc_dhruva.rows(db) or []}
-    by_reason = {"budget": 0, "quantity": 0}
-    for key in keys:
-        if reason_of.get(key) in by_reason:
-            by_reason[reason_of[key]] += 1
-    return {"total": len(keys), "kpis": kpis.for_keys(db, SOURCE, keys), "by_reason": by_reason}
+    return {"total": len(keys), "kpis": kpis.for_keys(db, SOURCE, keys)}
 
 
 @router.get("/leads/filter-options")
 def filter_options(db: DbSession, user: DhruvaSectionUser):
     """Dropdown values with counts over every lead of the section: budgets, pincodes, branches,
-    origins, updates (from GET /spin-leads/filter-options' builder), plus occasions and reasons."""
+    origins, updates (from GET /spin-leads/filter-options' builder), plus occasions and the quantity range."""
     out = sl.filter_options(_viewer(user), db, SOURCE)
     out.pop("vendors", None)                                  # never assigned
     rows = koc_dhruva.rows(db) or []
@@ -159,8 +155,6 @@ def filter_options(db: DbSession, user: DhruvaSectionUser):
                                                                             "count": 0})
             entry["count"] += 1
     out["occasions"] = sorted(occasions.values(), key=lambda o: (-o["count"], o["value"].lower()))
-    out["reasons"] = [{"value": k, "label": label, "count": sum(1 for r in rows if r["reason"] == k)}
-                      for k, label in sl.KOC_REASON_LABELS.items()]
     quantities = [r["quantity"] for r in rows if r["quantity"] is not None]
     out["quantity_range"] = {"min": min(quantities), "max": max(quantities)} if quantities else None
     return out

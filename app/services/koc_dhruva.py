@@ -21,6 +21,9 @@ logger = logging.getLogger(__name__)
 
 SOURCE = "koc_to_dhruva"
 LABEL = "KOC → Dhruva"
+# Closed leads (won or lost); every other Update (none, interested, will call back) is open
+CLOSED_STATUSES = frozenset({"converted", "purchased_with_us", "not_converted", "not_interested",
+                             "purchased_elsewhere"})
 WORKFLOW_LIMIT = 100_000          # every rule row in one query (869 today)
 CACHE_SECONDS = 30                # cleared with the access cache (access.forget)
 
@@ -54,6 +57,32 @@ def _datetime(value: Any) -> datetime | None:
     return value.astimezone(timezone.utc).replace(tzinfo=None) if value.tzinfo else value
 
 
+def is_open(update_status: str | None) -> bool:
+    return update_status not in CLOSED_STATUSES
+
+
+def budget_lower_bound(budget: Any) -> float | None:
+    """The estimated budget per card's lower bound in rupees: its first number ("70-100" -> 70,
+    "500_PLUS" -> 500), 0 for "UNDER_…" budgets, None when there is no number. The Python twin of
+    spin_leads.koc_potential_expr."""
+    from app.api.v1.endpoints.spin_leads import first_number
+
+    if isinstance(budget, str) and budget.strip().lower().startswith("under"):
+        return 0.0 if first_number(budget) is not None else None
+    return first_number(budget)
+
+
+def potential_value(budget: Any, quantity: Any) -> float | int | None:
+    """Budget lower bound x quantity (rupees), or None when either is missing."""
+    from app.api.v1.endpoints.spin_leads import first_number
+
+    low, qty = budget_lower_bound(budget), first_number(quantity)
+    if low is None or qty is None:
+        return None
+    value = round(low * qty, 2)
+    return int(value) if value == int(value) else value
+
+
 def row_of(item: dict) -> dict:
     """A list item (workflow or CRM) -> the fields the section works with."""
     from app.api.v1.endpoints.spin_leads import KOC_REASON_LABELS, first_number, koc_reason
@@ -73,7 +102,8 @@ def row_of(item: dict) -> dict:
         "branch_id": pick(item, "branch_id", "branchId"),
         "budget": budget,
         "quantity": first_number(quantity),
-        "reason": reason,
+        "potential_value": potential_value(budget, quantity),
+        "reason": reason,                 # internal (the reason filter); never returned
         "reason_label": KOC_REASON_LABELS.get(reason),
         "created": _datetime(pick(item, "created_at", "createdAt", "created")),
         "origin": item.get("origin") or "workflow",
