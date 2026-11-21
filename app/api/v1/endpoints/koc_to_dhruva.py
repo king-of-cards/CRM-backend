@@ -61,9 +61,10 @@ def koc_filters(
                                  "don't apply")
     if quantity_min is not None and quantity_max is not None and quantity_min > quantity_max:
         raise HTTPException(400, "quantity_min must be at most quantity_max")
-    spin = sl.spin_filters(common, branch, pincode, budget)
-    return KocFilters(spin.common, spin.branch, spin.pincode, spin.budget, (occasion or "").strip() or None,
-                      quantity_min, quantity_max, reason)
+    spin = sl.spin_filters(common, branch, pincode, budget, None)      # no Other wedding services filter here
+    return KocFilters(spin.common, spin.branch, spin.pincode, spin.budget,
+                      occasion=(occasion or "").strip() or None, quantity_min=quantity_min,
+                      quantity_max=quantity_max, reason=reason)
 
 
 Filters = Annotated[KocFilters, Depends(koc_filters)]
@@ -99,7 +100,7 @@ def _page(db, user, f: KocFilters, start: int, length: int, sort, order, flt: di
 
 
 def _attach_also_in(db, user, items: list[dict]) -> None:
-    # CRM-added leads are crm_spin_leads rows: their phones are read as spin's
+    # Workflow rows only (crm_spin_leads.matching gives none for this section); kept for crm- keys
     e164_of = also_in.page_phones(db, "spin", [i["lead_key"] for i in items if i["lead_key"].startswith("crm-")])
     for item in items:
         if item["lead_key"] not in e164_of and item.get("phone"):
@@ -119,8 +120,8 @@ def list_leads(
     sort: str | None = Query(None, description="Column name or additional_details.<key>"),
     order: Literal["asc", "desc"] = Query("asc"),
 ):
-    """KOC -> Dhruva leads with this section's CRM details (crm), reason and also_in. CRM-added
-    leads first, then workflow leads (as GET /spin-leads)."""
+    """KOC -> Dhruva leads (workflow rows of any date; never CRM-uploaded spin leads) with this
+    section's CRM details (crm), reason and also_in."""
     data = _page(db, user, f, (page - 1) * page_size, page_size, sort, order)
     _attach_also_in(db, user, data["items"])
     return {**data, "page": page, "page_size": page_size}
@@ -262,7 +263,7 @@ def get_crm(lead_key: str, db: DbSession, user: DhruvaSectionUser):
 @router.put("/leads/{lead_key}/crm")
 def save_crm(lead_key: str, body: KocCrmUpdate, db: DbSession, user: DhruvaSectionUser):
     """Admins and Dhruva logins (the receiver works the lead). Saved under source koc_to_dhruva, so
-    the spin / wedding_gifts record of the same lead never changes."""
+    the spin record of the same lead never changes."""
     _require(db, lead_key)
     changes = {name: getattr(body, name) for name in body.model_fields_set}
     if "notes" in changes and changes["notes"] is not None:

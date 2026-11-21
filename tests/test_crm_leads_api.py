@@ -91,6 +91,10 @@ WORKFLOW_COLUMNS = [
      "key": "occasionDate"},
     {"name": "additional_details.estimatedBudgetPerCard", "type": "range", "json_field": True,
      "source": "additional_details", "key": "estimatedBudgetPerCard"},
+    {"name": "additional_details.otherWeddingServices", "type": "string", "json_field": True,
+     "source": "additional_details", "key": "otherWeddingServices"},
+    {"name": "additional_details.quantityRequired", "type": "number", "json_field": True,
+     "source": "additional_details", "key": "quantityRequired"},
 ]
 WORKFLOW_ROWS = [
     {"id": 101, "name": "Workflow One", "phone": "9845099999", "created_at": "2026-11-01T04:30:00", "branch_id": 1,
@@ -100,9 +104,14 @@ WORKFLOW_ROWS = [
 WORKFLOW_PHONE = "+919845099999"
 
 
-def workflow_flow(row: dict) -> str:
-    """spin or wedding_gifts, by the row's otherWeddingServices (the real rule, in Python)."""
-    return spin_ep.WEDDING_GIFTS if spin_ep.is_gift(row.get("additional_details.otherWeddingServices")) else spin_ep.SPIN
+def in_spin(row: dict) -> bool:
+    """The row is listed in spin: listed (rows say "listed": False to play an unlisted one) and created
+    on or after the cut-off (the real rule, in Python)."""
+    return row.get("listed", True) and spin_ep.is_live(row["created_at"])
+
+
+def is_gift_row(row: dict) -> bool:
+    return spin_ep.is_gift(row.get("additional_details.otherWeddingServices"))
 
 
 def workflow_details(row: dict) -> dict:
@@ -117,7 +126,7 @@ def fake_list_spin_leads(_admin=None, page=1, page_size=50, search=None, sort=No
     if flow == spin_ep.KOC_TO_DHRUVA:          # KOC -> Dhruva: its rule over every row
         rows = [r for r in WORKFLOW_ROWS if spin_ep.koc_reason(workflow_details(r))]
     else:
-        rows = [r for r in WORKFLOW_ROWS if workflow_flow(r) == flow]
+        rows = [r for r in WORKFLOW_ROWS if in_spin(r)]
     if filters and filters.get("ids_in") is not None:
         rows = [r for r in rows if str(r["id"]) in {str(i) for i in filters["ids_in"]}]
     if filters and filters.get("created_from") is not None:      # created_at in [from, to), naive UTC
@@ -133,6 +142,9 @@ def fake_list_spin_leads(_admin=None, page=1, page_size=50, search=None, sort=No
         rows = [r for r in rows if any(term in str(v).casefold() for v in r.values() if v is not None)]
     if filters and filters.get("budget"):                        # exact budget value
         rows = [r for r in rows if str(r.get("additional_details.estimatedBudgetPerCard")) == str(filters["budget"])]
+    if filters and filters.get("other_services"):                # Other wedding services contains (any case)
+        rows = [r for r in rows if filters["other_services"].casefold()
+                in str(r.get("additional_details.otherWeddingServices") or "").casefold()]
     if filters and filters.get("occasion"):                      # occasion contains (any case)
         rows = [r for r in rows if filters["occasion"].casefold()
                 in str(r.get("additional_details.occasionType") or "").casefold()]
@@ -150,38 +162,41 @@ def fake_list_spin_leads(_admin=None, page=1, page_size=50, search=None, sort=No
         rows = [r for r in rows if str(r.get("branch_id")) == str(branch)]
     if keys_only:
         return {"keys": [str(r["id"]) for r in rows], "total": len(rows)}
-    return {"columns": WORKFLOW_COLUMNS, "items": [dict(r) for r in rows[start:start + count]], "total": len(rows),
+    items = [{k: v for k, v in r.items() if k != "listed"} for r in rows[start:start + count]]
+    return {"columns": WORKFLOW_COLUMNS, "items": items, "total": len(rows),
             "page": page, "page_size": page_size, "branch_column": "branch_id"}
 
 
 FAKE_TABLE = Table("spin_lead", MetaData(), Column("id", BigInteger, primary_key=True))
 
 
-def fake_workflow_phone_index(flow="spin"):
-    """also_in's whole-source index of workflow phones of one flow: {lead id: e164}."""
-    from app.services import phones
-    return {str(r["id"]): phones.normalize(str(r["phone"]), lenient=True).e164 for r in WORKFLOW_ROWS
-            if workflow_flow(r) == flow}
+def fake_workflow_index():
+    """also_in's index of every workflow row: {lead id: (e164, in spin, gift lead)}."""
+    return {str(r["id"]): (phones.normalize(str(r["phone"]), lenient=True).e164, in_spin(r), is_gift_row(r))
+            for r in WORKFLOW_ROWS}
 
 
 def fake_workflow_phones(e164s):
-    """Every workflow row (both flows): {e164: [(id, flow)]}."""
+    """Every workflow row (any date, listed or not): {e164: [WorkflowHit]}."""
     found = {}
     for r in WORKFLOW_ROWS:
         e164 = phones.normalize(r["phone"], lenient=True).e164
         if e164 in e164s:
-            found.setdefault(e164, []).append((str(r["id"]), workflow_flow(r)))
+            found.setdefault(e164, []).append(
+                service.WorkflowHit(str(r["id"]), spin_ep.is_live(r["created_at"]), in_spin(r)))
     return found
 
 
 def fake_workflow_spin_rows(db):
-    """What vendors._workflow_spin_rows reads from PostgreSQL, from the fake rows."""
+    """What vendors._workflow_spin_rows reads from PostgreSQL (rows in spin), from the fake rows."""
     branches = branch_service.branches_by_id(db)
     out = []
     for r in WORKFLOW_ROWS:
+        if not in_spin(r):
+            continue
         branch = branches.get(str(r["branch_id"])) if r.get("branch_id") is not None else None
         out.append((str(r["id"]), (branch or {}).get("city"), r.get("additional_details.pincode"), None,
-                    (branch or {}).get("vendor_id"), workflow_flow(r)))
+                    (branch or {}).get("vendor_id"), is_gift_row(r)))
     return out
 
 
@@ -238,7 +253,7 @@ class ApiTestBase:
             mock.patch.object(spin_ep, "_get_table", lambda: FAKE_TABLE),
             mock.patch.object(service, "workflow_phones", fake_workflow_phones),
             mock.patch.object(vendors_ep, "_workflow_spin_rows", fake_workflow_spin_rows),
-            mock.patch.object(also_in, "workflow_phone_index", fake_workflow_phone_index),
+            mock.patch.object(also_in, "_workflow_index", fake_workflow_index),
         ]
         for p in self.patches:
             p.start()
@@ -511,8 +526,9 @@ class CrmLeadsApiTest(ApiTestBase, unittest.TestCase):
         self.assertEqual(wb.sheetnames, ["Leads", "Instructions", "Lists"])
         headers = [c.value for c in wb["Leads"][1]]
         self.assertEqual(headers, ["Lead", "Email", "Contact", "Branch", "Branch code", "Location", "Occasion",
-                                   "Event date", "Budget", "Assigned to", "Update", "Quoted amount", "Quoted date",
-                                   "Conversion amount", "Created"])
+                                   "Event date", "Budget", "Other wedding services", "Quantity required",
+                                   "Assigned to", "Update", "Quoted amount", "Quoted date", "Conversion amount",
+                                   "Created"])
         lists = wb["Lists"]
         self.assertEqual([r[0].value for r in lists.iter_rows(min_row=2) if r[0].value],    # Branches page + built-in stores
                          sorted((s["name"] for s in STORES.values()), key=str.lower))

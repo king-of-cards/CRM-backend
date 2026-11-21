@@ -31,7 +31,6 @@ api_router.include_router(auth.router)
 api_router.include_router(users.router)
 api_router.include_router(read_db.router)
 api_router.include_router(spin_leads.router)
-api_router.include_router(spin_leads.gifts_router)       # /wedding-gifts-leads
 api_router.include_router(sheets.router)
 api_router.include_router(whatsapp_leads.router)
 api_router.include_router(wedding_leads.router)

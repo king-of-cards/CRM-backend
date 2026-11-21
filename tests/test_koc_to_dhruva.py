@@ -1,7 +1,7 @@
 """KOC -> Dhruva (koc_to_dhruva): spin leads KOC shares with Dhruva by rule.
 
 Rule: estimatedBudgetPerCard's first number >= 70, or quantityRequired >= 1000, over every workflow
-row and every CRM-added spin lead. The leads stay in spin / wedding_gifts too, with separate CRM
+row (any date; CRM-uploaded spin leads never). Live leads stay in spin too, with separate CRM
 details. In-memory SQLite and the fake workflow database only. Run:
 
     python -m unittest discover -s tests -t . -v
@@ -43,7 +43,7 @@ def row(lead_id, phone, budget, quantity, services="Photography & Videography", 
 
 ROWS = [
     row(301, "9845070001", "70-100", 200),                                    # budget       spin
-    row(302, "9845070002", "10-20", 1000, services=GIFT),                     # quantity     wedding_gifts
+    row(302, "9845070002", "10-20", 1000, services=GIFT),                     # quantity     spin (gift)
     row(303, "9845070003", "UNDER_50", 500),                                  # 50: no       spin
     row(304, "9845070004", "50_100", None),                                   # 50: no       spin
     row(305, "9845070005", "500_PLUS", None, occasion="Reception"),           # budget       spin
@@ -132,11 +132,10 @@ class InBothTests(KocTestBase):
         crm = base.ApiTestBase.import_spin(self, {"phone": "9845070099", "name": "CRM big",
                                                   "estimatedBudgetPerCard": "100-200", "assigned_to": "Automatic"})
         self.assertEqual(crm["status"], "imported", crm)
-        self.assertEqual(self.keys(), KOC_IDS | {crm["lead_key"]})
+        self.assertEqual(self.keys(), KOC_IDS)                              # CRM-uploaded spin leads: never
+        self.get(f"{K2D}/leads/{crm['lead_key']}", status=404)
         spin = {str(i["id"]) for i in self.get("/spin-leads", page_size=100)["items"]}
-        gifts = {str(i["id"]) for i in self.get("/wedding-gifts-leads", page_size=100)["items"]}
-        self.assertTrue({"301", "305", crm["lead_key"]} <= spin)           # still in spin
-        self.assertIn("302", gifts)                                         # still in wedding_gifts
+        self.assertTrue({"301", "302", "305", crm["lead_key"]} <= spin)    # still in spin (302: a gift lead)
         reasons = {i["lead_key"]: (i["reason"], i["reason_label"]) for i in
                    self.get(f"{K2D}/leads", page_size=100)["items"]}
         self.assertEqual(reasons["301"], ("budget", "Budget ≥ ₹70"))
@@ -317,7 +316,7 @@ class RemindersAndAlsoInTests(KocTestBase):
         self.assertNotIn("koc_to_dhruva", {a["source"] for a in spin_vendor["also_in"]})
         koc_admin = self.item(f"{K2D}/leads", "301")
         self.assertEqual({a["source"] for a in koc_admin["also_in"]}, {"spin"})
-        self.assertEqual({a["source"] for a in self.item(f"{K2D}/leads", "302")["also_in"]}, {"wedding_gifts"})
+        self.assertEqual({a["source"] for a in self.item(f"{K2D}/leads", "302")["also_in"]}, {"spin"})
         self.assertEqual(self.item(f"{K2D}/leads", "301", "dhruva")["also_in"], [])   # Dhruva: no other section
         self.assertEqual(self.keys(also_in="yes"), KOC_IDS)
         self.assertNotIn("301", {str(i["id"]) for i in

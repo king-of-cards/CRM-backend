@@ -20,12 +20,11 @@ from app.services import phones
 from app.services.sheet_sync import parse_budget, parse_event_date
 
 IST = timezone(timedelta(hours=5, minutes=30))
-SOURCES = ("spin", "wedding_gifts", "whatsapp", "wedding", "wedding_planner")
-# Sources stored in crm_spin_leads (the workflow spin_lead table's two flows): same fields and storage
-SPIN_SOURCES = ("spin", "wedding_gifts")
+SOURCES = ("spin", "whatsapp", "wedding", "wedding_planner")
+# Sources stored in crm_spin_leads (the workflow spin_lead table's leads)
+SPIN_SOURCES = ("spin",)
 SOURCE_LABELS = {
     "spin": "Spin leads",
-    "wedding_gifts": "Wedding gifts",
     "whatsapp": "International (WhatsApp)",
     "wedding": "Wedding & event photography",
     "wedding_planner": "Wedding planner",
@@ -86,7 +85,9 @@ FIELDS: dict[str, list[FieldDef]] = {
         FieldDef("serviceTypes", "Service types", max_length=300, detail=True),
         FieldDef("serviceBudget", "Service budget", "range", max_length=100, detail=True),
         FieldDef("serviceQuantity", "Service quantity", "int", detail=True),
-        FieldDef("otherWeddingServices", "Other wedding services", max_length=500, detail=True),
+        FieldDef("otherWeddingServices", "Other wedding services", max_length=500, detail=True,
+                 help='E.g. "Photography & Videography, Wedding Gifts & Return Gifts". Leads naming '
+                      '"Wedding Gifts & Return Gifts" go to the gifts vendor (Kraftyz) when Assigned to is Automatic.'),
     ],
     "whatsapp": [
         FieldDef("phone", "Lead", "phone", True, 32,
@@ -148,12 +149,9 @@ FIELDS: dict[str, list[FieldDef]] = {
     ],
 }
 
-FIELDS["wedding_gifts"] = FIELDS["spin"]      # same columns; stored in crm_spin_leads too
-
 # Read-only columns present in exports and/or templates; never read back from an upload
 READ_ONLY_COLUMNS: dict[str, tuple[str, ...]] = {
     "spin": ("Branch code", "Quoted date", "Hot"),
-    "wedding_gifts": ("Branch code", "Quoted date", "Hot"),
     "whatsapp": ("Quoted date", "Hot"),
     "wedding": ("Quoted date", "Hot"),
     "wedding_planner": ("Estimate", "Fits budget", "Quoted date", "Last step", "Hot"),

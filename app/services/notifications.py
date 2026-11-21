@@ -30,7 +30,7 @@ def cleanup_expired(db: Session) -> None:
 
 
 def _lead_name(db: Session, source: str, lead_key: str) -> str:
-    if source in ("spin", "wedding_gifts"):
+    if source == "spin":
         from app.services.crm_leads import service
 
         crm_lead = service.find_crm_lead(db, source, lead_key)

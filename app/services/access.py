@@ -9,6 +9,8 @@
   Unassigned   leads are visible to admins (and view-only logins) only.
   KOC -> Dhruva (koc_to_dhruva, a Dhruva section) is never assigned: admins, view-only and Dhruva
                logins see every lead of it, vendor logins none.
+  Spin         workflow rows before the spin cut-off (SPIN_LIVE_FROM) are hidden from everyone:
+               not in the assignment map, and can_see says no (see spin_leads.spin_filter).
 
 The effective assignment is the one shown in "Assigned to" (lead_crm.meta_out): manual, then the
 sheet's "leads shared", then the branch's vendor, then the area rules, unless the lead was
@@ -30,7 +32,7 @@ from app.services import lead_crm
 
 logger = logging.getLogger(__name__)
 
-SOURCES = ("spin", "wedding_gifts", "whatsapp", "wedding", "wedding_planner")
+SOURCES = ("spin", "whatsapp", "wedding", "wedding_planner")
 CACHE_SECONDS = 30          # rebuilt after this (never served stale); cleared on every change
 
 
@@ -77,12 +79,12 @@ def _dhruva_section_reader(viewer: Viewer) -> bool:
 
 
 def _rows(db: Session, source: str) -> list[tuple]:
-    """(lead_key, location, pincode, sheet vendor[, branch vendor id]) for every listed lead:
-    the same inputs the list endpoints give lead_crm.attach. Archived/removed leads left out."""
-    if source in ("spin", "wedding_gifts"):
+    """(lead_key, location, pincode, sheet vendor[, branch vendor id[, is_gift]]) for every listed
+    lead: the same inputs the list endpoints give lead_crm.attach. Archived/removed leads left out."""
+    if source == "spin":
         from app.api.v1.endpoints.vendors import _spin_rows
 
-        return _spin_rows(db, source)
+        return _spin_rows(db)
     if source == "koc_to_dhruva":
         from app.services import koc_dhruva
 
@@ -117,9 +119,23 @@ def visible_keys(db: Session, viewer: Viewer, source: str) -> set[str] | None:
     return {key for key, vendor_id in assignments(db, source).items() if vendor_id == viewer.vendor_id}
 
 
+def hidden_spin_key(lead_key: str) -> bool:
+    """A workflow row that is not in spin (before the cut-off, or not listed). CRM spin leads never
+    are; when the workflow database can't be read, nothing is hidden."""
+    from app.models.lead_origin import CRM_KEY_PREFIX
+    from app.services import also_in
+
+    if str(lead_key).startswith(CRM_KEY_PREFIX):
+        return False
+    row = also_in.workflow_row(str(lead_key))
+    return row is not None and not row[1]
+
+
 def can_see(db: Session, viewer: Viewer, source: str, lead_key: str) -> bool:
     if source in DHRUVA_SECTION_SOURCES:
         return _dhruva_section_reader(viewer)
+    if source == "spin" and hidden_spin_key(lead_key):
+        return False
     if viewer.sees_all:
         return True
     return assignments(db, source).get(str(lead_key)) == viewer.vendor_id

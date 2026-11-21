@@ -48,7 +48,7 @@ from app.services.stores import branch_names
 
 router = APIRouter(prefix="/crm-leads", tags=["crm leads (add, import, export)"])
 
-Source = Literal["spin", "wedding_gifts", "whatsapp", "wedding", "wedding_planner"]
+Source = Literal["spin", "whatsapp", "wedding", "wedding_planner"]
 Format = Literal["xlsx", "csv"]
 
 
@@ -162,9 +162,8 @@ def import_rows(source: Source, body: ImportBody, user: AdminUser, db: DbSession
         lead = service.create(db, source, c, ORIGIN_IMPORTED, user.id)
         result["status"] = "imported"
         result["lead_key"] = service.lead_key_of(source, lead)
-        # Empty Assigned to: unassigned, except Wedding gifts (automatic: the source's vendor, Kraftyz)
-        service.save_assignment(db, source, result["lead_key"], c.assignment, user.id,
-                                empty_means_unassigned=source != "wedding_gifts",
+        # Empty Assigned to: unassigned. "Automatic" on a spin gift lead: the gifts vendor (Kraftyz)
+        service.save_assignment(db, source, result["lead_key"], c.assignment, user.id, empty_means_unassigned=True,
                                 crm={k: c.values.get(k) for k in UPLOAD_CRM_KEYS})
         imported += 1
     db.commit()
@@ -257,19 +256,6 @@ def export_spin(
 ):
     """Exactly the requesting user's spin list: same filters (GET /spin-leads) and sort, workflow and CRM leads."""
     return _spin_flow_export(db, viewer, f, sort, order, format, "spin")
-
-
-@router.get("/wedding_gifts/export")
-def export_wedding_gifts(
-    viewer: LeadViewer,
-    db: DbSession,
-    f: spin_ep.GiftFilters,
-    format: Format = "xlsx",
-    sort: str | None = Query(None),
-    order: Literal["asc", "desc"] = Query("asc"),
-):
-    """Exactly the requesting user's Wedding gifts list: same filters (GET /wedding-gifts-leads) and sort."""
-    return _spin_flow_export(db, viewer, f, sort, order, format, "wedding_gifts")
 
 
 def _spin_flow_export(db, viewer, f, sort, order, format: str, flow: str) -> Response:

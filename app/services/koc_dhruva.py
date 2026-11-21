@@ -1,9 +1,10 @@
 """KOC -> Dhruva (source key koc_to_dhruva): spin leads KOC shares with Dhruva by rule.
 
 Rule (spin_leads.koc_filter / koc_reason): estimatedBudgetPerCard's first number >= 70, or
-quantityRequired >= 1000, over EVERY workflow spin_lead row (listed as spin or not) and every
-CRM-added spin lead. The leads stay in spin / wedding_gifts too; this section keeps its own CRM
-details, hot flags and activity under source "koc_to_dhruva", and no vendor is ever assigned.
+quantityRequired >= 1000, over EVERY workflow spin_lead row (listed as spin or not, any date: the
+spin cut-off doesn't apply). CRM-uploaded spin leads are never included. A live lead stays in spin
+too; this section keeps its own CRM details, hot flags and activity under source "koc_to_dhruva",
+and no vendor is ever assigned.
 
 Who: admins, view-only and Dhruva logins read; admins and Dhruva logins edit (view-only: the
 central 403); vendor logins never see these leads.
@@ -81,21 +82,18 @@ def row_of(item: dict) -> dict:
 
 def _build(db: Session) -> list[dict] | None:
     from app.api.v1.endpoints import spin_leads as sl
-    from app.services import crm_spin_leads
 
     try:
         data = sl.list_spin_leads(None, 1, WORKFLOW_LIMIT, offset=0, limit=WORKFLOW_LIMIT, flow=sl.KOC_TO_DHRUVA)
     except Exception:  # noqa: BLE001
         logger.warning("KOC -> Dhruva: workflow database unavailable", exc_info=True)
         return None
-    items = [{**i, "origin": "workflow"} for i in data["items"]]
-    items += [crm_spin_leads.to_item(lead, data["columns"]) for lead in crm_spin_leads.active(db, SOURCE)]
-    return [row_of(i) for i in items]
+    return [row_of({**i, "origin": "workflow"}) for i in data["items"]]
 
 
 def rows(db: Session) -> list[dict] | None:
-    """Every KOC -> Dhruva lead (workflow rows, then CRM-added ones), or None when the workflow
-    database can't be read. Cached briefly; access.forget() clears it."""
+    """Every KOC -> Dhruva lead (workflow rows only), or None when the workflow database can't be
+    read. Cached briefly; access.forget() clears it."""
     def build():
         built = _build(db)
         if built is None:

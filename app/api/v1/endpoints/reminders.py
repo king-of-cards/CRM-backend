@@ -80,7 +80,7 @@ def _reminder_rows(db: Session, viewer: Viewer | None, dhruva_only: bool = False
     today = periods.today_ist()
     rows: list[dict] = []
     # koc_to_dhruva: the Dhruva section's copy of spin leads; access hides it from vendor logins
-    for source in ("spin", "wedding_gifts", "whatsapp", "wedding", "wedding_planner", "koc_to_dhruva"):
+    for source in ("spin", "whatsapp", "wedding", "wedding_planner", "koc_to_dhruva"):
         visible = access.visible_keys(db, viewer, source) if viewer is not None else None
         # koc_to_dhruva is read without a viewer too (the Dhruva reminders endpoint)
         assignments = access.assignments(db, source) if viewer is not None or source == "koc_to_dhruva" else {}
@@ -91,7 +91,8 @@ def _reminder_rows(db: Session, viewer: Viewer | None, dhruva_only: bool = False
                      and m.update_status not in {"converted", "not_interested"}]
         keys = {m.lead_key for m in candidate}
         details = _details_for_crm_source(db, source, keys)
-        if source in ("spin", "wedding_gifts", "koc_to_dhruva"):
+        if source in ("spin", "koc_to_dhruva"):
+            # spin: live rows only (the assignment map already leaves out rows before the cut-off)
             workflow = [key for key in keys if not key.startswith("crm-") and key.isdigit()]
             details.update(_workflow_spin_details(workflow, source))
         vendor_by_id = {v.id: v.name for v in db.exec(select(Vendor))} if viewer is None or viewer.sees_all else {}

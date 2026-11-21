@@ -1,9 +1,9 @@
 """GET /analytics/overview: one call with everything the dashboard needs, for a period.
 Admins see every lead, vendor users only their own.
 
-Combines the five lead sources:
-  spin            PostgreSQL spin_lead (read-only workflow database), gift leads left out
-  wedding_gifts   the spin_lead rows naming "Wedding Gifts & Return Gifts" (see spin_leads.flow_filter)
+Combines the four lead sources:
+  spin            PostgreSQL spin_lead (read-only workflow database; rows on or after the spin cut-off,
+                  see spin_leads.spin_filter) plus every CRM spin lead (crm_spin_leads, any date)
   whatsapp        International Google Sheet  (crm_whatsapp_leads)
   wedding         Wedding Google Sheet        (crm_wedding_leads)
   wedding_planner Wedding planner Sheet       (crm_wedding_plans)
@@ -37,12 +37,11 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
-SOURCES = ("spin", "wedding_gifts", "whatsapp", "wedding", "wedding_planner")
-SPIN_FLOWS = ("spin", "wedding_gifts")     # both read from the workflow spin_lead table
-CITY_SOURCES = ("spin", "wedding_gifts", "wedding", "wedding_planner", "vendor_to_koc")
-OVERVIEW_CITY_DEFAULTS = ("spin", "wedding_gifts", "wedding", "wedding_planner")
+SOURCES = ("spin", "whatsapp", "wedding", "wedding_planner")
+CITY_SOURCES = ("spin", "wedding", "wedding_planner", "vendor_to_koc")
+OVERVIEW_CITY_DEFAULTS = ("spin", "wedding", "wedding_planner")
 VTK_CITY_DEFAULTS = ("vendor_to_koc",)
-SOURCES_HELP = ("Comma-separated sources for Top cities (spin, wedding_gifts, whatsapp, wedding, wedding_planner, "
+SOURCES_HELP = ("Comma-separated sources for Top cities (spin, whatsapp, wedding, wedding_planner, "
                 "vendor_to_koc, dhruva; whatsapp and dhruva have no city).")
 FRESH_SECONDS = 60        # answered from memory, no rebuild
 STALE_SECONDS = 6 * 3600  # answered from memory, rebuilt in the background
@@ -119,15 +118,15 @@ def _norm(s: str) -> str:
 
 # ── Spin leads (PostgreSQL, read-only) ─────────────────────────────────
 def _spin_rows(db: Session) -> list[dict] | None:
-    """[{key, created, occasion_type, occasion_date, city, pincode, flow}] for every listed lead of
-    both spin_lead flows (the workflow's and the CRM's own, archived ones left out), or None if the
-    workflow database is unavailable. flow: spin or wedding_gifts (rows without one are spin)."""
+    """[{key, created, occasion_type, occasion_date, city, pincode}] for every lead in spin (the live
+    workflow rows and every CRM spin lead, archived ones left out), or None if the workflow
+    database is unavailable."""
     rows = _workflow_spin_rows()
     if rows is None:
         return None
     from app.services import crm_spin_leads
 
-    for lead in crm_spin_leads.active(db, None):
+    for lead in crm_spin_leads.active(db):
         details = lead.additional_details or {}
         from app.services.stores import pincode_area
 
@@ -138,14 +137,8 @@ def _spin_rows(db: Session) -> list[dict] | None:
             "occasion_date": details.get("occasionDate"),
             "city": details.get("city") or details.get("location") or pincode_area(details.get("pincode")),
             "is_workflow": False,
-            "flow": crm_spin_leads.flow_of(lead),
         })
     return rows
-
-
-def _split_flows(rows: list[dict] | None) -> dict[str, list[dict] | None]:
-    """{spin: rows, wedding_gifts: rows} (both None when the workflow database is unavailable)."""
-    return {flow: None if rows is None else [r for r in rows if r.get("flow", "spin") == flow] for flow in SPIN_FLOWS}
 
 
 def _workflow_spin_rows() -> list[dict] | None:
@@ -156,8 +149,9 @@ def _workflow_spin_rows() -> list[dict] | None:
         from app.api.v1.endpoints import spin_leads as sl
 
         table = sl._get_table()
-        base = sl._required_filter(table)
-        fields = {_norm(f.key): f for fs in sl._get_json_fields(table, base).values() for f in fs}
+        base = sl.spin_filter(table)                 # listed, on or after the spin cut-off
+        fields = {_norm(f.key): f for fs in sl._get_json_fields(table, sl._required_filter(table)).values()
+                  for f in fs}
 
         created_col = next((table.c[c] for c in ("created_at", "createdAt", "created") if c in table.c), None)
         type_field = next((fields[k] for k in ("occasiontype", "eventtype", "occasion") if k in fields), None)
@@ -192,17 +186,10 @@ def _workflow_spin_rows() -> list[dict] | None:
             names.append("pincode")
         if len(exprs) == 1:
             return []
-        exprs.append(sl.gift_expr(table).label("is_gift"))       # which flow (both flows are read)
-        names.append("is_gift")
 
         with read_engine.connect() as conn:
             rows = conn.execute(sa_select(*exprs).select_from(table).where(*base)).all()
-        out = []
-        for r in rows:
-            row = dict(zip(names, r))
-            row["flow"] = sl.WEDDING_GIFTS if row.pop("is_gift") else sl.SPIN
-            out.append({**row, "key": str(r[0]), "is_workflow": True})
-        return out
+        return [{**dict(zip(names, r)), "key": str(r[0]), "is_workflow": True} for r in rows]
     except Exception:  # noqa: BLE001
         logger.warning("Spin analytics unavailable", exc_info=True)
         return None
@@ -220,18 +207,17 @@ def _all_source_city_data(db: Session, period, sources: tuple[str, ...], vtk_row
     if "vendor_to_koc" in sources and vtk_rows is None:
         vtk_rows = db.exec(select(VendorToKocLead.created_at, VendorToKocLead.city)).all()
     vtk_rows = vtk_rows or []
-    flows = _split_flows(_spin_rows(db)) if any(f in sources for f in SPIN_FLOWS) else dict.fromkeys(SPIN_FLOWS)
+    spin = _spin_rows(db) if "spin" in sources else None
     keep = (lambda _created: True) if all_time else (
         lambda created: period.contains(periods.ist_date(created)))
     city_rows = [("wedding", city) for created, city in wedding if keep(created)]
     city_rows += [("wedding_planner", city) for created, city in planner if keep(created)]
     city_rows += [("vendor_to_koc", city) for created, city in vtk_rows if keep(created)]
-    included_sources = [source for source in sources if source not in SPIN_FLOWS or flows[source] is not None]
+    included_sources = [source for source in sources if source != "spin" or spin is not None]
     from app.services.stores import pincode_area
-    for flow in SPIN_FLOWS:
-        if flow in included_sources:
-            city_rows += [(flow, row.get("city") or pincode_area(row.get("pincode")))
-                          for row in flows[flow] if keep(row.get("created"))]
+    if "spin" in included_sources:
+        city_rows += [("spin", row.get("city") or pincode_area(row.get("pincode")))
+                      for row in spin if keep(row.get("created"))]
     return {
         "top_cities": _top_cities(city_rows),
         "top_cities_sources": included_sources,
@@ -261,12 +247,11 @@ def _outcome(metas: list, hot_count: int = 0) -> dict:
 
 
 def _outcomes(db: Session, keys_by_source: dict[str, list[str]], spin_available: bool) -> dict:
-    """{source: outcome, "all": outcome}; spin and wedding_gifts are None when the workflow database
-    can't be read."""
+    """{source: outcome, "all": outcome}; spin is None when the workflow database can't be read."""
     out: dict[str, Any] = {}
     every: list = []
     for source in SOURCES:
-        if source in SPIN_FLOWS and not spin_available:
+        if source == "spin" and not spin_available:
             out[source] = None
             continue
         metas = {m.lead_key: m for m in db.exec(select(LeadMeta).where(LeadMeta.source == source))}
@@ -293,7 +278,7 @@ def _build(db: Session, keys: dict[str, set[str]] | None = None,
     period: the dashboard's date range (default: the last 30 days).
     city_sources: the sources Top cities is computed over (see `_parse_city_sources`).
 
-    Arrival date of a lead (India calendar day): spin and wedding gifts created_at, International and Wedding
+    Arrival date of a lead (India calendar day): spin created_at, International and Wedding
     submitted_at, Wedding planner updated_in_sheet_at (the sheet's "Last updated"); added and
     imported leads use the same columns (filled with the entry time, or the uploaded value).
     Every number covers the leads that arrived in the period; this_week / last_week keep their
@@ -322,28 +307,24 @@ def _build(db: Session, keys: dict[str, set[str]] | None = None,
             WeddingPlan.last_step, WeddingPlan.plan_id,
         ).where(WeddingPlan.is_deleted == False)  # noqa: E712
     ).all()
-    flows = _split_flows(_spin_rows(db))
+    spin = _spin_rows(db)
     if keys is not None:
         wa = [r for r in wa if r[-1] in keys["whatsapp"]]
         wd = [r for r in wd if r[-1] in keys["wedding"]]
         wp = [r for r in wp if r[-1] in keys["wedding_planner"]]
-        flows = {flow: None if rows is None else [r for r in rows if str(r.get("key")) in keys[flow]]
-                 for flow, rows in flows.items()}
-    spin, gifts = flows["spin"], flows["wedding_gifts"]
+        spin = None if spin is None else [r for r in spin if str(r.get("key")) in keys["spin"]]
 
     arrival = {
         "whatsapp": [periods.ist_date(r[0]) for r in wa],
         "wedding": [periods.ist_date(r[0]) for r in wd],
         "wedding_planner": [periods.ist_date(r[0]) for r in wp],
         "spin": [periods.ist_date(r.get("created")) for r in (spin or [])],
-        "wedding_gifts": [periods.ist_date(r.get("created")) for r in (gifts or [])],
     }
     events = {
         "whatsapp": [r[1] for r in wa],
         "wedding": [r[1] for r in wd],
         "wedding_planner": [r[1] for r in wp],
         "spin": [_parse_iso(r.get("occasion_date")) for r in (spin or [])],
-        "wedding_gifts": [_parse_iso(r.get("occasion_date")) for r in (gifts or [])],
     }
     if isinstance(period, periods.AllTime):
         # All time: every lead the viewer can see (also those without an arrival date); the period
@@ -364,7 +345,6 @@ def _build(db: Session, keys: dict[str, set[str]] | None = None,
     totals = dict(new)
     if spin is None:
         totals["spin"] = None
-        totals["wedding_gifts"] = None
     this_week = _counts(arrival, lambda d: d is not None and week_start <= d <= today)
     last_week = _counts(arrival, lambda d: d is not None and prev_week_start <= d < week_start)
 
@@ -399,7 +379,6 @@ def _build(db: Session, keys: dict[str, set[str]] | None = None,
     wd_p = [r for r, d in zip(wd, arrival["wedding"]) if in_period(d)]
     wp_p = [r for r, d in zip(wp, arrival["wedding_planner"]) if in_period(d)]
     spin_p = [r for r, d in zip(spin or [], arrival["spin"]) if in_period(d)]
-    gifts_p = [r for r, d in zip(gifts or [], arrival["wedding_gifts"]) if in_period(d)]
 
     # CRM outcomes of the period's leads: crm_lead_meta matched by the same lead keys as the lists
     period_keys = {
@@ -407,22 +386,19 @@ def _build(db: Session, keys: dict[str, set[str]] | None = None,
         "wedding": [r[-1] for r in wd_p],
         "wedding_planner": [r[-1] for r in wp_p],
         "spin": [str(r.get("key")) for r in spin_p],
-        "wedding_gifts": [str(r.get("key")) for r in gifts_p],
     }
     outcomes = _outcomes(db, period_keys, spin_available=spin is not None)
 
-    # Top cities: only the requested sources (Spin and Wedding gifts drop out when the workflow
-    # database is unavailable)
-    top_cities_sources = [source for source in city_sources if source not in SPIN_FLOWS or spin is not None]
+    # Top cities: only the requested sources (Spin drops out when the workflow database is unavailable)
+    top_cities_sources = [source for source in city_sources if source != "spin" or spin is not None]
     city_rows: list[tuple[str, str | None]] = []
     if "wedding" in top_cities_sources:
         city_rows += [("wedding", r[2]) for r in wd_p]
     if "wedding_planner" in top_cities_sources:
         city_rows += [("wedding_planner", r[2]) for r in wp_p]
     from app.services.stores import pincode_area
-    for flow, flow_p in (("spin", spin_p), ("wedding_gifts", gifts_p)):
-        if flow in top_cities_sources:
-            city_rows += [(flow, r.get("city") or pincode_area(r.get("pincode"))) for r in flow_p]
+    if "spin" in top_cities_sources:
+        city_rows += [("spin", r.get("city") or pincode_area(r.get("pincode"))) for r in spin_p]
     if "vendor_to_koc" in top_cities_sources:
         vtk_stmt = select(VendorToKocLead.created_at, VendorToKocLead.city)
         if vtk_vendor_id is not None:
@@ -437,7 +413,7 @@ def _build(db: Session, keys: dict[str, set[str]] | None = None,
     }
     countries = Counter((r[2] or "").strip() for r in wa_p if r[2])
     occasions = Counter((r[3] or "").strip().title() for r in wd_p if r[3])
-    occasions.update((str(r.get("occasion_type") or "")).strip().title() for r in spin_p + gifts_p
+    occasions.update((str(r.get("occasion_type") or "")).strip().title() for r in spin_p
                      if r.get("occasion_type"))
     occasions.pop("", None)
 

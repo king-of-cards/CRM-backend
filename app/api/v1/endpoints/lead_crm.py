@@ -27,7 +27,7 @@ from app.services.crm_leads import service as crm_leads
 router = APIRouter(prefix="/leads", tags=["lead crm"])
 logger = logging.getLogger(__name__)
 
-Source = Literal["spin", "wedding_gifts", "whatsapp", "wedding", "wedding_planner"]
+Source = Literal["spin", "whatsapp", "wedding", "wedding_planner"]
 MAX_AMOUNT = 100_000_000          # rupees, for quoted_amount and conversion_amount
 
 
@@ -65,10 +65,28 @@ class LeadCrmUpdate(BaseModel):
 EDITABLE = ("vendor_id", "update_status", "quoted_date", "quoted_amount", "conversion_amount", "notes", "follow_up_date")
 
 
+def _is_gift_lead(db, source: str, lead_key: str) -> bool:
+    """A spin gift lead (it goes to the gifts vendor): CRM leads from their details, workflow rows
+    from the workflow index (False when it can't be read)."""
+    if source != "spin":
+        return False
+    if lead_key.startswith(CRM_KEY_PREFIX):
+        from app.models.crm_spin_lead import CrmSpinLead
+        from app.services import crm_spin_leads
+
+        number = lead_key[len(CRM_KEY_PREFIX):]
+        lead = db.get(CrmSpinLead, int(number)) if number.isdigit() else None
+        return lead is not None and crm_spin_leads.is_gift(lead)
+    from app.services import also_in
+
+    row = also_in.workflow_row(lead_key)
+    return bool(row and row[2])
+
+
 def _answer(db, source: str, lead_key: str, meta: LeadMeta | None, body: LeadCrmUpdate | None = None) -> dict:
     vendors = lead_crm.active_vendors(db)
     by_id = {v.id: v for v in vendors}
-    rules, default = lead_crm.source_rules(source, vendors)
+    rules, default = lead_crm.lead_rules(source, vendors, gift=_is_gift_lead(db, source, lead_key))
     return lead_crm.meta_out(
         meta,
         lead_key,

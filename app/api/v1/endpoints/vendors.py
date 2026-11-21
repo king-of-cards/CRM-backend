@@ -149,20 +149,20 @@ def update_vendor(vendor_id: int, body: VendorPatch, _: AdminUser, db: DbSession
 
 
 # ── Statistics ─────────────────────────────────────────────────────────
-def _spin_rows(db: Session, flow: str = "spin") -> list[tuple]:
-    """(lead id, location, pincode, None, branch vendor id) for every listed lead of a spin_lead flow
-    (spin or wedding_gifts): the workflow's and the CRM's own (crm-<id>, archived ones left out)."""
+def _spin_rows(db: Session) -> list[tuple]:
+    """(lead id, location, pincode, None, branch vendor id, is_gift) for every lead in spin: the live
+    workflow rows (spin_leads.spin_filter) and the CRM's own (crm-<id>, any date, archived ones left
+    out). is_gift: the lead goes to the gifts vendor (lead_crm.lead_rules)."""
     from app.services import crm_spin_leads
     from app.services.branches import branches_by_id
 
     branches = branches_by_id(db)
     added = []
-    for lead in crm_spin_leads.active(db, flow):
+    for lead in crm_spin_leads.active(db):
         branch = branches.get(str(lead.branch_id)) if lead.branch_id is not None else None
         added.append((lead.lead_key, (branch or {}).get("city"), crm_spin_leads.pincode_of(lead), None,
-                      (branch or {}).get("vendor_id")))
-    # The workflow rows carry their flow as a 6th value (rows without one are spin)
-    workflow = [r[:5] for r in _workflow_spin_rows(db) if (r[5] if len(r) > 5 else "spin") == flow]
+                      (branch or {}).get("vendor_id"), crm_spin_leads.is_gift(lead)))
+    workflow = [(*r[:5], bool(r[5]) if len(r) > 5 else False) for r in _workflow_spin_rows(db)]
     return workflow + added
 
 
@@ -176,8 +176,8 @@ def _workflow_spin_rows(db: Session) -> list[tuple]:
         from app.services.branches import branches_by_id
 
         table = sl._get_table()
-        base = sl._required_filter(table)
-        json_fields = sl._get_json_fields(table, base)
+        base = sl.spin_filter(table)                 # listed, on or after the spin cut-off
+        json_fields = sl._get_json_fields(table, sl._required_filter(table))
         pk = list(table.primary_key.columns)[0]
         fields = {f.key.lower(): f for fs in json_fields.values() for f in fs}
         pin_field = next((f for k, f in fields.items() if "pincode" in k or k == "pin"), None)
@@ -203,7 +203,7 @@ def _workflow_spin_rows(db: Session) -> list[tuple]:
                     r[2] if pin_field else None,
                     None,
                     (branch or {}).get("vendor_id"),
-                    sl.WEDDING_GIFTS if r[4] else sl.SPIN,
+                    bool(r[4]),                     # gift lead
                 )
             )
         return out
@@ -216,7 +216,6 @@ def _build_stats() -> dict:
     with Session(engine) as db:
         sources = {
             "spin": _spin_rows(db),
-            "wedding_gifts": _spin_rows(db, "wedding_gifts"),
             "whatsapp": [
                 (k, c, None, None)
                 for k, c in db.exec(select(WhatsAppLead.sheet_key, WhatsAppLead.country).where(WhatsAppLead.is_deleted == False))  # noqa: E712

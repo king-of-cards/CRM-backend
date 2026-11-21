@@ -1,8 +1,7 @@
 """Shared parsing of the optional `sources` query parameter (comma-separated lead sources)."""
 from fastapi import HTTPException
 
-LEAD_SOURCES = ("spin", "wedding_gifts", "whatsapp", "wedding", "wedding_planner", "vendor_to_koc", "dhruva",
-                "koc_to_dhruva")
+LEAD_SOURCES = ("spin", "whatsapp", "wedding", "wedding_planner", "vendor_to_koc", "dhruva", "koc_to_dhruva")
 
 
 def parse_sources(value: str | None, default: tuple[str, ...] | set[str] | None = None,

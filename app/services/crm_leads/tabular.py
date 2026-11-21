@@ -280,7 +280,7 @@ def template(source: str, fmt: str, branch_names: list[str], vendor_names: list[
 
     lists = wb.create_sheet("Lists")
     choices = {
-        "Branch": branch_names if source in ("spin", "wedding_gifts") else [],
+        "Branch": branch_names if source == "spin" else [],
         # "<vendor> · auto" isn't offered (Automatic covers it) but uploads still accept it
         "Assigned to": ["Automatic", "Unassigned"] + vendor_names,
         "Update": [label for label in UPDATE_LABELS.values()],          # Pending first
@@ -310,7 +310,8 @@ _T = datetime(2026, 11, 14, 5, 0, tzinfo=timezone.utc)        # 14 Nov 2026, 10:
 EXAMPLES: dict[str, dict[str, Any]] = {
     "spin": {"Lead": "Asha Rao", "Email": "asha@example.com", "Contact": "+919845012345", "Branch": "Jayanagar",
              "Branch code": "JNG-004 · Bangalore", "Location": "Bangalore · 560011", "Occasion": "Wedding", "Event date": _D,
-             "Budget": "₹10–20", "Assigned to": "Phodeo", "Created": _T},
+             "Budget": "₹10–20", "Other wedding services": "Photography & Videography", "Quantity required": 300,
+             "Assigned to": "Phodeo", "Created": _T},
     "whatsapp": {"Lead": "+971501234567", "Country": "United Arab Emirates", "Event date": _D,
                  "Assigned to": "Automatic", "Submitted": _T},
     "wedding": {"Lead": "Ravi Kumar", "Email": "ravi@example.com", "Contact": "+919845010003", "Occasion": "Wedding",
@@ -320,4 +321,3 @@ EXAMPLES: dict[str, dict[str, Any]] = {
                         "Guests staying": 120, "Budget": 2500000, "Budget range": "20L–30L", "Assigned to": "",
                         "Updated": _T},
 }
-EXAMPLES["wedding_gifts"] = {**EXAMPLES["spin"], "Occasion": "Wedding", "Assigned to": "Automatic"}

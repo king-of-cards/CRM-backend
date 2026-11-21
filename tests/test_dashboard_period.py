@@ -112,8 +112,8 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
     def test_range_previous_period_and_change(self):
         o = self.overview(date_from="2026-11-10", date_to="2026-11-16")     # 7 days; previous 3-9 Nov
         self.assertEqual(o["period"]["previous"], {"date_from": "2026-11-03", "date_to": "2026-11-09"})
-        self.assertEqual(o["new_in_period"], {"spin": 2, "wedding_gifts": 0, "whatsapp": 2, "wedding": 1, "wedding_planner": 1, "all": 6})
-        self.assertEqual(o["previous_period"], {"spin": 1, "wedding_gifts": 0, "whatsapp": 0, "wedding": 1, "wedding_planner": 0, "all": 2})
+        self.assertEqual(o["new_in_period"], {"spin": 2, "whatsapp": 2, "wedding": 1, "wedding_planner": 1, "all": 6})
+        self.assertEqual(o["previous_period"], {"spin": 1, "whatsapp": 0, "wedding": 1, "wedding_planner": 0, "all": 2})
         self.assertEqual(o["change_pct"]["all"], 200)                    # 6 vs 2
         self.assertEqual(o["change_pct"]["wedding"], 0)
         self.assertIsNone(o["change_pct"]["whatsapp"])                   # nothing to compare with
@@ -127,7 +127,7 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
         self.assertEqual(o["photography_budget"]["count"], 1)
         self.assertEqual(o["budget_fit"], {"over": 1})
         self.assertEqual([c["city"] for c in o["top_cities"]], ["Bengaluru", "Udaipur"])
-        self.assertEqual(o["top_cities_sources"], ["spin", "wedding_gifts", "wedding", "wedding_planner"])   # default
+        self.assertEqual(o["top_cities_sources"], ["spin", "wedding", "wedding_planner"])   # default
         bengaluru = next(city for city in o["top_cities"] if city["city"] == "Bengaluru")
         self.assertEqual(bengaluru["by_source"]["spin"], 1)
         hyderabad = next(city for city in self.overview()["top_cities"] if city["city"] == "Hyderabad")
@@ -136,11 +136,11 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
 
     def test_totals_are_the_leads_that_arrived_in_the_period(self):
         o = self.overview(date_from="2026-11-01", date_to="2026-11-10")
-        self.assertEqual(o["totals"], {"spin": 1, "wedding_gifts": 0, "whatsapp": 0, "wedding": 2, "wedding_planner": 0, "all": 3})
+        self.assertEqual(o["totals"], {"spin": 1, "whatsapp": 0, "wedding": 2, "wedding_planner": 0, "all": 3})
         self.assertEqual(o["totals"], o["new_in_period"])
         # Default period (18 Oct - 16 Nov): October, September and the lead with no date are left out
         default = self.overview()
-        self.assertEqual(default["totals"], {"spin": 3, "wedding_gifts": 0, "whatsapp": 2, "wedding": 2, "wedding_planner": 1, "all": 8})
+        self.assertEqual(default["totals"], {"spin": 3, "whatsapp": 2, "wedding": 2, "wedding_planner": 1, "all": 8})
 
     def test_removed_kpis_and_kept_ones(self):
         for params in ({"date_from": "2026-11-10", "date_to": "2026-11-16"}, {"period": "all"}):
@@ -215,7 +215,7 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
         self.assertIsNone(o["previous_period"])
         self.assertIsNone(o["change_pct"])
         # Every lead the viewer can see, also the one without an arrival date
-        self.assertEqual(o["totals"], {"spin": 3, "wedding_gifts": 0, "whatsapp": 3, "wedding": 3, "wedding_planner": 2, "all": 11})
+        self.assertEqual(o["totals"], {"spin": 3, "whatsapp": 3, "wedding": 3, "wedding_planner": 2, "all": 11})
         dated = sum(p[s] for p in o["trend"] for s in ("spin", "whatsapp", "wedding", "wedding_planner"))
         self.assertEqual(dated, 10)                                  # the undated lead has no month
         self.assertEqual(o["not_filtered"], [])

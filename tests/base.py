@@ -17,6 +17,8 @@ os.environ.update({
     "REFRESH_TOKEN_EXPIRE_DAYS": "7",
     "REFRESH_TOKEN_MAX_LIFETIME_DAYS": "30",
     "REFRESH_REUSE_GRACE_SECONDS": "30",
+    # Spin cut-off far in the past, so the fake workflow rows are live; cut-off tests move it
+    "SPIN_LIVE_FROM": "2000-01-01",
 })
 
 import hashlib  # noqa: E402

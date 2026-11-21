@@ -134,6 +134,8 @@ _SPIN_FIELDS = {
     "pincode": ["pincode", "pin", "zipcode"],
     "city": ["city", "location", "eventcity"],
     "budget": ["estimatedbudgetpercard", "servicebudget", "budget"],
+    "other_services": ["otherweddingservices"],
+    "quantity": ["quantityrequired"],
     "created": ["createdat", "created", "createdon", "submittedat"],
 }
 
@@ -198,6 +200,8 @@ def spin_columns(columns_meta: list[dict], branches: list[dict] | None = None) -
         ("Occasion", lambda i: val(i, "occasion"), "text"),
         ("Event date", lambda i: date_or_text(val(i, "event_date"), val(i, "event_date")), "date"),
         ("Budget", lambda i: _spin_budget(val(i, "budget"), f["budget"]), "text"),
+        ("Other wedding services", lambda i: val(i, "other_services"), "text"),
+        ("Quantity required", lambda i: val(i, "quantity"), "text"),
         *CRM_COLUMNS,
         ("Created", lambda i: to_datetime(val(i, "created")), "datetime"),
     ]
@@ -205,13 +209,13 @@ def spin_columns(columns_meta: list[dict], branches: list[dict] | None = None) -
 
 def headers(source: str) -> list[str]:
     """The column headers of a source's export and template."""
-    if source in ("spin", "wedding_gifts"):
+    if source == "spin":
         return [c[0] for c in spin_columns([])]
     return [c[0] for c in SHEET_COLUMNS[source]]
 
 
 def kinds(source: str) -> list[str]:
-    cols = spin_columns([]) if source in ("spin", "wedding_gifts") else SHEET_COLUMNS[source]
+    cols = spin_columns([]) if source == "spin" else SHEET_COLUMNS[source]
     return [c[2] for c in cols]
 
 

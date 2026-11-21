@@ -8,7 +8,7 @@ per-vendor access rules, and the CRM details endpoint `PUT /leads/{source}/{lead
   invalid token: `401`. Admin-only endpoints answer `403 {"detail": "Admin access required"}` to
   vendor logins. A vendor login that isn't linked to a vendor gets
   `403 {"detail": "This login isn't linked to a vendor."}` on every lead endpoint.
-- `{source}` is one of `spin`, `wedding_gifts`, `whatsapp`, `wedding`, `wedding_planner` (see [Wedding gifts](#17-wedding-gifts)). Any other value: `422`.
+- `{source}` is one of `spin`, `whatsapp`, `wedding`, `wedding_planner`. Any other value: `422`.
 
 ## Contents
 
@@ -33,7 +33,7 @@ per-vendor access rules, and the CRM details endpoint `PUT /leads/{source}/{lead
 14. [Notifications and hot leads](#14-notifications-and-hot-leads)
 15. [Activity and follow-up reminders](#15-activity-and-follow-up-reminders)
 16. [View-only role](#16-view-only-role)
-17. [Wedding gifts](#17-wedding-gifts)
+17. [Spin: cut-off, gift leads and history upload](#17-spin-cut-off-gift-leads-and-history-upload)
 18. [KOC → Dhruva](#18-koc--dhruva)
 
 ---
@@ -168,14 +168,17 @@ Export columns that are shown but never read back are listed under each source a
 | `location` | Location | location | | |
 | `occasionType` | Occasion | text | 100 | occasion type |
 | `occasionDate` | Event date | date | | occasion date |
-| `estimatedBudgetPerCard` | Budget | range | 100 | budget per card |
+| `estimatedBudgetPerCard` | Budget | range | 100 | budget per card, estimated budget per card |
+| `otherWeddingServices` | Other wedding services | text | 500 | |
+| `quantityRequired` | Quantity required | int | | |
 | `assigned_to` | Assigned to | assigned | | assigned to, vendor |
 | `created_at` | Created | datetime | | created at |
 
+Other wedding services naming `Wedding Gifts & Return Gifts` makes a gift lead (automatic vendor
+Kraftyz, see [section 17](#17-spin-cut-off-gift-leads-and-history-upload)).
 Read-only: Branch code, Quoted date. Uploads only: Update, Quoted amount, Conversion amount (see below).
 Extra columns: Pincode (`pincode`), Lead occasion (`occasion`), Bride/Groom name, Bride/Groom
-phone, Event venue, Coverage days, Quantity required, Service, Service types, Service budget,
-Service quantity, Other wedding services. Indian numbers are stored in the workflow's 10-digit
+phone, Event venue, Coverage days, Service, Service types, Service budget, Service quantity. Indian numbers are stored in the workflow's 10-digit
 form; `occasionDate` as `YYYY-MM-DD`.
 
 ### whatsapp (International)
@@ -773,7 +776,7 @@ have errors).
 | `reason` | When | Extra fields |
 |---|---|---|
 | `existing_sheet` | A sheet row in this source has the phone, including rows since removed from the sheet. Not used for spin. | `lead_key` |
-| `existing_workflow` | Spin only: a workflow spin lead has the phone. | `lead_key` (workflow lead id) |
+| `existing_workflow` | Spin only: a workflow spin row created on or after the spin cut-off (listed or not) has the phone; older rows are ignored ([section 17](#17-spin-cut-off-gift-leads-and-history-upload)). | `lead_key` (workflow lead id) |
 | `existing_added` | An added/imported lead in this source has the phone, including archived ones. | `lead_key`, `created_at` (ISO 8601 UTC), `archived` |
 | `in_file` | Upload/import only: an earlier valid row in the same file or request has the phone. | `duplicate_of_row` |
 
@@ -786,7 +789,7 @@ have errors).
 
 **Across sources (not blocking).** When the phone exists in *other* sources, the row or add
 gets `{"type": "other_source", "sources": [...]}` with the sorted source names (for example
-`["spin", "wedding"]`). Workflow spin leads count as `spin`. These rows are still imported.
+`["spin", "wedding"]`). Workflow spin rows on or after the spin cut-off count as `spin`. These rows are still imported.
 
 | Endpoint | Duplicate in this source |
 |---|---|
@@ -839,7 +842,7 @@ can't see.
 
 | Endpoint | Vendor users get |
 |---|---|
-| `GET /spin-leads` | Their spin leads (workflow and CRM-added). `vendor_id` is ignored. |
+| `GET /spin-leads` | Their spin leads (live workflow rows and CRM-added). `vendor_id` is ignored. |
 | `GET /spin-leads/filter-options`, `/whatsapp-leads/filter-options`, `/wedding-leads/filter-options`, `/wedding-plans/filter-options` | Dropdown values counted over their leads; no vendors (see [Lead list filters](#10-lead-list-filters)). |
 | `GET /whatsapp-leads`, `/wedding-leads`, `/wedding-plans` | Their leads. |
 | `GET /spin-leads/stats`, `/whatsapp-leads/stats`, `/wedding-leads/stats`, `/wedding-plans/stats` | Numbers over their leads. |
@@ -1003,7 +1006,7 @@ Pending, without amounts); Vendor → KOC from its own columns.
 ### Top cities sources (`sources`)
 
 `GET /analytics/overview` and `GET /analytics/vendor-to-koc` take an optional `sources`: a
-comma-separated list of `spin`, `wedding_gifts`, `whatsapp`, `wedding`, `wedding_planner`, `vendor_to_koc`, `dhruva`,
+comma-separated list of `spin`, `whatsapp`, `wedding`, `wedding_planner`, `vendor_to_koc`, `dhruva`,
 `koc_to_dhruva`
 (the same parsing and validation as `GET /reminders/follow-ups`: spaces and capitals are ignored).
 Only the Top cities fields (`top_cities`, `top_cities_sources`, `top_cities_no_city`,
@@ -1011,20 +1014,20 @@ Only the Top cities fields (`top_cities`, `top_cities_sources`, `top_cities_no_c
 
 | Endpoint | Default (no `sources`) |
 |---|---|
-| `/analytics/overview` | `spin,wedding_gifts,wedding,wedding_planner` |
+| `/analytics/overview` | `spin,wedding,wedding_planner` |
 | `/analytics/vendor-to-koc` | `vendor_to_koc` |
 
 - `whatsapp` (country only) and `dhruva` (venue only) are accepted but have no city, so they never
   appear in `top_cities_sources`; `?sources=whatsapp` gives `top_cities: []`, `top_cities_sources: []`.
-- `top_cities_sources` lists the included sources in the order `spin`, `wedding_gifts`, `wedding`, `wedding_planner`,
+- `top_cities_sources` lists the included sources in the order `spin`, `wedding`, `wedding_planner`,
   `vendor_to_koc`. Spin is left out when the workflow database can't be read.
 - Vendor logins: on the overview every source covers only their own leads (`vendor_to_koc`: their
   vendor's leads). On `/analytics/vendor-to-koc` they still get no Top cities fields; `sources` is
   validated but changes nothing for them.
 - Results are cached per viewer, period **and** source selection (`spin,wedding` and `wedding,spin`
   share one entry).
-- **400 errors:** `sources must be a comma-separated list of: spin, wedding_gifts, whatsapp, wedding, wedding_planner, vendor_to_koc, dhruva, koc_to_dhruva`
-  (empty list such as `?sources=,`), or `Unknown source(s): <names>. Allowed: spin, wedding_gifts, whatsapp, wedding, wedding_planner, vendor_to_koc, dhruva, koc_to_dhruva`.
+- **400 errors:** `sources must be a comma-separated list of: spin, whatsapp, wedding, wedding_planner, vendor_to_koc, dhruva, koc_to_dhruva`
+  (empty list such as `?sources=,`), or `Unknown source(s): <names>. Allowed: spin, whatsapp, wedding, wedding_planner, vendor_to_koc, dhruva, koc_to_dhruva`.
 
 ### What each number covers (`/analytics/overview`)
 
@@ -1048,7 +1051,7 @@ Only the Top cities fields (`top_cities`, `top_cities_sources`, `top_cities_no_c
 | `top_countries`, `occasions`, `partners` | Lists | Leads that arrived in the period |
 | `upcoming_by_month` | Upcoming events by month | Leads that arrived in the period, by event month (from this month) |
 | `needs_attention` | Needs attention | `{not_shared, over_budget, total}` among the leads that arrived in the period. `by_source`: `{wedding, wedding_planner}`, each `{not_shared, over_budget, total}` (wedding leads have no budget fit, so their `over_budget` is 0) |
-| `outcomes` | CRM results per source | `{spin, wedding_gifts, whatsapp, wedding, wedding_planner, all}`, each [the six KPIs](#kpis-the-same-six-everywhere) plus `leads` (= `total`, kept for the current screen) over the leads that arrived in the period (all of the viewer's leads for `period=all`). `interested` / `converted`: the Update is "interested" / "converted".  The values come from the CRM details (`crm_lead_meta`) with the same lead keys as the lists, so they equal the list totals for `update_status=interested`, `update_status=not_interested`, `update_status=converted`, `quote=has` and `conversion=has` with the same dates, and each list's stats `kpis`. `spin` and `wedding_gifts` are `null` (and left out of `all`) when the workflow database can't be read |
+| `outcomes` | CRM results per source | `{spin, whatsapp, wedding, wedding_planner, all}`, each [the six KPIs](#kpis-the-same-six-everywhere) plus `leads` (= `total`, kept for the current screen) over the leads that arrived in the period (all of the viewer's leads for `period=all`). `interested` / `converted`: the Update is "interested" / "converted".  The values come from the CRM details (`crm_lead_meta`) with the same lead keys as the lists, so they equal the list totals for `update_status=interested`, `update_status=not_interested`, `update_status=converted`, `quote=has` and `conversion=has` with the same dates, and each list's stats `kpis`. `spin` is `null` (and left out of `all`) when the workflow database can't be read. Spin covers the live workflow rows and every CRM spin lead |
 | Removed | | `average_per_day`, `upcoming_30_days` and `wedding_budget` are no longer returned |
 | `this_week`, `last_week` | (current screen) | **Original meaning**, not the period: the last 7 days vs the 7 before. Kept until the screen uses `new_in_period` / `previous_period`, then removed |
 
@@ -1146,7 +1149,7 @@ exists.
 ]
 ```
 
-- **Places:** `spin` and `wedding_gifts` (workflow and CRM leads, each under its own flow), `whatsapp`, `wedding`, `wedding_planner`,
+- **Places:** `spin` (workflow rows on or after the spin cut-off, and CRM spin leads), `whatsapp`, `wedding`, `wedding_planner`,
   `vendor_to_koc`, `dhruva` and `koc_to_dhruva` (admins and view-only only; see [KOC → Dhruva](#18-koc--dhruva)), always in that order. A lead's own source is never listed (duplicates inside one
   source are the [duplicate check](#4-duplicates)'s job). Empty list: the phone is nowhere else.
 - **Matching:** by E.164 phone (`phone_e164`; Vendor → KOC's 10-digit numbers as `+91…`; Dhruva:
@@ -1172,7 +1175,7 @@ exists.
 
 | Endpoint | Returns |
 |---|---|
-| `GET /spin-leads/filter-options` | `budgets`, `pincodes`, `has_branch` / `has_pincode` / `has_budget` (as before), plus `branches` (`[{id, name, count}]`), `origins`, `updates`, `vendors` |
+| `GET /spin-leads/filter-options` | `budgets`, `pincodes`, `has_branch` / `has_pincode` / `has_budget` (as before), plus `branches` (`[{id, name, count}]`), `origins`, `updates`, `vendors`, `other_services` (each Other wedding service) |
 | `GET /whatsapp-leads/filter-options` | `countries`, `origins`, `updates`, `vendors` |
 | `GET /wedding-leads/filter-options` | `occasions`, `cities`, `shared_with` (including `__none__`), `origins`, `updates`, `vendors` |
 | `GET /wedding-plans/filter-options` | `cities`, `last_steps`, `shared_with` (including `__none__`), `origins`, `updates`, `vendors` |
@@ -1579,7 +1582,7 @@ Google Sheets are not logged.
 | `GET /leads/{source}/{lead_key}/activity` | admin, vendor who can see the lead | Newest first; `page` (default 1), `page_size` (default 25, max 100); items include `actor_name`, `actor_role`, `action`, `field`, `old_value`, `new_value`, `created_at` (ISO UTC) |
 | `GET /vendor-to-koc/leads/{id}/activity` | admin, owning vendor | Same paging and item shape; vendor sees lead fields and KOC fields shown read-only |
 | `GET /dhruva/leads/{id}/activity` | admin, Dhruva | Same paging and item shape; Dhruva activity is read-only |
-| `GET /reminders/follow-ups?days=7&sources=wedding,vendor_to_koc` | admin, vendor | Optional comma-separated `sources` subset (`spin`, `wedding_gifts`, `whatsapp`, `wedding`, `wedding_planner`, `vendor_to_koc`, `dhruva`, `koc_to_dhruva`; vendors never get `koc_to_dhruva`); items, counts and the days window apply only to requested sources. Vendors remain scoped to their own visible leads. Omit `sources` for the existing default. Bad values: 400 `Unknown source(s): <names>. Allowed: …` |
+| `GET /reminders/follow-ups?days=7&sources=wedding,vendor_to_koc` | admin, vendor | Optional comma-separated `sources` subset (`spin`, `whatsapp`, `wedding`, `wedding_planner`, `vendor_to_koc`, `dhruva`, `koc_to_dhruva`; vendors never get `koc_to_dhruva`); items, counts and the days window apply only to requested sources. Vendors remain scoped to their own visible leads. Omit `sources` for the existing default. Bad values: 400 `Unknown source(s): <names>. Allowed: …` |
 | `GET /dhruva/reminders/follow-ups?days=7&sources=dhruva,koc_to_dhruva` | admin, view only, Dhruva | Both Dhruva directions: Dhruva → KOC (`source: "dhruva"`) and KOC → Dhruva (`source: "koc_to_dhruva"`); optional `sources` narrows to one (other values: 400). Dhruva logins do not receive the admin-only status field |
 
 Reminder items contain `source`, `lead_key`, `name`, `phone`, `follow_up_date`, and `days_overdue`
@@ -1647,75 +1650,85 @@ is needed.
 
 ---
 
-## 17. Wedding gifts
+## 17. Spin: cut-off, gift leads and history upload
 
-A KOC → Vendors source, `wedding_gifts` (label **Wedding gifts**), split out of Spin. There is no
-new table: the leads stay in the workflow `spin_lead` table and their CRM data in the usual CRM
-tables, under `source = "wedding_gifts"`.
+### Cut-off (`SPIN_LIVE_FROM`)
 
-- **Which leads:** listed `spin_lead` rows whose `additional_details.otherWeddingServices` contains
-  `Wedding Gifts & Return Gifts`, case-insensitive, also inside a comma-separated combination such as
-  `Photography & Videography, Wedding Gifts & Return Gifts`. The exact phrase is required (a bare
-  `Gift` stays in Spin). Every other listed row is Spin. The two never overlap: lists, stats,
-  exports, filter options, dashboards, reminders, `also_in` and vendor numbers all apply the flow.
-- **Totals:** nothing is added or lost: Spin before = Spin + Wedding gifts after.
-- **CRM-added leads:** stored in `crm_spin_leads` like Spin's and placed by the same rule (a
-  Wedding gifts upload writes the phrase into `otherWeddingServices`), so no marker column exists.
+- The setting `SPIN_LIVE_FROM` (`.env`, an India date `YYYY-MM-DD`, default `2026-11-21`) is when
+  Spin goes live. Spin shows the workflow rows (listed, as before) **created on or after 00:00 IST
+  that day** (`created_at` is UTC: `2026-11-20 18:30:00`), plus **every** CRM spin lead
+  (`crm_spin_leads`: added or uploaded, any date). Restart the app after changing it.
+- Workflow rows created before the cut-off are hidden from Spin everywhere: list, stats, export,
+  filter options, `/analytics/overview`, vendor statistics, reminders, `also_in`, vendor visibility.
+  `GET`/`PUT /leads/spin/{key}/crm`, hot and activity on such a key answer `404`, for every role.
+  Their CRM rows (`crm_lead_meta`, hot, activity) stay in the database, hidden.
+- **KOC → Dhruva is not affected:** it keeps reading every workflow row of any date (section 18).
+- Numbers on 2026-11-21 (read-only): 1,667 listed workflow rows before the cut-off (1,523 + 144 gift
+  leads), 5 after; 13 hidden leads had CRM data (11 `crm_lead_meta`, 2 hot, 6 activity entries).
 
-### Endpoints
+### Gift leads (back in Spin)
 
-The same features and parameters as Spin (see [Lead list filters](#10-lead-list-filters): common
-filters plus `branch`, `pincode`, `budget`):
+The separate `wedding_gifts` source is gone (`/wedding-gifts-leads`, `/crm-leads/wedding_gifts/*`,
+`/leads/wedding_gifts/*` and `sources=wedding_gifts` answer 404 / 422 / 400). A **gift lead** is a
+spin lead whose Other wedding services (`otherWeddingServices`) contains
+`Wedding Gifts & Return Gifts` (case-insensitive, also inside a comma-separated combination). It is
+listed, counted and exported as Spin; only its automatic vendor differs:
 
-| Need | Endpoint |
-|---|---|
-| List, stats, filter options | `GET /api/v1/wedding-gifts-leads`, `/stats`, `/filter-options` |
-| Export (exactly the list) | `GET /api/v1/crm-leads/wedding_gifts/export?format=xlsx\|csv` |
-| Fields, template, upload | `GET /crm-leads/wedding_gifts/fields`, `/template`; `POST /crm-leads/wedding_gifts/import/preview`, `/import` |
-| CRM-added lead details | `GET /crm-leads/wedding_gifts/{lead_key}` (`PATCH`, archive and unarchive as for Spin) |
-| CRM details, hot, activity | `GET`/`PUT /leads/wedding_gifts/{lead_key}/crm`, `POST`/`DELETE …/hot`, `GET …/activity` |
-| Follow-ups | `follow_up_date` in `PUT …/crm`; `GET /reminders/follow-ups?sources=wedding_gifts` |
+1. a manual choice wins (`vendor_source: "manual"`);
+2. "Unassigned" (uploaded unassigned, `auto_assign = false`) stays unassigned;
+3. otherwise the **active vendor named `WEDDING_GIFTS_VENDOR_NAME`** (default `Kraftyz`, exact name,
+   any case): `vendor_source: "source_default"`, chip "Kraftyz · auto". No such vendor (or
+   inactive): unassigned. Branch and area rules never apply to gift leads.
 
-Like Spin, there is no single add (`POST /crm-leads/wedding_gifts` → 405): bulk upload only.
+Every other spin lead follows the branch and area rules as before. Kraftyz's logins see and update
+their gift leads. Migration: `migrations/2026-11-21_wedding_gifts_back_to_spin.sql` moves any CRM
+row still under `wedding_gifts` back to `spin` (preview, conflict checks, rollback); on 2026-11-21
+there were none (the old migration was never applied, and it was deleted).
 
-### Assignment: Kraftyz
+### History upload (`POST /crm-leads/spin/import`)
 
-- Every Wedding gifts lead goes automatically to the **active vendor named Kraftyz** (exact name,
-  matched case-insensitively). The name is the `WEDDING_GIFTS_VENDOR_NAME` setting (`.env`, default
-  `Kraftyz`), so it can change without a code edit (restart the app after changing it):
-  `vendor_source: "source_default"`, chip "Kraftyz · auto". Branch, area and
-  sheet rules don't apply to this source (`suggested_vendor` is always `null`).
-- No such vendor, or it's inactive: the leads are unassigned. As soon as an active Kraftyz exists,
-  they go to it without any other step (nothing is stored).
-- Admins can still assign by hand (`vendor_id` in `PUT …/crm`); `vendor_id: null` returns the lead
-  to automatic (Kraftyz).
-- Uploads: "Automatic", "Kraftyz · auto" **or an empty Assigned to** → Kraftyz (unlike other
-  sources, where empty means unassigned); "Unassigned" → unassigned; a vendor name → that vendor.
-- Vendor logins: Kraftyz's users see and update their Wedding gifts leads (Update, amounts, notes,
-  follow-up, hot); other vendors don't see them (404 on the lead endpoints).
+- **Duplicate check:** workflow rows created before the cut-off are ignored, so the history can be
+  uploaded. Rows on or after it (listed or not) are still `existing_workflow` duplicates, and every
+  CRM spin lead (archived too) is still `existing_added`. Other sources' uploads no longer report
+  `other_source: spin` for hidden rows.
+- **Assigned to:** a vendor name → that vendor (manual); `Automatic` → Kraftyz for gift leads,
+  branch / area rules for the rest; empty or `Unassigned` → unassigned.
+- **Columns:** the template and the export gain **Other wedding services** and **Quantity
+  required** (after Budget); both are stored with the lead (`additional_details`), so an exported
+  file uploads back. Budget is the estimated budget per card (`Estimated budget per card` is
+  accepted as its header). `Created` keeps the history date (empty = now).
+- Uploaded leads are never in KOC → Dhruva.
 
-### Duplicates and also_in
+### Other wedding services in the list
 
-- **Upload duplicate check:** Spin and Wedding gifts are one family. A phone that exists in **any**
-  `spin_lead` row (either flow, listed or not) or in a CRM lead of either flow is a duplicate in both
-  (`existing_workflow` / `existing_added`, with the matching `lead_key`).
-- **also_in** follows the flow: a Spin lead whose phone belongs to a Wedding gifts lead shows
-  `{"source": "wedding_gifts", …}`, and the other way round.
+- `GET /spin-leads` items already carry `additional_details.otherWeddingServices` (the column).
+- Filter `other_services` (text, contains, any case; max 200), on `GET /spin-leads`, `/stats` and
+  `/crm-leads/spin/export` alike, e.g. `?other_services=Wedding%20Gifts%20%26%20Return%20Gifts`.
+- `GET /spin-leads/filter-options` adds `other_services`: `[{value, count}]`, each individual
+  service (values split on commas) with its number of leads, most common first.
 
-### Dashboards
+### Re-key the hidden leads' CRM data (after the history upload)
 
-`/analytics/overview` counts `wedding_gifts` as its own source everywhere: `totals`,
-`new_in_period`, `previous_period`, `change_pct`, `kpis`, `outcomes`, `source_mix`, `trend`,
-`upcoming_by_month`, occasions, and Top cities (in the default `sources`). `/vendors/stats` has
-`by_source.wedding_gifts`. The shared `sources` parser (Top cities, reminders) accepts `wedding_gifts`.
+`scripts/rekey_spin_history.py` matches each hidden workflow lead that has CRM data
+(`crm_lead_meta`, `crm_hot_leads`, `crm_lead_activity`, plus `crm_notifications` links) to its
+uploaded copy in `crm_spin_leads` by phone (last 10 digits) and moves the rows to the new `crm-<id>`
+key.
 
-### Migration
+```
+venv\Scripts\python scripts\rekey_spin_history.py                                  # preview (read-only)
+venv\Scripts\python scripts\rekey_spin_history.py --apply --undo-file rekey_undo.sql
+```
 
-`migrations/2026-11-20_wedding_gifts_source.sql` moves existing CRM rows of these leads
-(`crm_lead_meta`, `crm_hot_leads`, `crm_lead_activity`, `crm_notifications`) from `spin` to
-`wedding_gifts`, with a preview, conflict checks and a rollback. Manual assignments are kept. The
-workflow keys are regenerated right before applying with the read-only
-`python scripts/wedding_gifts_keys.py --update migrations/2026-11-20_wedding_gifts_source.sql`.
+- **Preview (default):** read-only. Lists each match (old key → new key, phone's last 4 digits) with
+  what would move and merge, and the leads skipped: no uploaded copy, 2+ copies with the phone, a
+  copy claimed by 2+ hidden leads, not in the workflow database. Live leads are never touched.
+- **Merge:** when the upload already created CRM details for the new key, a field the upload filled
+  is never overwritten ("keep upload … (old …)"); an empty one is filled from the old row
+  ("merge …"). Assigned to counts as filled when the upload named a vendor or said Unassigned.
+  A hot flag moves unless the new lead is already hot; activity and notifications always move.
+- **Apply:** one MySQL transaction; it re-plans, checks nothing changed since, moves the rows,
+  writes the undo SQL (`--undo-file`, required, must not exist) and commits. Any error or conflict
+  rolls everything back. To undo later, run the undo file in MySQL.
 
 ---
 
@@ -1726,14 +1739,15 @@ KOC shares with Dhruva by rule. Dhruva works these leads (the receiver edits), a
 Dhruva → KOC leads.
 
 - **Rule:** every workflow `spin_lead` row (listed as Spin or not: `otherWeddingServices` doesn't
-  matter) and every CRM-added spin lead where the first number of `estimatedBudgetPerCard` is
+  matter; **any date**: the spin cut-off doesn't apply) where the first number of `estimatedBudgetPerCard` is
   **≥ 70** (`70-100`, `70_100`, `100-200`, `500+`, `500_PLUS`, `400` …; `50_100` and `UNDER_50`
   count as 50), **or** `quantityRequired` is **≥ 1000** (also when the budget is empty or below 70).
   `reason` is `budget` ("Budget ≥ ₹70", wins when both match) or `quantity` ("Quantity ≥ 1000").
-- **In both places:** the leads stay in Spin / Wedding gifts. This section keeps its own CRM
-  details (`crm_lead_meta` with `source = "koc_to_dhruva"`), hot flags and activity, so a Dhruva
-  Update or quote never changes the Spin / Wedding gifts record, and the other way round. Lead keys
-  are the same (`spin_lead` id, or `crm-<id>`).
+- **CRM spin leads are never included** (added or uploaded, whatever their budget or quantity).
+- **In both places:** leads on or after the spin cut-off are in Spin too. This section keeps its own
+  CRM details (`crm_lead_meta` with `source = "koc_to_dhruva"`), hot flags and activity, so a Dhruva
+  Update or quote never changes the Spin record, and the other way round. Lead keys are the same
+  (`spin_lead` id).
 - **Never assigned:** no vendor, no automatic rules (`crm.vendor` is always `null`).
 - **No add or upload:** rows come only from the rule. No migration was needed.
 
@@ -1797,6 +1811,7 @@ period rules (`date_from` / `date_to`, `period=all`), **all time by default**; r
 - Follow-ups set here appear in `GET /dhruva/reminders/follow-ups` (both Dhruva directions, each item
   with its `source`; `sources=koc_to_dhruva` or `sources=dhruva` narrows it) and, for admins and
   view-only logins, in `GET /reminders/follow-ups` (`sources` accepts `koc_to_dhruva`).
-- `also_in`: a Spin / Wedding gifts lead in this section shows `{"source": "koc_to_dhruva", …}` to
-  admins and view-only logins (vendors never). A KOC → Dhruva lead shows the Spin / Wedding gifts list
-  it is listed in; Dhruva logins see no other section here (empty `also_in`).
+- `also_in`: a lead whose phone belongs to a KOC → Dhruva lead (any date) shows
+  `{"source": "koc_to_dhruva", …}` to admins and view-only logins (vendors never). A KOC → Dhruva
+  lead shows `spin` only for leads in the Spin list (live workflow rows, CRM spin leads); Dhruva
+  logins see no other section here (empty `also_in`).

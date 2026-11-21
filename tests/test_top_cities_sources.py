@@ -81,9 +81,9 @@ class TopCitiesSourcesTests(VendorToKocTestCase):
     # ── /analytics/overview ──
     def test_overview_default_is_spin_wedding_planner(self):
         o = self.get(OVERVIEW)
-        self.assertEqual(o["top_cities_sources"], ["spin", "wedding_gifts", "wedding", "wedding_planner"])
+        self.assertEqual(o["top_cities_sources"], ["spin", "wedding", "wedding_planner"])
         self.assertEqual(self.cities(o), {"Chennai": 2, "Mysuru": 1, "Udaipur": 1})
-        self.assertEqual(set(o["top_cities_no_city_by_source"]), {"spin", "wedding_gifts", "wedding", "wedding_planner"})
+        self.assertEqual(set(o["top_cities_no_city_by_source"]), {"spin", "wedding", "wedding_planner"})
 
     def test_overview_custom_subset(self):
         o = self.get(OVERVIEW, sources="wedding,vendor_to_koc")
@@ -109,7 +109,7 @@ class TopCitiesSourcesTests(VendorToKocTestCase):
             for headers in (self.admin, self.phodeo):
                 bad = self.client.get(url, headers=headers, params={"sources": "wedding,instagram"})
                 self.assertEqual(bad.status_code, 400, bad.text)
-                self.assertIn("Unknown source(s): instagram. Allowed: spin, wedding_gifts, whatsapp", bad.json()["detail"])
+                self.assertIn("Unknown source(s): instagram. Allowed: spin, whatsapp", bad.json()["detail"])
                 empty = self.client.get(url, headers=headers, params={"sources": " , "})
                 self.assertEqual(empty.status_code, 400, empty.text)
 
@@ -179,7 +179,7 @@ class ParseSourcesTests(unittest.TestCase):
         with self.assertRaises(HTTPException) as unknown:
             lead_sources.parse_sources("spin,foo,bar")
         self.assertEqual(unknown.exception.detail,
-                         "Unknown source(s): bar, foo. Allowed: spin, wedding_gifts, whatsapp, wedding, wedding_planner, "
+                         "Unknown source(s): bar, foo. Allowed: spin, whatsapp, wedding, wedding_planner, "
                          "vendor_to_koc, dhruva, koc_to_dhruva")
 
 

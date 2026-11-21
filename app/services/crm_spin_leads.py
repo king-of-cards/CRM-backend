@@ -9,10 +9,10 @@ listed before the workflow leads:
 Paging runs over that combined list, so every lead appears exactly once across the pages
 (and in an export that walks all pages), and "total" counts both.
 
-Flows: a CRM lead whose additional_details.otherWeddingServices names "Wedding Gifts & Return
-Gifts" belongs to wedding_gifts, every other one to spin (the same rule as the workflow rows), so
-no marker column is needed. koc_to_dhruva (KOC -> Dhruva) is a rule on top: a CRM lead can be in
-it AND in spin / wedding_gifts (see spin_leads.koc_reason).
+Every CRM spin lead is listed in spin, whatever its date (the spin cut-off, SPIN_LIVE_FROM, only
+hides workflow rows), so the history can be uploaded. A lead whose otherWeddingServices names
+"Wedding Gifts & Return Gifts" is a gift lead: same list, other automatic vendor (lead_crm.lead_rules).
+KOC -> Dhruva (koc_to_dhruva) reads workflow rows only: CRM spin leads are never in it.
 """
 import json
 import re
@@ -66,11 +66,11 @@ def _named_value(lead: CrmSpinLead, wanted_names: tuple[str, ...]) -> str | None
     return None
 
 
-def flow_of(lead: CrmSpinLead) -> str:
-    """spin or wedding_gifts (see the module docstring)."""
-    from app.api.v1.endpoints.spin_leads import flow_of_details
+def is_gift(lead: CrmSpinLead) -> bool:
+    """A gift lead (see the module docstring)."""
+    from app.api.v1.endpoints.spin_leads import is_gift_details
 
-    return flow_of_details(_details(lead))
+    return is_gift_details(_details(lead))
 
 
 def koc_reason(lead: CrmSpinLead) -> str | None:
@@ -81,9 +81,8 @@ def koc_reason(lead: CrmSpinLead) -> str | None:
 
 
 def _in_flow(lead: CrmSpinLead, flow: str | None) -> bool:
-    if flow == "koc_to_dhruva":
-        return koc_reason(lead) is not None
-    return flow is None or flow_of(lead) == flow
+    """spin (or None): every CRM spin lead; koc_to_dhruva: none (workflow rows only)."""
+    return flow != "koc_to_dhruva"
 
 
 def _like(term: str, text: str) -> bool:
@@ -112,6 +111,8 @@ def _matches(lead: CrmSpinLead, search: str, branch: str | None, flt: dict) -> b
         if created is None or not (flt["created_from"] <= created < flt["created_to"]):
             return False
     if flt.get("origins") and lead.origin not in flt["origins"]:
+        return False
+    if flt.get("other_services") and not _like(flt["other_services"], _text(_details(lead).get("otherWeddingServices"))):
         return False
     if flt.get("occasion") and not _like(flt["occasion"], _text(_details(lead).get("occasionType"))):
         return False
@@ -169,7 +170,8 @@ def matching(
     flt: dict | None,
     flow: str | None = "spin",
 ) -> list[CrmSpinLead]:
-    """CRM leads of the flow that pass the list's filters, in the list's sort order."""
+    """CRM leads of the view that pass the list's filters, in the list's sort order (spin: all;
+    koc_to_dhruva: none)."""
     term = (search or "").strip()
     leads = [
         lead
@@ -187,8 +189,8 @@ def matching(
 
 
 def active(session: Session, flow: str | None = "spin") -> list[CrmSpinLead]:
-    """CRM leads of the flow that count (archived ones are hidden from lists, counts and exports).
-    flow None: both flows."""
+    """CRM spin leads that count (archived ones are hidden from lists, counts and exports).
+    flow koc_to_dhruva: none."""
     return [lead for lead in session.exec(select(CrmSpinLead).where(CrmSpinLead.is_deleted == False))  # noqa: E712
             if _in_flow(lead, flow)]
 

@@ -18,10 +18,10 @@ Who a lead is assigned to, in order:
   3. branch    – spin leads: the vendor set on the lead's branch (store)
   4. suggested – the vendors' area rules (pincode / city), see Vendor
 
-Wedding gifts leads skip 2-4: after a manual choice they go to the source's default vendor
-(source_default_vendor_name: the WEDDING_GIFTS_VENDOR_NAME setting, default "Kraftyz", matched by
-name, case-insensitive, only while active);
-"source_default". No such vendor: unassigned until one is created, then automatic.
+Spin gift leads (otherWeddingServices names "Wedding Gifts & Return Gifts", spin_leads.is_gift)
+skip 2-4: after a manual choice (or "Unassigned") they go to the gifts vendor (gift_vendor_name:
+the WEDDING_GIFTS_VENDOR_NAME setting, default "Kraftyz", matched by name, case-insensitive, only
+while active); "source_default". No such vendor: unassigned until one is created, then automatic.
 """
 import re
 from collections.abc import Callable, Iterable
@@ -33,21 +33,18 @@ from sqlmodel import Session, select
 from app.models.lead_meta import LeadMeta
 from app.models.vendor import Vendor
 
-SOURCES = ("spin", "wedding_gifts", "whatsapp", "wedding", "wedding_planner")
-# Sources whose leads all go to one vendor (by name, from settings); branch / area / sheet rules don't apply
-SOURCE_DEFAULT_VENDOR_SETTINGS = {"wedding_gifts": "WEDDING_GIFTS_VENDOR_NAME"}
+SOURCES = ("spin", "whatsapp", "wedding", "wedding_planner")
 # Sources whose leads are never assigned to a vendor (no rules, no default vendor)
 UNASSIGNED_SOURCES = ("koc_to_dhruva",)
+# Sources whose gift leads go to the gifts vendor
+GIFT_SOURCES = ("spin",)
 
 
-def source_default_vendor_name(source: str) -> str | None:
-    """The vendor name a source's leads all go to (read from settings on every call), or None."""
+def gift_vendor_name() -> str | None:
+    """The vendor spin gift leads go to (WEDDING_GIFTS_VENDOR_NAME, read on every call), or None."""
     from app.core.config import settings
 
-    setting = SOURCE_DEFAULT_VENDOR_SETTINGS.get(source)
-    if setting is None:
-        return None
-    return (getattr(settings, setting) or "").strip() or None
+    return (settings.WEDDING_GIFTS_VENDOR_NAME or "").strip() or None
 
 # The three partners and the areas they cover. Created once if the vendors table is empty;
 # after that, edit them on the Vendors page.
@@ -191,8 +188,8 @@ def meta_out(
 
 
 def assigned_label(crm: dict | None) -> str:
-    """The "Assigned to" chip text on the list screens: "Phodeo", "Phodeo · auto" (area rules, or a
-    source's default vendor such as Kraftyz), or "Unassigned"."""
+    """The "Assigned to" chip text on the list screens: "Phodeo", "Phodeo · auto" (area rules, or the
+    gifts vendor such as Kraftyz), or "Unassigned"."""
     vendor = (crm or {}).get("vendor")
     if not vendor:
         return "Unassigned"
@@ -200,14 +197,15 @@ def assigned_label(crm: dict | None) -> str:
     return f"{vendor['name']} · auto" if auto else vendor["name"]
 
 
-def source_rules(source: str, vendors: list[Vendor]) -> tuple[bool, Vendor | None]:
-    """(whether sheet / branch / area rules apply, the source's default vendor if any and active)."""
+def lead_rules(source: str, vendors: list[Vendor], gift: bool = False) -> tuple[bool, Vendor | None]:
+    """(whether sheet / branch / area rules apply, the lead's default vendor if any and active).
+    gift: a spin gift lead (spin_leads.is_gift) -> the gifts vendor, no other rules."""
     if source in UNASSIGNED_SOURCES:
         return False, None
-    name = source_default_vendor_name(source)
-    if name is None:
-        return True, None
-    return False, vendor_by_name(vendors, name)
+    if gift and source in GIFT_SOURCES:
+        name = gift_vendor_name()
+        return False, (vendor_by_name(vendors, name) if name else None)
+    return True, None
 
 
 def attach(
@@ -219,13 +217,16 @@ def attach(
     pincode: Callable[[dict], str | None] = lambda _: None,
     sheet_vendor: Callable[[dict], str | None] = lambda _: None,
     branch_vendor: Callable[[dict], int | None] = lambda _: None,
+    gift: Callable[[dict], bool] | None = None,
 ) -> list[dict]:
-    """Return copies of `items`, each with a "crm" object. One query for the whole page."""
+    """Return copies of `items`, each with a "crm" object. One query for the whole page.
+    gift: which items are spin gift leads (they go to the gifts vendor, see lead_rules)."""
     from app.models.hot_lead import CrmHotLead
 
     vendors = active_vendors(session)
     by_id = {v.id: v for v in vendors}
-    rules, default = source_rules(source, vendors)
+    plain_rules = lead_rules(source, vendors)
+    gift_rules = lead_rules(source, vendors, gift=True)
     keys = [str(key(i)) for i in items if key(i) is not None]
     metas = {}
     if keys:
@@ -247,6 +248,7 @@ def attach(
             copy["is_hot"] = False
         else:
             k = str(k)
+            rules, default = gift_rules if gift is not None and gift(item) else plain_rules
             crm = meta_out(
                 metas.get(k),
                 k,
@@ -269,16 +271,18 @@ def attach(
 
 
 def effective_vendor_counts(session: Session, source: str, rows: Iterable[tuple]) -> list[dict]:
-    """rows: (lead_key, location, pincode, sheet_vendor[, branch_vendor_id]). Returns one dict
-    per lead with the effective vendor and the lead's CRM status, for vendor statistics."""
+    """rows: (lead_key, location, pincode, sheet_vendor[, branch_vendor_id[, is_gift]]). Returns one
+    dict per lead with the effective vendor and the lead's CRM status, for vendor statistics."""
     vendors = active_vendors(session)
     by_id = {v.id: v for v in vendors}
-    rules, default = source_rules(source, vendors)
+    plain_rules = lead_rules(source, vendors)
+    gift_rules = lead_rules(source, vendors, gift=True)
     metas = {m.lead_key: m for m in session.exec(select(LeadMeta).where(LeadMeta.source == source))}
     result = []
     for row in rows:
         lead_key, loc, pin, shared = row[:4]
         branch_vendor_id = row[4] if len(row) > 4 else None
+        rules, default = gift_rules if len(row) > 5 and row[5] else plain_rules
         meta = metas.get(str(lead_key))
         info = meta_out(
             meta,
