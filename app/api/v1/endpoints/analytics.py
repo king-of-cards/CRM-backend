@@ -548,13 +548,39 @@ def analytics_overview(viewer: LeadViewer, db: DbSession, period: DashboardPerio
         response_cache.clear("analytics")
     bind = db.get_bind()
     if viewer.sees_all:
-        return response_cache.get(_cache_key("admin", period, city_sources),
-                                  _builder(bind, None, period, None, city_sources),
-                                  fresh=FRESH_SECONDS, stale=STALE_SECONDS)
+        out = response_cache.get(_cache_key("admin", period, city_sources),
+                                 _builder(bind, None, period, None, city_sources),
+                                 fresh=FRESH_SECONDS, stale=STALE_SECONDS)
+        return {**out, "sources": list(SOURCES)}
+    # Vendor logins: only the KOC -> Vendors sources where they have a lead (access.vendor_sources)
+    mine = access.vendor_sources(db, viewer)
+    city_sources = tuple(s for s in city_sources if s in mine or s not in SOURCES)
     keys = {source: access.visible_keys(db, viewer, source) for source in SOURCES}
-    return response_cache.get(_cache_key(("vendor", viewer.vendor_id), period, city_sources),
-                              _builder(bind, keys, period, viewer.vendor_id, city_sources),
-                              fresh=FRESH_SECONDS, stale=FRESH_SECONDS)
+    out = response_cache.get(_cache_key(("vendor", viewer.vendor_id), period, city_sources),
+                             _builder(bind, keys, period, viewer.vendor_id, city_sources),
+                             fresh=FRESH_SECONDS, stale=FRESH_SECONDS)
+    return _only_sources(out, mine)
+
+
+PER_SOURCE_FIELDS = ("totals", "new_in_period", "previous_period", "change_pct", "this_week", "last_week",
+                     "outcomes")
+
+
+def _only_sources(out: dict, keep: list[str]) -> dict:
+    """The overview with only these sources (vendor logins); "all" is unchanged (the left-out
+    sources have no leads of the vendor)."""
+    drop = {s for s in SOURCES if s not in keep}
+    out = dict(out)
+    for name in PER_SOURCE_FIELDS:
+        if isinstance(out.get(name), dict):
+            out[name] = {k: v for k, v in out[name].items() if k not in drop}
+    out["source_mix"] = [m for m in out["source_mix"] if m["source"] not in drop]
+    out["trend"] = [{k: v for k, v in p.items() if k not in drop} for p in out["trend"]]
+    out["upcoming_by_month"] = [{k: v for k, v in p.items() if k not in drop} for p in out["upcoming_by_month"]]
+    out["top_cities_no_city_by_source"] = {k: v for k, v in out.get("top_cities_no_city_by_source", {}).items()
+                                           if k not in drop}
+    out["sources"] = list(keep)
+    return out
 
 
 # ── Vendor -> KOC dashboard ────────────────────────────────────────────
@@ -562,7 +588,8 @@ def _vtk_build(db: Session, vendor_id: int | None, period, admin: bool,
                city_sources: tuple[str, ...] = VTK_CITY_DEFAULTS) -> dict:
     """GET /analytics/vendor-to-koc. Arrival date = created_at (IST day). vendor_id: a vendor
     login's own leads only (no previous_received, per_vendor, top_cities, by_source, latest);
-    admin: every vendor and every number."""
+    admin: every number; per_vendor lists every active vendor (zeros when no leads) plus inactive
+    vendors with leads in the period (is_active false), and dhruva sums up Dhruva -> KOC leads."""
     from app.crud.vendor_to_koc import serialize
     from app.models.vendor import Vendor
     from app.models.vendor_to_koc import CLOSED_STATUSES, LeadSource, UpdateStatus, VendorToKocLead
@@ -634,10 +661,18 @@ def _vtk_build(db: Session, vendor_id: int | None, period, admin: bool,
     converted = status_of.count(UpdateStatus.CONVERTED.value)
     engaged_statuses = {UpdateStatus.INTERESTED.value, UpdateStatus.WILL_CALL_BACK.value, UpdateStatus.CONVERTED.value}
 
+    def blank(vendor_id: int, name: str, active: bool) -> dict:
+        return {"vendor_id": vendor_id, "vendor_name": name, "is_active": active, "leads": 0, "interested": 0,
+                "converted": 0, "pending": 0, "_days": []}
+
+    # Admins: every active vendor (zeros when no leads), plus inactive ones with leads in the period
     per_vendor: dict[int, dict] = {}
+    if admin:
+        for vendor in db.exec(select(Vendor).where(Vendor.is_active == True)):  # noqa: E712
+            per_vendor[vendor.id] = blank(vendor.id, vendor.name, True)
+    inactive = set(db.exec(select(Vendor.id).where(Vendor.is_active == False)))  # noqa: E712
     for lead, name in current:
-        v = per_vendor.setdefault(lead.vendor_id, {"vendor_id": lead.vendor_id, "vendor_name": name, "leads": 0,
-                                                   "interested": 0, "converted": 0, "pending": 0, "_days": []})
+        v = per_vendor.setdefault(lead.vendor_id, blank(lead.vendor_id, name, lead.vendor_id not in inactive))
         v["leads"] += 1
         v["interested"] += lead.update_status == UpdateStatus.INTERESTED.value
         v["converted"] += lead.update_status == UpdateStatus.CONVERTED.value
@@ -678,9 +713,20 @@ def _vtk_build(db: Session, vendor_id: int | None, period, admin: bool,
     if not admin:
         return out
     city_data = _all_source_city_data(db, period, city_sources, all_time=all_time)
+    # Dhruva as a partner: Dhruva -> KOC leads received in the period (archived ones left out)
+    from app.models.dhruva import DhruvaLead
+
+    dhruva = [lead for lead in db.exec(select(DhruvaLead).where(DhruvaLead.is_deleted == False))  # noqa: E712
+              if in_period(periods.ist_date(lead.created_at))]
     out.update({
         "previous_received": before,
         "per_vendor": vendors_out,
+        "dhruva": {
+            "received": len(dhruva),
+            "interested": sum(1 for lead in dhruva if lead.update_status == UpdateStatus.INTERESTED.value),
+            "converted": sum(1 for lead in dhruva if lead.update_status == UpdateStatus.CONVERTED.value),
+            "pending": sum(1 for lead in dhruva if lead.update_status is None),
+        },
         **city_data,
         "by_source": {s.value: sum(1 for lead, _ in current if lead.source == s.value) for s in LeadSource},
         "latest": [serialize(lead, name, True, updater_of[lead.id]) for lead, name in latest],

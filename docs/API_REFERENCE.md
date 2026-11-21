@@ -72,8 +72,9 @@ change which field).
 sheet's "leads shared" column; the vendor of the lead's branch (spin); the vendors' area rules
 (pincode, city, country). It is worked out each time a list loads and shown as the "Assigned to"
 chip: `Phodeo` (manual, sheet or branch), `Phodeo · auto` (area rules) or `Unassigned`. A lead
-uploaded with an empty "Assigned to" gets no automatic assignment (`crm_lead_meta.auto_assign = 0`)
-and stays unassigned until an admin picks a vendor.
+uploaded with an empty "Assigned to", or set to Unassigned by an admin (`assigned_to: "unassigned"`
+in `PUT …/crm`), gets no automatic assignment (`crm_lead_meta.auto_assign = 0`): no sheet, branch,
+area or gift rule assigns it, until an admin picks a vendor or sets it back to automatic.
 
 **Phone numbers.** A phone is required in every source. Each number is converted to one
 E.164 form (`+919845012345`) for duplicate checks across all sources:
@@ -819,6 +820,7 @@ can't see.
 |---|---|---|---|
 | `update_status` (`converted`, `not_converted`, `purchased_elsewhere`, `purchased_with_us`, `will_call_back`, `interested`, `not_interested`; `null` = Pending), `quoted_amount`, `quoted_date`, `conversion_amount` (rupees, 0–100,000,000) | ✔ | ✔ | **404** |
 | `vendor_id` (a vendor = manual; `null` = automatic) | ✔ | **403** `Only an admin can assign leads.` | **404** |
+| `assigned_to`: `"unassigned"` (manual Unassigned: `vendor_id` cleared, `auto_assign = false`, no automatic rule ever assigns it, the vendor stops seeing it) or `"automatic"` (back to the automatic rules) | ✔ | **403** | **404** |
 | `notes` | ✔ | ✔ | **404** |
 | `follow_up_date` (`YYYY-MM-DD` or `null`) | ✔ | ✔ | **404** |
 
@@ -829,6 +831,10 @@ can't see.
   `interest`, `converted` and `converted_at` are gone.
 - Setting `vendor_id` to `null` also switches a lead uploaded as unassigned to automatic
   assignment.
+- `vendor_id` and `assigned_to` together, or another `assigned_to` value, answer **422**. An
+  `assigned_to` change is logged in the activity as `assigned`, field `assigned_to`, old and new
+  values such as `Phodeo` → `Unassigned` → `Automatic`. The answer has `vendor: null` and
+  `auto_assign: false` while the lead is Unassigned.
 - A `crm-` key with no matching added/imported lead in `{source}` answers `404` (all sources).
   Workflow ids and sheet keys need no lookup.
 - The CRM details of every lead are stored in
@@ -851,7 +857,7 @@ can't see.
 | `GET /crm-leads/{source}/export` | Their list. |
 | `GET /vendors` | Only their own vendor. |
 | `GET /branches` | `{id, name, code, city, is_active}` per branch: no vendors, no lead counts. |
-| `GET /auth/me` | Adds `"vendor": {"id": 2, "name": "Phodeo"}` (`null` for admins). |
+| `GET /auth/me` | Adds `"vendor": {"id": 2, "name": "Phodeo"}` (`null` for admins) and `"sources"` (see below). |
 
 **Admin only (`403` for vendor users):** every other `/crm-leads` endpoint (fields, template,
 preview, import, add, get, edit, archive, unarchive), `POST`/`PATCH /vendors`,
@@ -1030,6 +1036,12 @@ Only the Top cities fields (`top_cities`, `top_cities_sources`, `top_cities_no_c
   (empty list such as `?sources=,`), or `Unknown source(s): <names>. Allowed: spin, whatsapp, wedding, wedding_planner, vendor_to_koc, dhruva, koc_to_dhruva`.
 
 ### What each number covers (`/analytics/overview`)
+
+**Sources:** the answer has `sources` (the same list as `GET /auth/me`). For vendor logins only those
+sources appear in `totals`, `new_in_period`, `previous_period`, `change_pct`, `this_week`,
+`last_week`, `outcomes`, `source_mix`, `trend`, `upcoming_by_month` and
+`top_cities_no_city_by_source`; Top cities uses only those of the requested `sources` (others are
+left out quietly, `vendor_to_koc` stays). `all` is unchanged. Admins and view-only: all four.
 
 **Every number follows the period:** it counts only leads that arrived in it. The only exception is
 `this_week` / `last_week`, kept with their original meaning for the current screen.
@@ -1309,7 +1321,8 @@ cached per viewer, period and source selection.
 | `previous_received` | admin | Leads in the previous period |
 | `pending`, `converted`, `converted_pct`, `purchased_with_us` | all | Over the period's leads (`converted_pct` of `received`, 1 decimal) |
 | `by_status` | all | `pending` plus every status |
-| `per_vendor` | admin | `[{vendor_id, vendor_name, leads, interested, converted, pending, converted_pct, average_days_to_update}]`. The last field is the average days from `created_at` to `status_updated_at`, over leads with a status |
+| `per_vendor` | admin | `[{vendor_id, vendor_name, is_active, leads, interested, converted, pending, converted_pct, average_days_to_update}]` for **every active vendor** (zeros, and `null` rates, when it has no leads in the period) plus inactive vendors with leads in the period (`is_active: false`); most leads first, then by name. `average_days_to_update` is the average days from `created_at` to `status_updated_at`, over leads with a status |
+| `dhruva` | admin | Dhruva as a partner: `{received, interested, converted, pending}` over the Dhruva → KOC leads received in the period (archived left out; `pending` = no Update) |
 | `funnel` | all | `{received, updated (has a status), engaged (interested, will call back or converted), converted}`; `purchased_with_us` is separate |
 | `top_cities`, `top_cities_sources`, `top_cities_no_city`, `top_cities_no_city_by_source`, `by_source` | admin | Top cities covers the period's leads of the selected `sources` (default Vendor → KOC only, every vendor); `top_cities_sources` lists the sources included |
 | `latest` | admin | The 6 newest leads of the period (lead objects) |
@@ -1319,7 +1332,7 @@ cached per viewer, period and source selection.
 
 Vendor logins get every "all" field above, **over their own leads only** (follow-ups too); their
 lead objects in `next_follow_ups` have no `status_updated_by`. `previous_received`, `per_vendor`,
-`top_cities`, `by_source` and `latest` are left out for them.
+`dhruva`, `top_cities`, `by_source` and `latest` are left out for them.
 
 ---
 
@@ -1343,7 +1356,11 @@ lead objects in `next_follow_ups` have no `status_updated_by`. `previous_receive
 - **`UserRead`** (`POST` / `GET /api/v1/users`, `GET /api/v1/users/{id}`) includes `vendor_id` and
   `vendor_name` (`null` for admins and unlinked logins). `GET /api/v1/users` orders by id and takes
   `skip` (≥ 0) and `limit` (1–200).
-- **`GET /api/v1/auth/me`** returns `vendor_id` / `vendor_name` as well as `vendor: {id, name}`.
+- **`GET /api/v1/auth/me`** returns `vendor_id` / `vendor_name` as well as `vendor: {id, name}`, and
+  `sources`: the KOC → Vendors sources to show, in the order `spin`, `whatsapp`, `wedding`,
+  `wedding_planner`. Admins and view-only logins: all four. Vendor logins: those where the vendor has
+  at least one visible lead (all time, the same assignment as the lists; cached up to 30 seconds and
+  refreshed after every assignment change). Dhruva logins and vendor logins without a vendor: `[]`.
 - **`PATCH /api/v1/users/{id}`** (admin) blocks or unblocks a login: `{"is_active": false|true}`
   (the only field; anything else, a missing or `null` value answers 422). Returns the `UserRead`.
   - Blocking revokes all the login's sessions (refresh tokens) at once; its access tokens stop

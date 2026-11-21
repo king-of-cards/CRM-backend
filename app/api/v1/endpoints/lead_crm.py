@@ -34,6 +34,9 @@ MAX_AMOUNT = 100_000_000          # rupees, for quoted_amount and conversion_amo
 class LeadCrmUpdate(BaseModel):
     # Send only what changes. vendor_id: a vendor's id, or null to go back to automatic.
     vendor_id: int | None = None
+    # Admins: "unassigned" = stays unassigned (no automatic rule ever assigns it); "automatic" = the
+    # automatic rules again. Not together with vendor_id.
+    assigned_to: Literal["unassigned", "automatic"] | None = None
     # The same 7 values as Vendor -> KOC; null = Pending
     update_status: Literal["converted", "not_converted", "purchased_elsewhere", "purchased_with_us",
                            "will_call_back", "interested", "not_interested"] | None = None
@@ -60,6 +63,12 @@ class LeadCrmUpdate(BaseModel):
                                  "update_status (converted, not_converted, purchased_elsewhere, purchased_with_us, "
                                  "will_call_back, interested, not_interested or null)")
         return data
+
+    @model_validator(mode="after")
+    def _one_assignment(self):
+        if {"vendor_id", "assigned_to"} <= self.model_fields_set:
+            raise ValueError("Send either vendor_id or assigned_to, not both")
+        return self
 
 
 EDITABLE = ("vendor_id", "update_status", "quoted_date", "quoted_amount", "conversion_amount", "notes", "follow_up_date")
@@ -98,6 +107,14 @@ def _answer(db, source: str, lead_key: str, meta: LeadMeta | None, body: LeadCrm
     )
 
 
+def _assignment_label(db, meta: LeadMeta | None) -> str:
+    """How the lead's assignment is set: a vendor's name (manual), "Unassigned" or "Automatic"."""
+    if meta is not None and meta.vendor_id is not None:
+        vendor = db.get(Vendor, meta.vendor_id)
+        return vendor.name if vendor else str(meta.vendor_id)
+    return "Unassigned" if meta is not None and meta.auto_assign is False else "Automatic"
+
+
 def _find(db, source: str, lead_key: str) -> LeadMeta | None:
     return db.exec(select(LeadMeta).where(LeadMeta.source == source, LeadMeta.lead_key == lead_key)).first()
 
@@ -114,7 +131,7 @@ def get_lead_crm(source: Source, lead_key: str, viewer: LeadViewer, db: DbSessio
 @router.put("/{source}/{lead_key}/crm")
 def save_lead_crm(source: Source, lead_key: str, body: LeadCrmUpdate, viewer: LeadViewer, db: DbSession):
     """Who may change what:
-      vendor_id                                                               admins only
+      vendor_id, assigned_to ("unassigned" | "automatic")                     admins only
       update_status, quoted_amount, quoted_date, conversion_amount, notes     admins and the assigned vendor's users
     A vendor user can't see other vendors' or unassigned leads: those answer 404.
     updated_by records who saved."""
@@ -127,7 +144,8 @@ def save_lead_crm(source: Source, lead_key: str, body: LeadCrmUpdate, viewer: Le
     if not access.can_see(db, viewer, source, lead_key):
         raise HTTPException(404, "Lead not found")
     changes = {f: getattr(body, f) for f in EDITABLE if f in body.model_fields_set}
-    if not viewer.is_admin and "vendor_id" in changes:
+    assigned_to = body.assigned_to if "assigned_to" in body.model_fields_set else None
+    if not viewer.is_admin and ("vendor_id" in changes or assigned_to is not None):
         raise HTTPException(403, "Only an admin can assign leads.")
 
     if changes.get("vendor_id") is not None:
@@ -144,11 +162,17 @@ def save_lead_crm(source: Source, lead_key: str, body: LeadCrmUpdate, viewer: Le
     if meta is None:
         meta = LeadMeta(source=source, lead_key=lead_key, updated_at=now)
     old_values = {field: getattr(meta, field) for field in changes}
+    old_assignment = _assignment_label(db, meta)
     for field, value in changes.items():
         setattr(meta, field, value)
     if "vendor_id" in changes:
         # A vendor = manual assignment; null = back to automatic (also for leads uploaded unassigned)
         meta.auto_assign = True
+    if assigned_to is not None:
+        # Manual "Unassigned" (auto_assign false: no sheet / branch / area / gift rule assigns it) or
+        # back to automatic
+        meta.vendor_id = None
+        meta.auto_assign = assigned_to == "automatic"
     meta.updated_at = now
     meta.updated_by = viewer.user.id
     db.add(meta)
@@ -161,6 +185,10 @@ def save_lead_crm(source: Source, lead_key: str, body: LeadCrmUpdate, viewer: Le
             changes={field: (old_values[field], value)}, actor_user_id=viewer.user.id,
             actor_name=viewer.user.name, actor_role=viewer.user.role,
             action="assigned" if field == "vendor_id" else "field_changed")
+    if assigned_to is not None:
+        lead_activity.log_changes(db, source=source, lead_key=lead_key,
+            changes={"assigned_to": (old_assignment, _assignment_label(db, meta))}, actor_user_id=viewer.user.id,
+            actor_name=viewer.user.name, actor_role=viewer.user.role, action="assigned")
 
     response_cache.clear("vendors")  # vendor numbers changed
     response_cache.clear("analytics")

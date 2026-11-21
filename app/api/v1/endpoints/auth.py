@@ -104,11 +104,17 @@ class VendorRef(SQLModel):
 
 class MeRead(UserRead):
     vendor: VendorRef | None = None      # vendor logins: the vendor whose leads they see
+    # KOC -> Vendors sources to show: admins / view-only all four; vendors those with a visible lead
+    sources: list[str] = []
 
 
 @router.get("/me", response_model=MeRead)
 def read_me(current_user: CurrentUser, db: DbSession):
-    """The login, with vendor_id / vendor_name (as in GET /users) and the same as a vendor object."""
+    """The login, with vendor_id / vendor_name (as in GET /users) and the same as a vendor object,
+    plus the KOC -> Vendors sources it works in (access.sources_for_user)."""
+    from app.services import access
+
     me = crud.get_user_read(db, current_user.id)
     vendor = VendorRef(id=me.vendor_id, name=me.vendor_name) if me.vendor_id is not None else None
-    return MeRead.model_validate({**me.model_dump(), "vendor": vendor})
+    return MeRead.model_validate({**me.model_dump(), "vendor": vendor,
+                                  "sources": access.sources_for_user(db, current_user)})

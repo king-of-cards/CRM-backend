@@ -117,7 +117,11 @@ class VendorAccessTest(ApiTestBase, unittest.TestCase):
                         self.assertEqual(len(self.export_rows(source)) - 1, len(expected))       # minus the header
                         if source != "spin":
                             self.assertEqual(self.client.get(f"{API}{base.STATS_URL[source]}").json()["total"], len(expected))
-                            self.assertEqual(overview["totals"][source], len(expected))
+                            if expected:
+                                self.assertEqual(overview["totals"][source], len(expected))
+                            else:                       # no lead in that source: left out of the overview
+                                self.assertNotIn(source, overview["totals"])
+                                self.assertNotIn(source, overview["sources"])
                 # Asking for another vendor's leads doesn't help
                 resp = self.client.get(f"{API}/spin-leads", params={"vendor_id": self.vendor_ids["rj"]})
                 self.assertEqual(self.keys(resp.json()["items"]), per_source["spin"])

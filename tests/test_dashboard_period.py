@@ -327,11 +327,15 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
                     for source, url in lists.items():
                         for field, flt in filters.items():
                             listed = self.client.get(f"{API}{url}", params={"page_size": 10, **dates, **flt}).json()["total"]
-                            self.assertEqual(outcomes[source][field], listed, (who, dates, source, field))
+                            # A source the vendor has no lead in is left out (its numbers are all 0)
+                            self.assertEqual(outcomes.get(source, {}).get(field, 0), listed, (who, dates, source, field))
                     # Each list's stats KPIs (same dates) equal the dashboard's outcomes for that source
                     for source, url in stats_url.items():
                         stats = self.client.get(f"{API}{url}", params=dates)
                         self.assertEqual(stats.status_code, 200, stats.text)
+                        if source not in outcomes:
+                            self.assertEqual(stats.json()["total"], 0, (who, source))
+                            continue
                         expected = {k: v for k, v in outcomes[source].items()
                                     if k not in ("leads", "quotes_count", "hot_count", "conversion_amount_count",
                                                  "conversion_amount_total")}
@@ -341,7 +345,7 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
         self.add_outcomes()
         phodeo = self.overview("phodeo", date_from="2026-11-01", date_to="2026-11-16")["outcomes"]
         self.assertEqual((phodeo["wedding"]["converted"], phodeo["wedding"]["quoted_total"]), (1, 50000))   # Bangalore lead
-        self.assertEqual(phodeo["whatsapp"]["leads"], 0)
+        self.assertNotIn("whatsapp", phodeo)                     # no International lead: left out
         rj = self.overview("rj", period="all")["outcomes"]
         self.assertEqual((rj["wedding"]["leads"], rj["wedding"]["interested"], rj["wedding"]["converted"]), (2, 1, 0))
 

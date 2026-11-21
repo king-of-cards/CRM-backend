@@ -23,7 +23,7 @@ VENDOR_KEYS = {"generated_at", "today", "period", "received", "change_pct", "kpi
                "not_filtered", "pending", "converted", "converted_pct", "purchased_with_us", "by_status", "funnel",
                "follow_ups_due", "next_follow_ups"}
 ADMIN_ONLY_KEYS = {"previous_received", "per_vendor", "top_cities", "top_cities_sources", "top_cities_no_city",
-                   "top_cities_no_city_by_source", "by_source", "latest"}
+                   "top_cities_no_city_by_source", "by_source", "latest", "dhruva"}
 
 
 def utc(*args) -> datetime:
@@ -97,7 +97,8 @@ class VendorDashboardTests(VendorToKocTestCase):
         ])
         self.assertEqual(o["top_cities_sources"], ["vendor_to_koc"])                     # default: vendor_to_koc only
         vendors = {v["vendor_name"]: v for v in o["per_vendor"]}
-        self.assertEqual(vendors["Phodeo"], {"vendor_id": self.phodeo_id, "vendor_name": "Phodeo", "leads": 3,
+        self.assertEqual(vendors["Phodeo"], {"vendor_id": self.phodeo_id, "vendor_name": "Phodeo", "is_active": True,
+                                             "leads": 3,
                                              "interested": 0, "converted": 1, "pending": 1, "converted_pct": 33.3,
                                              "average_days_to_update": 1.5})
         self.assertEqual(vendors["Other Vendor"]["average_days_to_update"], 3.0)

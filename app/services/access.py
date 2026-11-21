@@ -141,6 +141,30 @@ def can_see(db: Session, viewer: Viewer, source: str, lead_key: str) -> bool:
     return assignments(db, source).get(str(lead_key)) == viewer.vendor_id
 
 
+KOC_VENDOR_SOURCES = ("spin", "whatsapp", "wedding", "wedding_planner")   # the KOC -> Vendors sources
+
+
+def vendor_sources(db: Session, viewer: Viewer) -> list[str]:
+    """The KOC -> Vendors sources this viewer works in: all four for admins and view-only logins;
+    for a vendor login, those where it has at least one visible lead (all time, the lists'
+    assignment). Cached briefly; forget() clears it."""
+    if viewer.sees_all:
+        return list(KOC_VENDOR_SOURCES)
+
+    def build():
+        return [s for s in KOC_VENDOR_SOURCES if visible_keys(db, viewer, s)]
+    return list(response_cache.get(("access", "vendor_sources", viewer.vendor_id), build,
+                                   fresh=CACHE_SECONDS, stale=CACHE_SECONDS))
+
+
+def sources_for_user(db: Session, user: User) -> list[str]:
+    """vendor_sources for any login: [] for Dhruva logins and vendor logins without a vendor."""
+    try:
+        return vendor_sources(db, viewer_for(db, user))
+    except (DhruvaOnly, NotLinked):
+        return []
+
+
 def forget() -> None:
     """Call after anything that can change an assignment (CRM details, leads, vendors, branches)."""
     response_cache.clear("access")
