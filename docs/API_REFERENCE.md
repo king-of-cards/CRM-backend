@@ -1676,18 +1676,20 @@ filters plus `branch`, `pincode`, `budget`):
 
 Like Spin, there is no single add (`POST /crm-leads/wedding_gifts` → 405): bulk upload only.
 
-### Assignment: Kraftzy
+### Assignment: Kraftyz
 
-- Every Wedding gifts lead goes automatically to the **active vendor named Kraftzy** (name matched
-  case-insensitively): `vendor_source: "source_default"`, chip "Kraftzy · auto". Branch, area and
+- Every Wedding gifts lead goes automatically to the **active vendor named Kraftyz** (exact name,
+  matched case-insensitively). The name is the `WEDDING_GIFTS_VENDOR_NAME` setting (`.env`, default
+  `Kraftyz`), so it can change without a code edit (restart the app after changing it):
+  `vendor_source: "source_default"`, chip "Kraftyz · auto". Branch, area and
   sheet rules don't apply to this source (`suggested_vendor` is always `null`).
-- No such vendor, or it's inactive: the leads are unassigned. As soon as an active Kraftzy exists,
+- No such vendor, or it's inactive: the leads are unassigned. As soon as an active Kraftyz exists,
   they go to it without any other step (nothing is stored).
 - Admins can still assign by hand (`vendor_id` in `PUT …/crm`); `vendor_id: null` returns the lead
-  to automatic (Kraftzy).
-- Uploads: "Automatic", "Kraftzy · auto" **or an empty Assigned to** → Kraftzy (unlike other
+  to automatic (Kraftyz).
+- Uploads: "Automatic", "Kraftyz · auto" **or an empty Assigned to** → Kraftyz (unlike other
   sources, where empty means unassigned); "Unassigned" → unassigned; a vendor name → that vendor.
-- Vendor logins: Kraftzy's users see and update their Wedding gifts leads (Update, amounts, notes,
+- Vendor logins: Kraftyz's users see and update their Wedding gifts leads (Update, amounts, notes,
   follow-up, hot); other vendors don't see them (404 on the lead endpoints).
 
 ### Duplicates and also_in

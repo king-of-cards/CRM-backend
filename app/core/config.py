@@ -73,6 +73,10 @@ class Settings(BaseSettings):
     # Frontend origins allowed to call the API (CORS) and to use the refresh cookie (CSRF check)
     CORS_ORIGINS: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
+    # Wedding gifts leads all go to the active vendor with this name (case-insensitive exact match);
+    # none or inactive: unassigned until it exists (see app/services/lead_crm.py)
+    WEDDING_GIFTS_VENDOR_NAME: str = Field(default="Kraftyz", min_length=1, max_length=100)
+
     @model_validator(mode="after")
     def _check_auth_settings(self):
         if "*" in self.CORS_ORIGINS:

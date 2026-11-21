@@ -162,7 +162,7 @@ def import_rows(source: Source, body: ImportBody, user: AdminUser, db: DbSession
         lead = service.create(db, source, c, ORIGIN_IMPORTED, user.id)
         result["status"] = "imported"
         result["lead_key"] = service.lead_key_of(source, lead)
-        # Empty Assigned to: unassigned, except Wedding gifts (automatic: the source's vendor, Kraftzy)
+        # Empty Assigned to: unassigned, except Wedding gifts (automatic: the source's vendor, Kraftyz)
         service.save_assignment(db, source, result["lead_key"], c.assignment, user.id,
                                 empty_means_unassigned=source != "wedding_gifts",
                                 crm={k: c.values.get(k) for k in UPLOAD_CRM_KEYS})

@@ -2,7 +2,7 @@
 
 Workflow spin_lead rows whose otherWeddingServices names "Wedding Gifts & Return Gifts" are the
 wedding_gifts flow; every other listed row stays spin. CRM-added leads follow the same rule. All
-wedding_gifts leads go to the vendor named Kraftzy (when it exists and is active). In-memory SQLite
+wedding_gifts leads go to the vendor named Kraftyz (when it exists and is active). In-memory SQLite
 and the fake workflow database of test_crm_leads_api only. Run:
 
     python -m unittest discover -s tests -t . -v
@@ -29,7 +29,7 @@ from app.models.notification import CrmNotification  # noqa: E402
 from app.models.user import User  # noqa: E402
 from app.models.vendor import Vendor  # noqa: E402
 from app.models.vendor_user import VendorUser  # noqa: E402
-from app.services import lead_sources  # noqa: E402
+from app.services import lead_crm, lead_sources  # noqa: E402
 
 GIFTS = "/wedding-gifts-leads"
 
@@ -86,17 +86,19 @@ class WeddingGiftsTestBase(ApiTestBase, unittest.TestCase):
     def item(self, path, key, who="admin"):
         return next(i for i in self.get(path, who, page_size=100)["items"] if str(i["id"]) == key)
 
-    def create_kraftzy(self, active=True) -> int:
+    def create_kraftyz(self, active=True, name="kraftyz") -> int:
+        """The Wedding gifts vendor (default name: the WEDDING_GIFTS_VENDOR_NAME default, lowercase to
+        prove the match ignores case) and one login linked to it (users["kraftyz"])."""
         with self.logged_in("admin"):
-            resp = self.client.post(f"{API}/vendors", json={"name": "kraftzy", "is_active": active})
+            resp = self.client.post(f"{API}/vendors", json={"name": name, "is_active": active})
         self.assertEqual(resp.status_code, 201, resp.text)
         vendor_id = resp.json()["id"]
         with Session(self.engine, expire_on_commit=False) as s:
-            self.users["kraftzy"] = User(name="Kraftzy User", email="kraftzy@example.com", hashed_password="x",
+            self.users["kraftyz"] = User(name="Kraftyz User", email=f"{name.lower()}@example.com", hashed_password="x",
                                          role="vendor")
-            s.add(self.users["kraftzy"])
+            s.add(self.users["kraftyz"])
             s.commit()
-            s.add(VendorUser(user_id=self.users["kraftzy"].id, vendor_id=vendor_id))
+            s.add(VendorUser(user_id=self.users["kraftyz"].id, vendor_id=vendor_id))
             s.commit()
         response_cache.clear()
         return vendor_id
@@ -204,46 +206,59 @@ class SplitTests(WeddingGiftsTestBase):
         self.assertEqual(self.keys(LIST_URL["spin"], hot="yes"), set())       # hot is per source
 
 
-# ── Kraftzy and vendor scoping ─────────────────────────────────────────
-class KraftzyTests(WeddingGiftsTestBase):
-    def test_unassigned_until_kraftzy_exists_then_automatic(self):
+# ── Kraftyz and vendor scoping ─────────────────────────────────────────
+class KraftyzTests(WeddingGiftsTestBase):
+    def test_unassigned_until_kraftyz_exists_then_automatic(self):
         self.assertIsNone(self.item(GIFTS, "202")["crm"]["vendor"])
         self.assertIsNone(self.item(GIFTS, "202")["crm"]["suggested_vendor"])   # area rules don't apply
         self.assertEqual(self.item(LIST_URL["spin"], "201")["crm"]["vendor"]["name"], "Phodeo")  # same pincode
-        kraftzy = self.create_kraftzy()
+        kraftyz = self.create_kraftyz()
         crm = self.item(GIFTS, "202")["crm"]
-        self.assertEqual((crm["vendor"], crm["vendor_source"]), ({"id": kraftzy, "name": "kraftzy"}, "source_default"))
+        self.assertEqual((crm["vendor"], crm["vendor_source"]), ({"id": kraftyz, "name": "kraftyz"}, "source_default"))
         self.assertEqual(self.item(LIST_URL["spin"], "201")["crm"]["vendor"]["name"], "Phodeo")  # spin unchanged
         # Inactive: unassigned again
         with self.logged_in("admin"):
-            self.assertEqual(self.client.patch(f"{API}/vendors/{kraftzy}", json={"is_active": False}).status_code, 200)
+            self.assertEqual(self.client.patch(f"{API}/vendors/{kraftyz}", json={"is_active": False}).status_code, 200)
         response_cache.clear()
         self.assertIsNone(self.item(GIFTS, "202")["crm"]["vendor"])
 
+    def test_name_is_an_exact_case_insensitive_match_from_settings(self):
+        from app.core.config import settings
+        self.assertEqual(settings.WEDDING_GIFTS_VENDOR_NAME, "Kraftyz")
+        self.create_kraftyz(name="Kraftzy")                      # a near miss is not the vendor
+        self.assertIsNone(self.item(GIFTS, "202")["crm"]["vendor"])
+        with mock.patch.object(settings, "WEDDING_GIFTS_VENDOR_NAME", "  KRAFTZY "):   # changed by setting only
+            response_cache.clear()
+            self.assertEqual(self.item(GIFTS, "202")["crm"]["vendor"]["name"], "Kraftzy")
+            self.assertEqual(self.keys(GIFTS, "kraftyz"), GIFT_IDS)
+        response_cache.clear()
+        self.assertIsNone(self.item(GIFTS, "202")["crm"]["vendor"])
+        self.assertIsNone(lead_crm.source_default_vendor_name("spin"))
+
     def test_vendor_scoping_and_manual_reassignment(self):
-        self.create_kraftzy()
-        self.assertEqual(self.keys(GIFTS, "kraftzy"), GIFT_IDS)
-        self.assertEqual(self.keys(LIST_URL["spin"], "kraftzy"), set())
+        self.create_kraftyz()
+        self.assertEqual(self.keys(GIFTS, "kraftyz"), GIFT_IDS)
+        self.assertEqual(self.keys(LIST_URL["spin"], "kraftyz"), set())
         for vendor in ("phodeo", "rj", "ohp"):
             self.assertEqual(self.keys(GIFTS, vendor), set(), vendor)
         self.assertIn("201", self.keys(LIST_URL["spin"], "phodeo"))
-        # Kraftzy's users may update their leads; other vendors get 404
-        self.assertEqual(self.put("kraftzy", "202", {"update_status": "interested"}).status_code, 200)
+        # Kraftyz's users may update their leads; other vendors get 404
+        self.assertEqual(self.put("kraftyz", "202", {"update_status": "interested"}).status_code, 200)
         self.assertEqual(self.put("phodeo", "202", {"update_status": "converted"}).status_code, 404)
-        self.assertEqual(self.put("kraftzy", "202", {"vendor_id": self.vendor_ids["phodeo"]}).status_code, 403)
+        self.assertEqual(self.put("kraftyz", "202", {"vendor_id": self.vendor_ids["phodeo"]}).status_code, 403)
         # An admin can still move a lead by hand
         moved = self.put("admin", "203", {"vendor_id": self.vendor_ids["phodeo"]})
         self.assertEqual((moved.status_code, moved.json()["vendor_source"]), (200, "manual"))
         self.assertEqual(self.keys(GIFTS, "phodeo"), {"203"})
-        self.assertEqual(self.keys(GIFTS, "kraftzy"), {"202"})
+        self.assertEqual(self.keys(GIFTS, "kraftyz"), {"202"})
         with Session(self.engine) as s:
             note = s.exec(select(CrmNotification).where(CrmNotification.lead_key == "203")).one()
             self.assertEqual(note.source, "wedding_gifts")
-        # Back to automatic: Kraftzy again
-        self.assertEqual(self.put("admin", "203", {"vendor_id": None}).json()["vendor"]["name"], "kraftzy")
+        # Back to automatic: Kraftyz again
+        self.assertEqual(self.put("admin", "203", {"vendor_id": None}).json()["vendor"]["name"], "kraftyz")
 
-    def test_bulk_upload_automatic_and_empty_go_to_kraftzy(self):
-        self.create_kraftzy()
+    def test_bulk_upload_automatic_and_empty_go_to_kraftyz(self):
+        self.create_kraftyz()
         rows = self.import_rows("wedding_gifts", [
             {"phone": "9845040001", "name": "Auto", "assigned_to": "Automatic"},
             {"phone": "9845040002", "name": "Empty", "assigned_to": ""},
@@ -254,7 +269,7 @@ class KraftzyTests(WeddingGiftsTestBase):
         self.assertTrue(all(r["status"] == "imported" for r in rows), rows)
         vendor = {r["values"]["name"]: (self.item(GIFTS, r["lead_key"])["crm"]["vendor"] or {}).get("name")
                   for r in rows}
-        self.assertEqual(vendor, {"Auto": "kraftzy", "Empty": "kraftzy", "None": "kraftzy", "Unassigned": None,
+        self.assertEqual(vendor, {"Auto": "kraftyz", "Empty": "kraftyz", "None": "kraftyz", "Unassigned": None,
                                   "Manual": "Phodeo"})
         # Spin uploads keep their rule: empty = unassigned
         spin = self.import_rows("spin", [{"phone": "9845040006", "name": "Spin empty"}])[0]
@@ -264,12 +279,12 @@ class KraftzyTests(WeddingGiftsTestBase):
 # ── Features ───────────────────────────────────────────────────────────
 class FeatureTests(WeddingGiftsTestBase):
     def test_crm_hot_activity_follow_up_and_reminders(self):
-        self.create_kraftzy()
+        self.create_kraftyz()
         saved = self.put("admin", "202", {"update_status": "will_call_back", "follow_up_date": "2026-11-20",
                                           "notes": "Call"})
         self.assertEqual(saved.status_code, 200, saved.text)
         self.assertEqual(self.get("/leads/wedding_gifts/202/crm")["update_status"], "will_call_back")
-        with self.logged_in("kraftzy"):
+        with self.logged_in("kraftyz"):
             self.assertEqual(self.client.post(f"{API}/leads/wedding_gifts/202/hot").json()["is_hot"], True)
             self.assertEqual(self.client.post(f"{API}/leads/spin/201/hot").status_code, 404)
         activity = self.get("/leads/wedding_gifts/202/activity")["items"]
@@ -280,7 +295,7 @@ class FeatureTests(WeddingGiftsTestBase):
         self.assertEqual((item["follow_up_date"], item["is_hot"]), ("2026-11-20", True))
         with mock.patch("app.services.periods.today_ist", lambda: datetime(2026, 11, 20).date()):
             reminders = self.get("/reminders/follow-ups", sources="wedding_gifts")
-            mine = self.get("/reminders/follow-ups", who="kraftzy")
+            mine = self.get("/reminders/follow-ups", who="kraftyz")
             spin_only = self.get("/reminders/follow-ups", sources="spin")
         self.assertEqual([(i["source"], i["lead_key"]) for i in reminders["items"]], [("wedding_gifts", "202")])
         self.assertEqual(reminders["items"][0]["name"], "Lead 202")
@@ -342,20 +357,20 @@ class FeatureTests(WeddingGiftsTestBase):
         self.assertEqual(sum(p["wedding_gifts"] for p in o["trend"]), 2)
         self.assertIn("wedding_gifts", o["top_cities_sources"])
         self.assertIn("wedding_gifts", o["upcoming_by_month"][0])
-        # Vendor logins: Kraftzy's overview counts its gift leads only
-        self.create_kraftzy()
-        mine = self.get("/analytics/overview", who="kraftzy", period="all")
+        # Vendor logins: Kraftyz's overview counts its gift leads only
+        self.create_kraftyz()
+        mine = self.get("/analytics/overview", who="kraftyz", period="all")
         self.assertEqual((mine["new_in_period"]["wedding_gifts"], mine["new_in_period"]["spin"]), (2, 0))
         phodeo = self.get("/analytics/overview", who="phodeo", period="all")
         self.assertEqual(phodeo["new_in_period"]["wedding_gifts"], 0)
 
-    def test_vendor_stats_count_wedding_gifts_for_kraftzy(self):
-        self.create_kraftzy()
+    def test_vendor_stats_count_wedding_gifts_for_kraftyz(self):
+        self.create_kraftyz()
         from app.api.v1.endpoints import vendors as vendors_ep
         with mock.patch.object(vendors_ep, "engine", self.engine):
             stats = vendors_ep._build_stats()
-        kraftzy = next(v for v in stats["vendors"] if v["vendor"]["name"] == "kraftzy")
-        self.assertEqual((kraftzy["leads"], kraftzy["by_source"]), (2, {"wedding_gifts": 2}))
+        kraftyz = next(v for v in stats["vendors"] if v["vendor"]["name"] == "kraftyz")
+        self.assertEqual((kraftyz["leads"], kraftyz["by_source"]), (2, {"wedding_gifts": 2}))
         phodeo = next(v for v in stats["vendors"] if v["vendor"]["name"] == "Phodeo")
         self.assertNotIn("wedding_gifts", phodeo["by_source"])
 

@@ -19,7 +19,8 @@ Who a lead is assigned to, in order:
   4. suggested – the vendors' area rules (pincode / city), see Vendor
 
 Wedding gifts leads skip 2-4: after a manual choice they go to the source's default vendor
-(SOURCE_DEFAULT_VENDORS: "Kraftzy", matched by name, case-insensitive, only while active);
+(source_default_vendor_name: the WEDDING_GIFTS_VENDOR_NAME setting, default "Kraftyz", matched by
+name, case-insensitive, only while active);
 "source_default". No such vendor: unassigned until one is created, then automatic.
 """
 import re
@@ -33,8 +34,18 @@ from app.models.lead_meta import LeadMeta
 from app.models.vendor import Vendor
 
 SOURCES = ("spin", "wedding_gifts", "whatsapp", "wedding", "wedding_planner")
-# Sources whose leads all go to one vendor (by name); branch / area / sheet rules don't apply
-SOURCE_DEFAULT_VENDORS = {"wedding_gifts": "Kraftzy"}
+# Sources whose leads all go to one vendor (by name, from settings); branch / area / sheet rules don't apply
+SOURCE_DEFAULT_VENDOR_SETTINGS = {"wedding_gifts": "WEDDING_GIFTS_VENDOR_NAME"}
+
+
+def source_default_vendor_name(source: str) -> str | None:
+    """The vendor name a source's leads all go to (read from settings on every call), or None."""
+    from app.core.config import settings
+
+    setting = SOURCE_DEFAULT_VENDOR_SETTINGS.get(source)
+    if setting is None:
+        return None
+    return (getattr(settings, setting) or "").strip() or None
 
 # The three partners and the areas they cover. Created once if the vendors table is empty;
 # after that, edit them on the Vendors page.
@@ -179,7 +190,7 @@ def meta_out(
 
 def assigned_label(crm: dict | None) -> str:
     """The "Assigned to" chip text on the list screens: "Phodeo", "Phodeo · auto" (area rules, or a
-    source's default vendor such as Kraftzy), or "Unassigned"."""
+    source's default vendor such as Kraftyz), or "Unassigned"."""
     vendor = (crm or {}).get("vendor")
     if not vendor:
         return "Unassigned"
@@ -189,7 +200,7 @@ def assigned_label(crm: dict | None) -> str:
 
 def source_rules(source: str, vendors: list[Vendor]) -> tuple[bool, Vendor | None]:
     """(whether sheet / branch / area rules apply, the source's default vendor if any and active)."""
-    name = SOURCE_DEFAULT_VENDORS.get(source)
+    name = source_default_vendor_name(source)
     if name is None:
         return True, None
     return False, vendor_by_name(vendors, name)
