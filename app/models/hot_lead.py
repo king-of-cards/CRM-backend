@@ -14,5 +14,5 @@ class CrmHotLead(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     source: str = Field(max_length=30)
     lead_key: str = Field(max_length=100)
-    hot_marked_by: int = Field(foreign_key="crm_users.id")
+    hot_marked_by: int = Field()   # user id; no foreign key: history outlives deleted logins
     hot_marked_at: datetime

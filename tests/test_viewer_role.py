@@ -343,8 +343,8 @@ class ViewerUsersTests(ViewerTestBase):
                 patched = self.req(who, "PATCH", f"/users/{user_id}", json={"is_active": False})
                 self.assertEqual(patched.status_code, 403, who)
         self.assertEqual(self.req("viewer", "POST", "/users", json=body).json()["detail"], VIEW_ONLY)
-        # No way to change a role: PATCH accepts is_active only (admins get 422, others 403)
-        self.assertEqual(self.req("admin", "PATCH", f"/users/{target}", json={"role": "admin"}).status_code, 422)
+        # Roles: admins may change another login's role; everyone else gets 403
+        self.assertEqual(self.req("admin", "PATCH", f"/users/{target}", json={"role": "boss"}).status_code, 422)
         self.assertEqual(self.req("viewer", "PATCH", f"/users/{self.users['viewer'].id}",
                                   json={"role": "admin"}).status_code, 403)
         with Session(self.engine) as s:

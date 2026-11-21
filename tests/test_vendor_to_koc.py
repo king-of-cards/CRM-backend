@@ -572,14 +572,10 @@ class VendorAdminTests(VendorToKocTestCase):
 
 # ── Vendor logins ───────────────────────────────────────────────────────
 class VendorLoginTests(VendorToKocTestCase):
-    def test_creating_a_vendor_user_with_an_optional_vendor_id(self):
-        # This backend: vendor_id is optional; without it the login is created unlinked
+    def test_creating_a_vendor_user_needs_a_vendor_id(self):
         body = {"name": "New", "email": "new@example.com", "password": PASSWORD, "role": "vendor"}
         resp = self.client.post("/api/v1/users", headers=self.admin, json={**body, "email": "plain@example.com"})
-        self.assertEqual(resp.status_code, 201, resp.text)
-        self.assertEqual((resp.json()["vendor_id"], resp.json()["vendor_name"]), (None, None))
-        plain = self.headers("plain@example.com")
-        self.assertEqual(self.client.get(f"{BASE}/leads", headers=plain).status_code, 403)   # until linked
+        self.assertEqual(resp.status_code, 422, resp.text)                      # a vendor login needs its vendor
         self.assertEqual(self.client.post("/api/v1/users", headers=self.admin,
                                           json={**body, "vendor_id": 999}).status_code, 404)
         resp = self.client.post("/api/v1/users", headers=self.admin, json={**body, "vendor_id": self.phodeo_id})
@@ -655,7 +651,7 @@ class TeamTests(VendorToKocTestCase):
                                            json={"is_active": False}).status_code, 403)  # admins only
         self.assertEqual(self.client.patch("/api/v1/users/999", headers=self.admin,
                                            json={"is_active": False}).status_code, 404)
-        for body in ({}, {"is_active": None}, {"is_active": False, "role": "admin"}):
+        for body in ({}, {"is_active": None}, {"is_active": False, "role": "boss"}):
             self.assertEqual(self.client.patch(self.users_url("other"), headers=self.admin,
                                                json=body).status_code, 422, body)
         second_admin = self.client.post("/api/v1/users", headers=self.admin, json={

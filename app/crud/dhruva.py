@@ -13,6 +13,7 @@ from app.models.dhruva import DhruvaLead
 from app.models.hot_lead import CrmHotLead
 from app.models.user import User
 from app.models.vendor_to_koc import CLOSED_STATUSES, UpdateStatus
+from app.crud.user import display_name
 from app.services.dhruva_import import CleanLead
 
 DUPLICATE_REASONS = ("in_file", "existing")
@@ -151,12 +152,12 @@ def serialize(row: DhruvaLead, creator_name: str | None, updater_name: str | Non
         "event_date": _iso(row.event_date), "event_date_text": row.event_date_text,
         "phone": row.phone, "alt_phone": row.alt_phone, "phone_e164": row.phone_e164,
         "alt_phone_e164": row.alt_phone_e164, "event_type": row.event_type, "source": row.source,
-        "created_by_name": creator_name, "created_at": _iso(row.created_at), "updated_at": _iso(row.updated_at),
+        "created_by_name": display_name(creator_name, row.created_by), "created_at": _iso(row.created_at), "updated_at": _iso(row.updated_at),
         "archived": bool(row.is_deleted), "is_hot": bool(is_hot),
         "update_status": row.update_status, "additional_comments": row.additional_comments,
         "quoted_amount": row.quoted_amount, "conversion_amount": row.conversion_amount,
         "follow_up_date": _iso(row.follow_up_date), "status_updated_at": _iso(row.status_updated_at),
-        "status_updated_by_name": updater_name,
+        "status_updated_by_name": display_name(updater_name, row.status_updated_by),
     }
     if admin:
         out["created_by"] = row.created_by

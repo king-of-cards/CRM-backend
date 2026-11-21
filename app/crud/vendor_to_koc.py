@@ -205,22 +205,30 @@ def _order_by(sort: str, order: str) -> list:
     ]
 
 
-def _lead_dict(lead: VendorToKocLead, vendor_name: str, updater_name: str | None) -> dict:
-    return {**lead.model_dump(), "vendor_name": vendor_name, "status_updated_by_name": updater_name}
+def _lead_dict(lead: VendorToKocLead, vendor_name: str, updater_name: str | None,
+               creator_name: str | None = None) -> dict:
+    from app.crud.user import display_name
+
+    return {**lead.model_dump(), "vendor_name": vendor_name,
+            "status_updated_by_name": display_name(updater_name, lead.status_updated_by),
+            "created_by_name": display_name(creator_name, lead.created_by)}
 
 
 def _with_names():
-    """(lead, vendor name, updater name) in one query, no N+1."""
-    updater = aliased(User)
-    return (select(VendorToKocLead, Vendor.name, updater.name)
+    """(lead, vendor name, updater name, creator name) in one query, no N+1."""
+    updater, creator = aliased(User), aliased(User)
+    return (select(VendorToKocLead, Vendor.name, updater.name, creator.name)
             .join(Vendor, col(Vendor.id) == VendorToKocLead.vendor_id)
-            .outerjoin(updater, col(updater.id) == VendorToKocLead.status_updated_by))
+            .outerjoin(updater, col(updater.id) == VendorToKocLead.status_updated_by)
+            .outerjoin(creator, col(creator.id) == VendorToKocLead.created_by))
 
 
-def serialize(lead: VendorToKocLead, vendor_name: str, admin: bool, updater_name: str | None = None) -> dict:
-    """Admins get AdminLeadRead; vendor users get VendorLeadRead (no status_updated_by user id)."""
+def serialize(lead: VendorToKocLead, vendor_name: str, admin: bool, updater_name: str | None = None,
+              creator_name: str | None = None) -> dict:
+    """Admins get AdminLeadRead; vendor users get VendorLeadRead (no status_updated_by user id).
+    Names: "Deleted user" when the login is gone."""
     schema = AdminLeadRead if admin else VendorLeadRead
-    return schema.model_validate(_lead_dict(lead, vendor_name, updater_name)).model_dump(mode="json")
+    return schema.model_validate(_lead_dict(lead, vendor_name, updater_name, creator_name)).model_dump(mode="json")
 
 
 def count_leads(db: Session, f: LeadFilters) -> int:
@@ -293,16 +301,16 @@ def list_leads(db: Session, f: LeadFilters, sort: str, order: str,
         .offset(offset)
         .limit(page_size)
     ).all()
-    items = [{"sl_no": offset + i + 1, **serialize(lead, vendor_name, admin, updater_name)}
-             for i, (lead, vendor_name, updater_name) in enumerate(rows)]
+    items = [{"sl_no": offset + i + 1, **serialize(lead, vendor_name, admin, updater_name, creator_name)}
+             for i, (lead, vendor_name, updater_name, creator_name) in enumerate(rows)]
     return {"items": items, "total": total, "page": page, "page_size": page_size,
             "pages": math.ceil(total / page_size)}
 
 
 def get_lead(db: Session, lead_id: int, vendor_id: int | None = None
-             ) -> tuple[VendorToKocLead, str, str | None] | None:
-    """The lead, its vendor name and the updater's name. With vendor_id, only that vendor's
-    lead is found."""
+             ) -> tuple[VendorToKocLead, str, str | None, str | None] | None:
+    """The lead, its vendor name, the updater's and the creator's names. With vendor_id, only that
+    vendor's lead is found."""
     stmt = _with_names().where(VendorToKocLead.id == lead_id)
     if vendor_id is not None:
         stmt = stmt.where(VendorToKocLead.vendor_id == vendor_id)

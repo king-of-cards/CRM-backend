@@ -38,9 +38,9 @@ class DhruvaLead(SQLModel, table=True):
     quoted_amount: int | None = None                        # rupees
     conversion_amount: int | None = None                    # rupees
     follow_up_date: Date | None = None
-    status_updated_by: int | None = Field(default=None, foreign_key="crm_users.id")
+    status_updated_by: int | None = Field(default=None)   # user id; no foreign key: history outlives deleted logins
     status_updated_at: datetime | None = None
-    created_by: int = Field(foreign_key="crm_users.id")
+    created_by: int = Field()   # user id; no foreign key: history outlives deleted logins
     created_at: datetime = Field(index=True)
     updated_at: datetime
     is_deleted: bool = Field(default=False, index=True)

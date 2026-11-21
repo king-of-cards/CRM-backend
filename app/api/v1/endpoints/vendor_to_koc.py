@@ -177,8 +177,8 @@ def create_lead(body: LeadCreate, db: DbSession, scope: VendorLogin):
     except crud.DuplicateLead:
         raise HTTPException(status.HTTP_409_CONFLICT,
                             "This lead already exists for this vendor (the same phone, name, date and city)")
-    lead, vendor_name, updater_name = crud.get_lead(db, lead_id)
-    response = crud.serialize(lead, vendor_name, False, updater_name)
+    lead, vendor_name, updater_name, creator_name = crud.get_lead(db, lead_id)
+    response = crud.serialize(lead, vendor_name, False, updater_name, creator_name)
     lead_name = lead.name
     lead_activity.log_action(db, source="vendor_to_koc", lead_key=str(lead_id), action="created",
         field="name", old=None, new=lead.name, actor_user_id=scope.user.id,
@@ -326,8 +326,8 @@ def get_lead(lead_id: int, db: DbSession, scope: LeadViewer):
     found = crud.get_lead(db, lead_id, vendor_id=None if scope.sees_all else scope.vendor_id)
     if found is None:       # also for another vendor's lead, so its existence isn't revealed
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Lead not found")
-    lead, vendor_name, updater_name = found
-    return crud.serialize(lead, vendor_name, scope.sees_all, updater_name)
+    lead, vendor_name, updater_name, creator_name = found
+    return crud.serialize(lead, vendor_name, scope.sees_all, updater_name, creator_name)
 
 
 @router.post("/leads/{lead_id}/hot")
@@ -376,8 +376,8 @@ def update_lead(lead_id: int, body: LeadUpdate, db: DbSession, admin: AdminUser)
     lead_activity.log_changes(db, source="vendor_to_koc", lead_key=str(lead_id),
         changes={k: (before[k], getattr(found[0], k)) for k in changes}, actor_user_id=admin.id,
         actor_name=admin.name, actor_role=admin.role)
-    lead, vendor_name, updater_name = crud.get_lead(db, lead_id)
-    return crud.serialize(lead, vendor_name, True, updater_name)
+    lead, vendor_name, updater_name, creator_name = crud.get_lead(db, lead_id)
+    return crud.serialize(lead, vendor_name, True, updater_name, creator_name)
 
 
 @router.get("/leads/{lead_id}/activity")

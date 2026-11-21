@@ -22,6 +22,7 @@ from app.models.lead_meta import LeadMeta
 from app.models.lead_origin import CRM_KEY_PREFIX
 from app.models.vendor import Vendor
 from app.services import access, hot_leads, lead_crm, notifications, lead_activity
+from app.crud.user import user_names
 from app.services.crm_leads import service as crm_leads
 
 router = APIRouter(prefix="/leads", tags=["lead crm"])
@@ -104,6 +105,7 @@ def _answer(db, source: str, lead_key: str, meta: LeadMeta | None, body: LeadCrm
         lead_crm.suggest_vendor(vendors, body.location if body else None,
                                 body.pincode if body else None) if rules else None,
         default_vendor=default,
+        names=user_names(db, [meta.updated_by] if meta else []),
     )
 
 

@@ -68,8 +68,38 @@ def _clean_list(values: list[str]) -> list[str]:
     return out
 
 
-def _out(v: Vendor) -> dict:
+def _lead_counts(db: Session) -> tuple[dict[int, int], dict[int, int]]:
+    """({vendor id: leads assigned to it across the four KOC -> Vendors sources (the lists' rules)},
+    {vendor id: its Vendor -> KOC leads})."""
+    from collections import Counter
+
+    from sqlalchemy import func
+
+    from app.models.vendor_to_koc import VendorToKocLead
+
+    assigned: Counter = Counter()
+    for source in access.KOC_VENDOR_SOURCES:
+        assigned.update(v for v in access.assignments(db, source).values() if v is not None)
+    vtk = dict(db.exec(select(VendorToKocLead.vendor_id, func.count()).group_by(VendorToKocLead.vendor_id)).all())
+    return dict(assigned), vtk
+
+
+def _name_taken(db: Session, name: str, except_id: int | None = None) -> bool:
+    """Vendor names are unique ignoring case and surrounding spaces."""
+    from sqlalchemy import func
+
+    query = select(Vendor.id).where(func.lower(Vendor.name) == name.strip().lower())
+    if except_id is not None:
+        query = query.where(Vendor.id != except_id)
+    return db.exec(query).first() is not None
+
+
+def _out(v: Vendor, counts: tuple[dict, dict] | None = None) -> dict:
+    assigned, vtk = counts or ({}, {})
     return {
+        "lead_count": assigned.get(v.id, 0),       # leads assigned now, four KOC -> Vendors sources
+        "vtk_lead_count": vtk.get(v.id, 0),        # its Vendor -> KOC leads
+
         "id": v.id,
         "name": v.name,
         "coverage": v.coverage,
@@ -98,18 +128,21 @@ def _changed():
 
 @router.get("")
 def list_vendors(viewer: LeadViewer, db: DbSession, include_inactive: bool = False):
-    """Admins: all vendors. Vendor users: only their own vendor."""
+    """Admins and view-only: active vendors (include_inactive=true: also inactive ones), each with
+    is_active, lead_count (leads assigned to it now across the four KOC -> Vendors sources) and
+    vtk_lead_count (its Vendor -> KOC leads). Vendor users: only their own vendor."""
     query = select(Vendor).order_by(Vendor.priority, Vendor.id)
     if not viewer.sees_all:
         query = query.where(Vendor.id == viewer.vendor_id)
     elif not include_inactive:
         query = query.where(Vendor.is_active == True)  # noqa: E712
-    return [_out(v) for v in db.exec(query)]
+    counts = _lead_counts(db)
+    return [_out(v, counts) for v in db.exec(query)]
 
 
 @router.post("", status_code=201)
 def create_vendor(body: VendorIn, _: AdminUser, db: DbSession):
-    if db.exec(select(Vendor).where(Vendor.name == body.name.strip())).first():
+    if _name_taken(db, body.name):
         raise HTTPException(409, "A vendor with that name already exists")
     now = datetime.now(timezone.utc)
     data = body.model_dump()
@@ -121,7 +154,7 @@ def create_vendor(body: VendorIn, _: AdminUser, db: DbSession):
     db.commit()
     db.refresh(vendor)
     _changed()
-    return _out(vendor)
+    return _out(vendor, _lead_counts(db))
 
 
 @router.patch("/{vendor_id}")
@@ -132,8 +165,7 @@ def update_vendor(vendor_id: int, body: VendorPatch, _: AdminUser, db: DbSession
     data = body.model_dump(exclude_unset=True)
     if "name" in data:
         data["name"] = data["name"].strip()
-        clash = db.exec(select(Vendor).where(Vendor.name == data["name"], Vendor.id != vendor_id)).first()
-        if clash:
+        if _name_taken(db, data["name"], except_id=vendor_id):
             raise HTTPException(409, "A vendor with that name already exists")
     for f in ("areas", "pincodes", "pincode_prefixes"):
         if f in data and data[f] is not None:
@@ -144,8 +176,8 @@ def update_vendor(vendor_id: int, body: VendorPatch, _: AdminUser, db: DbSession
     db.add(vendor)
     db.commit()
     db.refresh(vendor)
-    _changed()
-    return _out(vendor)
+    _changed()                          # deactivating keeps manual assignments; rules stop choosing it
+    return _out(vendor, _lead_counts(db))
 
 
 # ── Statistics ─────────────────────────────────────────────────────────

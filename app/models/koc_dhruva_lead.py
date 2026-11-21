@@ -34,7 +34,7 @@ class KocDhruvaLead(SQLModel, table=True):
     created_at: datetime = Field(index=True)                     # UTC ("Received")
     additional_details: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
 
-    created_by: int | None = Field(default=None, foreign_key="crm_users.id")
+    created_by: int | None = Field(default=None)   # user id; no foreign key: history outlives deleted logins
     updated_at: datetime
     is_deleted: bool = Field(default=False, index=True)
 

@@ -71,13 +71,13 @@ class VendorToKocLead(SQLModel, table=True):
     follow_up_date: date | None = None
     quoted_amount: int | None = None                       # rupees; admins set it (PATCH)
     conversion_amount: int | None = None                   # rupees; admins set it (PATCH)
-    status_updated_by: int | None = Field(default=None, foreign_key="crm_users.id")
+    status_updated_by: int | None = Field(default=None)   # user id; no foreign key: history outlives deleted logins
     status_updated_at: datetime | None = None
     is_hot: bool = Field(default=False, sa_column_kwargs={"server_default": "0", "nullable": False})
-    hot_marked_by: int | None = Field(default=None, foreign_key="crm_users.id")
+    hot_marked_by: int | None = Field(default=None)   # user id; no foreign key: history outlives deleted logins
     hot_marked_at: datetime | None = None
     source: str = Field(max_length=20)                     # LeadSource value
-    created_by: int = Field(foreign_key="crm_users.id")
+    created_by: int = Field()   # user id; no foreign key: history outlives deleted logins
     created_at: datetime
     updated_at: datetime
 
@@ -176,7 +176,8 @@ class VendorLeadRead(SQLModel):
     quoted_amount: int | None = None
     conversion_amount: int | None = None
     status_updated_at: datetime | None
-    status_updated_by_name: str | None = None   # who last changed the update (name)
+    status_updated_by_name: str | None = None   # who last changed the update (name; "Deleted user")
+    created_by_name: str | None = None          # who added the lead (name; "Deleted user")
 
 
 class AdminLeadRead(VendorLeadRead):

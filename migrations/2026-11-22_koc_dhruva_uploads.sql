@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS crm_koc_dhruva_leads (
     updated_at DATETIME NOT NULL,
     is_deleted BOOL NOT NULL,
     PRIMARY KEY (id),
-    FOREIGN KEY (created_by) REFERENCES crm_users (id),
+    INDEX ix_crm_koc_dhruva_leads_created_by (created_by),   -- no foreign key: logins can be deleted
     INDEX ix_crm_koc_dhruva_leads_branch_id (branch_id),
     INDEX ix_crm_koc_dhruva_leads_created_at (created_at),
     INDEX ix_crm_koc_dhruva_leads_is_deleted (is_deleted),

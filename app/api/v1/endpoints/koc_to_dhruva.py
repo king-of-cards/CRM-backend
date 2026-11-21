@@ -309,7 +309,9 @@ class KocCrmUpdate(BaseModel):
 
 
 def _answer(db, lead_key: str, meta: LeadMeta | None) -> dict:
-    answer = lead_crm.meta_out(meta, lead_key, {}, None, None)
+    from app.crud.user import user_names
+
+    answer = lead_crm.meta_out(meta, lead_key, {}, None, None, names=user_names(db, [meta.updated_by] if meta else []))
     answer["is_hot"] = hot_leads.is_hot(db, SOURCE, lead_key)
     return answer
 

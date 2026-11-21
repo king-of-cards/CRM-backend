@@ -15,7 +15,7 @@ class LeadActivity(SQLModel, table=True):
     field: str | None = Field(default=None, max_length=100)
     old_value: str | None = Field(default=None, sa_type=Text)
     new_value: str | None = Field(default=None, sa_type=Text)
-    actor_user_id: int | None = Field(default=None, foreign_key="crm_users.id")
+    actor_user_id: int | None = Field(default=None)   # user id; no foreign key: history outlives deleted logins
     actor_name: str = Field(max_length=100)
     actor_role: str = Field(max_length=30)
     created_at: datetime

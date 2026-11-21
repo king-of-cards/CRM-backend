@@ -39,4 +39,4 @@ class LeadMeta(SQLModel, table=True):
     notes: str | None = Field(default=None, sa_column=Column(Text))
 
     updated_at: datetime
-    updated_by: int | None = Field(default=None, foreign_key="crm_users.id")
+    updated_by: int | None = Field(default=None)   # user id; no foreign key: history outlives deleted logins

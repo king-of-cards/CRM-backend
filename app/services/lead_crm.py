@@ -161,7 +161,9 @@ def meta_out(
     suggested: Vendor | None,
     branch_vendor: Vendor | None = None,
     default_vendor: Vendor | None = None,
+    names: dict[int, str] | None = None,
 ) -> dict:
+    """names: {user id: display name} for updated_by (crud.user.user_names); None = not resolved."""
     manual = vendors_by_id.get(meta.vendor_id) if meta and meta.vendor_id else None
     if manual:
         vendor, how = manual, "manual"
@@ -189,6 +191,8 @@ def meta_out(
         "conversion_amount": meta.conversion_amount if meta else None,
         "notes": meta.notes if meta else None,
         "updated_at": _iso(meta.updated_at) if meta else None,
+        "updated_by_name": (names.get(meta.updated_by) if names is not None and meta and meta.updated_by is not None
+                            else None),                    # who last saved the CRM details ("Deleted user")
         "auto_assign": meta.auto_assign is not False if meta else True,
     }
 
@@ -240,6 +244,9 @@ def attach(
             m.lead_key: m
             for m in session.exec(select(LeadMeta).where(LeadMeta.source == source, LeadMeta.lead_key.in_(keys)))
         }
+    from app.crud.user import user_names
+
+    names = user_names(session, (m.updated_by for m in metas.values()))
     hot_rows = {}
     if keys:
         hot_rows = {r.lead_key: r for r in session.exec(select(CrmHotLead).where(
@@ -263,6 +270,7 @@ def attach(
                 suggest_vendor(vendors, location(item), pincode(item)) if rules else None,
                 by_id.get(branch_vendor(item)) if rules else None,
                 default,
+                names,
             )
             marked = hot_rows.get(k)
             hot = marked is not None
