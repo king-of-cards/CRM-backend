@@ -11,7 +11,8 @@ Paging runs over that combined list, so every lead appears exactly once across t
 
 Flows: a CRM lead whose additional_details.otherWeddingServices names "Wedding Gifts & Return
 Gifts" belongs to wedding_gifts, every other one to spin (the same rule as the workflow rows), so
-no marker column is needed.
+no marker column is needed. koc_to_dhruva (KOC -> Dhruva) is a rule on top: a CRM lead can be in
+it AND in spin / wedding_gifts (see spin_leads.koc_reason).
 """
 import json
 import re
@@ -72,7 +73,16 @@ def flow_of(lead: CrmSpinLead) -> str:
     return flow_of_details(_details(lead))
 
 
+def koc_reason(lead: CrmSpinLead) -> str | None:
+    """"budget", "quantity" or None: why the lead is (or isn't) a KOC -> Dhruva lead."""
+    from app.api.v1.endpoints.spin_leads import koc_reason as reason_of
+
+    return reason_of(_details(lead))
+
+
 def _in_flow(lead: CrmSpinLead, flow: str | None) -> bool:
+    if flow == "koc_to_dhruva":
+        return koc_reason(lead) is not None
     return flow is None or flow_of(lead) == flow
 
 
@@ -102,6 +112,19 @@ def _matches(lead: CrmSpinLead, search: str, branch: str | None, flt: dict) -> b
         if created is None or not (flt["created_from"] <= created < flt["created_to"]):
             return False
     if flt.get("origins") and lead.origin not in flt["origins"]:
+        return False
+    if flt.get("occasion") and not _like(flt["occasion"], _text(_details(lead).get("occasionType"))):
+        return False
+    if flt.get("quantity_min") is not None or flt.get("quantity_max") is not None:
+        from app.api.v1.endpoints.spin_leads import first_number
+        quantity = first_number(_details(lead).get("quantityRequired"))
+        if quantity is None:
+            return False
+        if flt.get("quantity_min") is not None and quantity < flt["quantity_min"]:
+            return False
+        if flt.get("quantity_max") is not None and quantity > flt["quantity_max"]:
+            return False
+    if flt.get("reason") and koc_reason(lead) != flt["reason"]:
         return False
     if flt.get("event_from") is not None or flt.get("event_to") is not None:
         event = str(_details(lead).get("occasionDate") or "")[:10]       # YYYY-MM-DD

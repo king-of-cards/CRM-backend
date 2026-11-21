@@ -29,7 +29,8 @@ SOURCES = ("spin", "wedding_gifts", "whatsapp", "wedding", "wedding_planner")
 SPIN_FLOWS = ("spin", "wedding_gifts")          # both stored in crm_spin_leads / spin_lead
 VTK = "vendor_to_koc"
 DHRUVA = "dhruva"
-PLACES = (*SOURCES, VTK, DHRUVA)
+KOC_TO_DHRUVA = "koc_to_dhruva"      # spin / wedding_gifts leads KOC shares with Dhruva (same lead keys)
+PLACES = (*SOURCES, VTK, DHRUVA, KOC_TO_DHRUVA)
 WORKFLOW_CACHE_SECONDS = 300
 
 
@@ -83,7 +84,7 @@ class _Visibility:
     def sees(self, place: str, key: str, vendor_id: int | None = None) -> bool:
         if self.viewer.sees_all:
             return True
-        if self.viewer.vendor_id is None or place == DHRUVA:
+        if self.viewer.vendor_id is None or place in (DHRUVA, KOC_TO_DHRUVA):
             return False                     # Dhruva logins: no other section; vendors: never Dhruva
         if place == VTK:
             return vendor_id == self.viewer.vendor_id
@@ -93,8 +94,17 @@ class _Visibility:
 
 
 # ── Per page ───────────────────────────────────────────────────────────
-def _matches(db: Session, e164s: set[str]) -> list[tuple[str, str, str, int | None, str | None]]:
-    """(place, key, e164, vendor_id, vendor_name) of every lead with one of these phones."""
+def _koc_copies(db: Session, rows: list[tuple]) -> list[tuple]:
+    """KOC -> Dhruva has no phones of its own: its leads are spin / wedding_gifts leads (same keys)."""
+    from app.services import koc_dhruva
+
+    koc_keys = koc_dhruva.keys(db)
+    return [(KOC_TO_DHRUVA, *rest) for place, *rest in rows if place in SPIN_FLOWS and rest[0] in koc_keys]
+
+
+def _matches(db: Session, e164s: set[str], include_koc: bool = False) -> list[tuple[str, str, str, int | None, str | None]]:
+    """(place, key, e164, vendor_id, vendor_name) of every lead with one of these phones.
+    include_koc: also KOC -> Dhruva (only admins and view-only logins may see it)."""
     from app.models.vendor import Vendor
     from app.models.vendor_to_koc import VendorToKocLead
     from app.services.crm_leads import service
@@ -121,7 +131,16 @@ def _matches(db: Session, e164s: set[str]) -> list[tuple[str, str, str, int | No
     for lead_id, phone, alt in db.exec(select(DhruvaLead.id, DhruvaLead.phone_e164, DhruvaLead.alt_phone_e164).where(
             or_(col(DhruvaLead.phone_e164).in_(chunk), col(DhruvaLead.alt_phone_e164).in_(chunk)))):
         out += [(DHRUVA, str(lead_id), e, None, None) for e in {phone, alt} if e in e164s]
+    if include_koc:
+        out += _koc_copies(db, out)
     return out
+
+
+def _listed_spin_keys(db: Session) -> dict[str, set[str]]:
+    """The keys actually listed in spin / wedding_gifts. The workflow phone lookups cover every row
+    (listed or not, tagged by flow), so KOC -> Dhruva, whose rule reaches unlisted rows too, only
+    reports a spin / wedding_gifts match when that lead is in the list."""
+    return {flow: set(access.assignments(db, flow)) for flow in SPIN_FLOWS}
 
 
 def page_phones(db: Session, source: str, keys: list[str]) -> dict[str, str]:
@@ -146,11 +165,13 @@ def attach(db: Session, viewer, place: str, items: list[dict], key_of: Callable[
     """Add "also_in" to every item: [{source, count[, vendors]}] for the OTHER places where the
     item's phone exists and the viewer may see it. e164_of: {item key: e164, or a set of them
     (Dhruva: phone and alt phone)}. A lead found by two of the item's phones counts once."""
-    matches = _matches(db, set().union(*(_phones_of(v) for v in e164_of.values())) if e164_of else set())
+    matches = _matches(db, set().union(*(_phones_of(v) for v in e164_of.values())) if e164_of else set(),
+                       include_koc=bool(viewer.sees_all))
     by_phone: dict[str, list[tuple]] = {}
     for m in matches:
         by_phone.setdefault(m[2], []).append(m)
     vis = _Visibility(db, viewer)
+    listed = _listed_spin_keys(db) if place == KOC_TO_DHRUVA else None
     for item in items:
         key = str(key_of(item))
         found: dict[str, dict] = {}
@@ -159,6 +180,8 @@ def attach(db: Session, viewer, place: str, items: list[dict], key_of: Callable[
         for other, other_key, _, vendor_id, vendor_name in hits:
             if other == place or (other, other_key) in seen or not vis.sees(other, other_key, vendor_id):
                 continue
+            if listed is not None and other in SPIN_FLOWS and other_key not in listed[other]:
+                continue                     # a workflow row not listed in that flow (KOC -> Dhruva only)
             seen.add((other, other_key))
             entry = found.setdefault(other, {"source": other, "count": 0})
             entry["count"] += 1
@@ -197,9 +220,9 @@ def _workflow_index() -> dict[str, tuple[str, str]]:
         return {}
 
 
-def index(db: Session) -> dict[str, list[tuple[str, str, int | None]]]:
+def index(db: Session, include_koc: bool = False) -> dict[str, list[tuple[str, str, int | None]]]:
     """{place: [(key, e164, vendor_id)]} for every lead of every place (vendor_id: Vendor -> KOC).
-    A Dhruva lead appears once per phone (phone and alt phone)."""
+    A Dhruva lead appears once per phone (phone and alt phone). include_koc: also KOC -> Dhruva."""
     from app.models.dhruva import DhruvaLead
     from app.models.vendor_to_koc import VendorToKocLead
 
@@ -215,6 +238,12 @@ def index(db: Session) -> dict[str, list[tuple[str, str, int | None]]]:
     out[DHRUVA] = [(str(i), e, None) for i, phone, alt in
                    db.exec(select(DhruvaLead.id, DhruvaLead.phone_e164, DhruvaLead.alt_phone_e164))
                    for e in {phone, alt} if e]
+    out[KOC_TO_DHRUVA] = []
+    if include_koc:
+        from app.services import koc_dhruva
+
+        koc_keys = koc_dhruva.keys(db)
+        out[KOC_TO_DHRUVA] = [(k, e, v) for flow in SPIN_FLOWS for k, e, v in out[flow] if k in koc_keys]
     return out
 
 
@@ -226,8 +255,10 @@ def workflow_phone_index(flow: str = "spin") -> dict[str, str]:
 def matching_keys(db: Session, viewer, place: str) -> set[str]:
     """Keys of `place` (lead keys; Vendor -> KOC: lead ids as text) whose phone exists in another
     place the viewer may see."""
-    idx = index(db)
+    idx = index(db, include_koc=bool(viewer.sees_all) or place == KOC_TO_DHRUVA)
     vis = _Visibility(db, viewer)
+    listed = _listed_spin_keys(db) if place == KOC_TO_DHRUVA else None
     elsewhere = {e for other in PLACES if other != place
-                 for key, e, vendor_id in idx[other] if vis.sees(other, key, vendor_id)}
+                 for key, e, vendor_id in idx[other] if vis.sees(other, key, vendor_id)
+                 and (listed is None or other not in SPIN_FLOWS or key in listed[other])}
     return {key for key, e, _ in idx[place] if e in elsewhere}

@@ -105,11 +105,19 @@ def workflow_flow(row: dict) -> str:
     return spin_ep.WEDDING_GIFTS if spin_ep.is_gift(row.get("additional_details.otherWeddingServices")) else spin_ep.SPIN
 
 
+def workflow_details(row: dict) -> dict:
+    """The row's additional_details, from its "additional_details.<key>" fields."""
+    return {k.split(".", 1)[1]: v for k, v in row.items() if k.startswith("additional_details.")}
+
+
 def fake_list_spin_leads(_admin=None, page=1, page_size=50, search=None, sort=None, order="asc", branch=None,
                          filters=None, offset=None, limit=None, keys_only=False, flow="spin"):
     start = (page - 1) * page_size if offset is None else offset
     count = page_size if limit is None else limit
-    rows = [r for r in WORKFLOW_ROWS if workflow_flow(r) == flow]
+    if flow == spin_ep.KOC_TO_DHRUVA:          # KOC -> Dhruva: its rule over every row
+        rows = [r for r in WORKFLOW_ROWS if spin_ep.koc_reason(workflow_details(r))]
+    else:
+        rows = [r for r in WORKFLOW_ROWS if workflow_flow(r) == flow]
     if filters and filters.get("ids_in") is not None:
         rows = [r for r in rows if str(r["id"]) in {str(i) for i in filters["ids_in"]}]
     if filters and filters.get("created_from") is not None:      # created_at in [from, to), naive UTC
@@ -120,6 +128,22 @@ def fake_list_spin_leads(_admin=None, page=1, page_size=50, search=None, sort=No
                 and (not filters.get("event_to") or r["additional_details.occasionDate"][:10] <= filters["event_to"])]
     if filters and filters.get("no_workflow"):
         rows = []
+    if (search or "").strip():                                   # any field contains (any case)
+        term = search.strip().casefold()
+        rows = [r for r in rows if any(term in str(v).casefold() for v in r.values() if v is not None)]
+    if filters and filters.get("budget"):                        # exact budget value
+        rows = [r for r in rows if str(r.get("additional_details.estimatedBudgetPerCard")) == str(filters["budget"])]
+    if filters and filters.get("occasion"):                      # occasion contains (any case)
+        rows = [r for r in rows if filters["occasion"].casefold()
+                in str(r.get("additional_details.occasionType") or "").casefold()]
+    if filters and (filters.get("quantity_min") is not None or filters.get("quantity_max") is not None):
+        def qty(r):
+            return spin_ep.first_number(r.get("additional_details.quantityRequired"))
+        rows = [r for r in rows if qty(r) is not None
+                and (filters.get("quantity_min") is None or qty(r) >= filters["quantity_min"])
+                and (filters.get("quantity_max") is None or qty(r) <= filters["quantity_max"])]
+    if filters and filters.get("reason"):
+        rows = [r for r in rows if spin_ep.koc_reason(workflow_details(r)) == filters["reason"]]
     if filters and filters.get("pincode"):                       # pincode starts with
         rows = [r for r in rows if str(r.get("additional_details.pincode") or "").startswith(filters["pincode"])]
     if branch not in (None, ""):

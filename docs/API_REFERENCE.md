@@ -34,6 +34,7 @@ per-vendor access rules, and the CRM details endpoint `PUT /leads/{source}/{lead
 15. [Activity and follow-up reminders](#15-activity-and-follow-up-reminders)
 16. [View-only role](#16-view-only-role)
 17. [Wedding gifts](#17-wedding-gifts)
+18. [KOC → Dhruva](#18-koc--dhruva)
 
 ---
 
@@ -1002,7 +1003,8 @@ Pending, without amounts); Vendor → KOC from its own columns.
 ### Top cities sources (`sources`)
 
 `GET /analytics/overview` and `GET /analytics/vendor-to-koc` take an optional `sources`: a
-comma-separated list of `spin`, `wedding_gifts`, `whatsapp`, `wedding`, `wedding_planner`, `vendor_to_koc`, `dhruva`
+comma-separated list of `spin`, `wedding_gifts`, `whatsapp`, `wedding`, `wedding_planner`, `vendor_to_koc`, `dhruva`,
+`koc_to_dhruva`
 (the same parsing and validation as `GET /reminders/follow-ups`: spaces and capitals are ignored).
 Only the Top cities fields (`top_cities`, `top_cities_sources`, `top_cities_no_city`,
 `top_cities_no_city_by_source`) follow it; every other number is unchanged.
@@ -1021,8 +1023,8 @@ Only the Top cities fields (`top_cities`, `top_cities_sources`, `top_cities_no_c
   validated but changes nothing for them.
 - Results are cached per viewer, period **and** source selection (`spin,wedding` and `wedding,spin`
   share one entry).
-- **400 errors:** `sources must be a comma-separated list of: spin, wedding_gifts, whatsapp, wedding, wedding_planner, vendor_to_koc, dhruva`
-  (empty list such as `?sources=,`), or `Unknown source(s): <names>. Allowed: spin, wedding_gifts, whatsapp, wedding, wedding_planner, vendor_to_koc, dhruva`.
+- **400 errors:** `sources must be a comma-separated list of: spin, wedding_gifts, whatsapp, wedding, wedding_planner, vendor_to_koc, dhruva, koc_to_dhruva`
+  (empty list such as `?sources=,`), or `Unknown source(s): <names>. Allowed: spin, wedding_gifts, whatsapp, wedding, wedding_planner, vendor_to_koc, dhruva, koc_to_dhruva`.
 
 ### What each number covers (`/analytics/overview`)
 
@@ -1145,7 +1147,7 @@ exists.
 ```
 
 - **Places:** `spin` and `wedding_gifts` (workflow and CRM leads, each under its own flow), `whatsapp`, `wedding`, `wedding_planner`,
-  `vendor_to_koc` and `dhruva`, always in that order. A lead's own source is never listed (duplicates inside one
+  `vendor_to_koc`, `dhruva` and `koc_to_dhruva` (admins and view-only only; see [KOC → Dhruva](#18-koc--dhruva)), always in that order. A lead's own source is never listed (duplicates inside one
   source are the [duplicate check](#4-duplicates)'s job). Empty list: the phone is nowhere else.
 - **Matching:** by E.164 phone (`phone_e164`; Vendor → KOC's 10-digit numbers as `+91…`; Dhruva:
   phone **and** alt phone, so a Dhruva lead is found by either, and a lead found through both of a
@@ -1577,8 +1579,8 @@ Google Sheets are not logged.
 | `GET /leads/{source}/{lead_key}/activity` | admin, vendor who can see the lead | Newest first; `page` (default 1), `page_size` (default 25, max 100); items include `actor_name`, `actor_role`, `action`, `field`, `old_value`, `new_value`, `created_at` (ISO UTC) |
 | `GET /vendor-to-koc/leads/{id}/activity` | admin, owning vendor | Same paging and item shape; vendor sees lead fields and KOC fields shown read-only |
 | `GET /dhruva/leads/{id}/activity` | admin, Dhruva | Same paging and item shape; Dhruva activity is read-only |
-| `GET /reminders/follow-ups?days=7&sources=wedding,vendor_to_koc` | admin, vendor | Optional comma-separated `sources` subset (`spin`, `wedding_gifts`, `whatsapp`, `wedding`, `wedding_planner`, `vendor_to_koc`, `dhruva`); items, counts and the days window apply only to requested sources. Vendors remain scoped to their own visible leads. Omit `sources` for the existing default. Bad values: 400 `Unknown source(s): <names>. Allowed: …` |
-| `GET /dhruva/reminders/follow-ups?days=7` | admin, Dhruva | Same reminder format over Dhruva leads; Dhruva logins do not receive the admin-only status field |
+| `GET /reminders/follow-ups?days=7&sources=wedding,vendor_to_koc` | admin, vendor | Optional comma-separated `sources` subset (`spin`, `wedding_gifts`, `whatsapp`, `wedding`, `wedding_planner`, `vendor_to_koc`, `dhruva`, `koc_to_dhruva`; vendors never get `koc_to_dhruva`); items, counts and the days window apply only to requested sources. Vendors remain scoped to their own visible leads. Omit `sources` for the existing default. Bad values: 400 `Unknown source(s): <names>. Allowed: …` |
+| `GET /dhruva/reminders/follow-ups?days=7&sources=dhruva,koc_to_dhruva` | admin, view only, Dhruva | Both Dhruva directions: Dhruva → KOC (`source: "dhruva"`) and KOC → Dhruva (`source: "koc_to_dhruva"`); optional `sources` narrows to one (other values: 400). Dhruva logins do not receive the admin-only status field |
 
 Reminder items contain `source`, `lead_key`, `name`, `phone`, `follow_up_date`, and `days_overdue`
 (positive overdue, zero today, negative upcoming). Admins also receive `update_status` and, outside
@@ -1714,3 +1716,87 @@ Like Spin, there is no single add (`POST /crm-leads/wedding_gifts` → 405): bul
 `wedding_gifts`, with a preview, conflict checks and a rollback. Manual assignments are kept. The
 workflow keys are regenerated right before applying with the read-only
 `python scripts/wedding_gifts_keys.py --update migrations/2026-11-20_wedding_gifts_source.sql`.
+
+---
+
+## 18. KOC → Dhruva
+
+A section of the Dhruva flow, source key `koc_to_dhruva` (label **KOC → Dhruva**): the spin leads
+KOC shares with Dhruva by rule. Dhruva works these leads (the receiver edits), as admins work the
+Dhruva → KOC leads.
+
+- **Rule:** every workflow `spin_lead` row (listed as Spin or not: `otherWeddingServices` doesn't
+  matter) and every CRM-added spin lead where the first number of `estimatedBudgetPerCard` is
+  **≥ 70** (`70-100`, `70_100`, `100-200`, `500+`, `500_PLUS`, `400` …; `50_100` and `UNDER_50`
+  count as 50), **or** `quantityRequired` is **≥ 1000** (also when the budget is empty or below 70).
+  `reason` is `budget` ("Budget ≥ ₹70", wins when both match) or `quantity` ("Quantity ≥ 1000").
+- **In both places:** the leads stay in Spin / Wedding gifts. This section keeps its own CRM
+  details (`crm_lead_meta` with `source = "koc_to_dhruva"`), hot flags and activity, so a Dhruva
+  Update or quote never changes the Spin / Wedding gifts record, and the other way round. Lead keys
+  are the same (`spin_lead` id, or `crm-<id>`).
+- **Never assigned:** no vendor, no automatic rules (`crm.vendor` is always `null`).
+- **No add or upload:** rows come only from the rule. No migration was needed.
+
+### Who
+
+| | Admin | View only | Dhruva login | Vendor |
+|---|---|---|---|---|
+| List, stats, filter options, export, lead, activity, dashboard | ✔ | ✔ | ✔ | 403 |
+| `PUT …/crm`, hot | ✔ | 403 (view only) | ✔ | 403 |
+| `also_in` entry "KOC → Dhruva" on other sections' leads | ✔ | ✔ | — | never |
+
+### Endpoints (prefix `/api/v1/koc-to-dhruva`)
+
+| Need | Endpoint |
+|---|---|
+| List, stats, filter options | `GET /leads`, `/leads/stats`, `/leads/filter-options` |
+| Export (exactly the list) | `GET /leads/export?format=xlsx\|csv` |
+| One lead | `GET /leads/{lead_key}` (404 when the lead doesn't match the rule) |
+| CRM details | `GET`/`PUT /leads/{lead_key}/crm` |
+| Hot, activity | `POST`/`DELETE /leads/{lead_key}/hot`, `GET /leads/{lead_key}/activity` |
+
+- **List items:** the Spin list's fields plus `lead_key`, `reason`, `reason_label`, `occasion`,
+  `event_date`, `pincode`, `estimated_budget_per_card`, `quantity_required`, `received`, the section's
+  `crm` (`update_status`, `notes` = additional comments, `quoted_amount`, `quoted_date`,
+  `conversion_amount`, `follow_up_date`), `is_hot` and `also_in`.
+- **Filters** (list, stats and export alike): the shared ones (`search`, `date_from`/`date_to` or
+  `period` = received, `event_from`/`event_to`/`upcoming_days`, `update_status`, `quote`, `conversion`,
+  `follow_up`, `hot`, `also_in`, `origin`), plus `branch`, `pincode`, `budget` (exact), `occasion`
+  (contains), `quantity_min` / `quantity_max`, `reason` (`budget` \| `quantity`); `sort` / `order`;
+  `page_size` 10, 25, 50 or 100. `vendor_id` and `unassigned` answer 400 (never assigned).
+- **Stats:** `{total, kpis, by_reason}`; `total` equals the list's total for the same filters.
+- **Filter options:** budgets, pincodes, branches, origins and updates (as Spin), plus `occasions`,
+  `reasons` and `quantity_range`.
+- **Export columns:** Sl. No, Name, Phone, Email, Occasion, Event date, Branch, Pincode, Estimated
+  budget per card, Quantity required, Reason, Received, Update, Additional comments, Quoted amount,
+  Quoted date, Conversion amount, Follow-up date, Hot.
+- **`PUT …/crm` body** (send only what changes; `null` clears): `update_status` (the same 7 values),
+  `notes`, `quoted_amount`, `quoted_date`, `conversion_amount`, `follow_up_date`. Any other field
+  (e.g. `vendor_id`): 422. Each change is logged in the activity.
+
+### Dashboard: `GET /api/v1/analytics/koc-to-dhruva`
+
+A separate endpoint (not a parameter on `/analytics/dhruva`: the breakdowns differ). The shared
+period rules (`date_from` / `date_to`, `period=all`), **all time by default**; received =
+`created_at` (IST day). Admins, view-only and Dhruva logins; vendors 403.
+
+| Field | Covers |
+|---|---|
+| `received`, `previous_period`, `change_pct` | Leads received in the period, and the comparison |
+| `kpis` | [The KPIs](#kpis-the-same-six-everywhere) from this section's CRM details, plus `quotes_count`, `conversion_amount_count` / `conversion_amount_total` (AOV inputs), `hot_count`, `pending` |
+| `by_reason` | `[{reason, label, count}]` for `budget` and `quantity` |
+| `by_budget_band` | `70-100`, `100-200`, `200-500`, `500+`, `under_70` (quantity-only leads), `not_given` |
+| `by_occasion` | Top 10 occasions |
+| `inflow` | `[{date, end, total, budget, quantity}]` per day / week / month |
+| `by_status` | `pending` plus every Update |
+| `top_cities` | City or pincode area, as the other dashboards |
+| `latest` | The 6 newest leads (`lead_key`, `name`, `phone`, `occasion`, `reason`, `received`, `update_status`, `is_hot`) |
+
+### Reminders and also_in
+
+- Follow-ups set here appear in `GET /dhruva/reminders/follow-ups` (both Dhruva directions, each item
+  with its `source`; `sources=koc_to_dhruva` or `sources=dhruva` narrows it) and, for admins and
+  view-only logins, in `GET /reminders/follow-ups` (`sources` accepts `koc_to_dhruva`).
+- `also_in`: a Spin / Wedding gifts lead in this section shows `{"source": "koc_to_dhruva", …}` to
+  admins and view-only logins (vendors never). A KOC → Dhruva lead shows the Spin / Wedding gifts list
+  it is listed in; Dhruva logins see no other section here (empty `also_in`).

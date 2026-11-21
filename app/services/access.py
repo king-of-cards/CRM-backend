@@ -7,6 +7,8 @@
   View only    (crm_users.role = viewer) sees everything an admin sees (Viewer.sees_all) and changes
                nothing: every write answers 403 (app/api/deps.block_viewer_writes).
   Unassigned   leads are visible to admins (and view-only logins) only.
+  KOC -> Dhruva (koc_to_dhruva, a Dhruva section) is never assigned: admins, view-only and Dhruva
+               logins see every lead of it, vendor logins none.
 
 The effective assignment is the one shown in "Assigned to" (lead_crm.meta_out): manual, then the
 sheet's "leads shared", then the branch's vendor, then the area rules, unless the lead was
@@ -67,6 +69,13 @@ def viewer_for(db: Session, user: User) -> Viewer:
     return Viewer(user, link.vendor_id)
 
 
+DHRUVA_SECTION_SOURCES = ("koc_to_dhruva",)
+
+
+def _dhruva_section_reader(viewer: Viewer) -> bool:
+    return viewer.sees_all or viewer.user.role == Role.DHRUVA.value
+
+
 def _rows(db: Session, source: str) -> list[tuple]:
     """(lead_key, location, pincode, sheet vendor[, branch vendor id]) for every listed lead:
     the same inputs the list endpoints give lead_crm.attach. Archived/removed leads left out."""
@@ -74,6 +83,10 @@ def _rows(db: Session, source: str) -> list[tuple]:
         from app.api.v1.endpoints.vendors import _spin_rows
 
         return _spin_rows(db, source)
+    if source == "koc_to_dhruva":
+        from app.services import koc_dhruva
+
+        return [(key, None, None, None) for key in sorted(koc_dhruva.keys(db))]
     if source == "whatsapp":
         return [(k, c, None, None) for k, c in db.exec(
             select(WhatsAppLead.sheet_key, WhatsAppLead.country).where(WhatsAppLead.is_deleted == False))]  # noqa: E712
@@ -97,12 +110,16 @@ def assignments(db: Session, source: str) -> dict[str, int | None]:
 
 def visible_keys(db: Session, viewer: Viewer, source: str) -> set[str] | None:
     """Lead keys this viewer may see in the source; None = all (admin, view only)."""
+    if source in DHRUVA_SECTION_SOURCES:
+        return None if _dhruva_section_reader(viewer) else set()
     if viewer.sees_all:
         return None
     return {key for key, vendor_id in assignments(db, source).items() if vendor_id == viewer.vendor_id}
 
 
 def can_see(db: Session, viewer: Viewer, source: str, lead_key: str) -> bool:
+    if source in DHRUVA_SECTION_SOURCES:
+        return _dhruva_section_reader(viewer)
     if viewer.sees_all:
         return True
     return assignments(db, source).get(str(lead_key)) == viewer.vendor_id

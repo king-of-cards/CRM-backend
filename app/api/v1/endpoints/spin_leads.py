@@ -7,6 +7,9 @@ Two flows share the table (see `flow_filter`):
                  comma-separated combination)
 Every reader passes its flow, so a lead is in exactly one of them.
 
+A third view, koc_to_dhruva (the Dhruva section "KOC -> Dhruva"), is a rule over ALL rows (listed
+or not), so its leads ALSO stay in spin / wedding_gifts: see `koc_filter` / `koc_reason`.
+
 Settings you may want to adjust (module level, below):
   HIDDEN_COLUMNS       table columns that are never selected, returned, searched or sorted
   HIDDEN_JSON_KEYS     keys inside expanded JSON columns, excluded the same way
@@ -17,6 +20,7 @@ Settings you may want to adjust (module level, below):
 """
 import json
 import logging
+import re
 import threading
 import time as _time
 import uuid
@@ -59,6 +63,13 @@ WEDDING_GIFTS = "wedding_gifts"
 FLOWS = (SPIN, WEDDING_GIFTS)
 GIFT_KEY = "otherWeddingServices"
 GIFT_PHRASE = "Wedding Gifts & Return Gifts"
+
+# KOC -> Dhruva: estimatedBudgetPerCard's first number >= 70, or quantityRequired >= 1000
+KOC_TO_DHRUVA = "koc_to_dhruva"
+KOC_BUDGET_KEY, KOC_QUANTITY_KEY = "estimatedBudgetPerCard", "quantityRequired"
+KOC_BUDGET_MIN, KOC_QUANTITY_MIN = 70, 1000
+KOC_REASON_LABELS = {"budget": "Budget ≥ ₹70", "quantity": "Quantity ≥ 1000"}
+NUMBER_PATTERN = r"([0-9]+(?:\.[0-9]+)?)"          # the first number anywhere ("UNDER_50" -> 50)
 BLANK_PATTERN = r"^\s*$"                      # empty or whitespace-only text
 
 JSON_KEYS_CACHE_SECONDS = 600    # re-discover JSON keys every 10 minutes
@@ -165,8 +176,61 @@ def flow_filter(table: Table, flow: str | None) -> list[ColumnElement]:
     return [expr] if flow == WEDDING_GIFTS else [func.coalesce(expr, false()) == false()]
 
 
+def first_number(value: Any) -> float | None:
+    """The first number in a value ("70-100" -> 70, "500_PLUS" -> 500, "1,000" -> 1000), or None.
+    The Python twin of `_number_expr`."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float, Decimal)):
+        return float(value)
+    m = re.search(NUMBER_PATTERN, str(value).replace(",", ""))
+    return float(m.group(1)) if m else None
+
+
+def koc_reason(details: Any) -> str | None:
+    """"budget" (first number of estimatedBudgetPerCard >= 70, wins when both match), "quantity"
+    (quantityRequired >= 1000), or None (not a KOC -> Dhruva lead)."""
+    if not isinstance(details, dict):
+        return None
+    budget = first_number(details.get(KOC_BUDGET_KEY))
+    if budget is not None and budget >= KOC_BUDGET_MIN:
+        return "budget"
+    quantity = first_number(details.get(KOC_QUANTITY_KEY))
+    if quantity is not None and quantity >= KOC_QUANTITY_MIN:
+        return "quantity"
+    return None
+
+
+def _detail_text(table: Table, key: str):
+    return _jsonb(table, REQUIRED_JSON_COLUMN).op("->>", return_type=Text)(bindparam(None, key, type_=Text))
+
+
+def _number_expr(table: Table, key: str):
+    """CAST(substring(replace(details ->> key, ',', '') FROM NUMBER_PATTERN) AS NUMERIC):
+    the first number of a JSON value (NULL when it has none)."""
+    text_value = func.replace(_detail_text(table, key), ",", "")
+    return cast(func.substring(text_value, bindparam(None, NUMBER_PATTERN, type_=Text)), Numeric)
+
+
+def koc_budget_hit(table: Table):
+    return func.coalesce(_number_expr(table, KOC_BUDGET_KEY) >= KOC_BUDGET_MIN, false())
+
+
+def koc_quantity_hit(table: Table):
+    return func.coalesce(_number_expr(table, KOC_QUANTITY_KEY) >= KOC_QUANTITY_MIN, false())
+
+
+def koc_filter(table: Table) -> list[ColumnElement]:
+    """KOC -> Dhruva rows: every row of the table (no required keys) matching the budget or the
+    quantity rule."""
+    return [or_(koc_budget_hit(table), koc_quantity_hit(table))]
+
+
 def base_filter(table: Table, flow: str | None = SPIN) -> list[ColumnElement]:
-    """What every listed query of a flow applies: the required keys, then the flow."""
+    """What every listed query of a flow applies: the required keys, then the flow. koc_to_dhruva:
+    its own rule over every row."""
+    if flow == KOC_TO_DHRUVA:
+        return koc_filter(table)
     return _required_filter(table) + flow_filter(table, flow)
 
 
@@ -573,6 +637,17 @@ def list_spin_leads(
                 conditions.append(day <= bindparam(None, flt["event_to"], type_=Text))
     if flt.get("no_workflow"):
         conditions.append(false())                     # origin asked for has no workflow leads
+    if flt.get("occasion"):                             # occasion type contains (any case)
+        pattern = bindparam("occasion_pattern", _like_pattern(flt["occasion"]), type_=Text)
+        conditions.append(_detail_text(table, "occasionType").ilike(pattern, escape=LIKE_ESCAPE))
+    if flt.get("quantity_min") is not None:
+        conditions.append(_number_expr(table, KOC_QUANTITY_KEY) >= flt["quantity_min"])
+    if flt.get("quantity_max") is not None:
+        conditions.append(_number_expr(table, KOC_QUANTITY_KEY) <= flt["quantity_max"])
+    if flt.get("reason") == "budget":
+        conditions.append(koc_budget_hit(table))
+    elif flt.get("reason") == "quantity":
+        conditions += [koc_budget_hit(table) == false(), koc_quantity_hit(table)]
 
     if keys_only:
         try:
@@ -704,7 +779,7 @@ def filter_options(viewer, db, flow: str = SPIN) -> dict:
     from app.services.stores import store_for
 
     visible = access.visible_keys(db, viewer, flow)
-    if viewer.sees_all:
+    if visible is None:                       # every lead of the flow (admins; Dhruva logins on koc_to_dhruva)
         base = response_cache.get(("spin", "filter-options") + (() if flow == SPIN else (flow,)),
                                   lambda: spin_filter_options(None, flow), fresh=600, stale=3600)
     else:

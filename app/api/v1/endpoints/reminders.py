@@ -79,9 +79,11 @@ def _workflow_spin_details(keys: list[str], flow: str = "spin") -> dict[str, tup
 def _reminder_rows(db: Session, viewer: Viewer | None, dhruva_only: bool = False) -> list[dict]:
     today = periods.today_ist()
     rows: list[dict] = []
-    for source in ("spin", "wedding_gifts", "whatsapp", "wedding", "wedding_planner"):
+    # koc_to_dhruva: the Dhruva section's copy of spin leads; access hides it from vendor logins
+    for source in ("spin", "wedding_gifts", "whatsapp", "wedding", "wedding_planner", "koc_to_dhruva"):
         visible = access.visible_keys(db, viewer, source) if viewer is not None else None
-        assignments = access.assignments(db, source) if viewer is not None else {}
+        # koc_to_dhruva is read without a viewer too (the Dhruva reminders endpoint)
+        assignments = access.assignments(db, source) if viewer is not None or source == "koc_to_dhruva" else {}
         metas = list(db.exec(select(LeadMeta).where(LeadMeta.source == source, LeadMeta.follow_up_date.is_not(None))))
         existing_keys = set(assignments)
         candidate = [m for m in metas if m.lead_key in existing_keys
@@ -89,7 +91,7 @@ def _reminder_rows(db: Session, viewer: Viewer | None, dhruva_only: bool = False
                      and m.update_status not in {"converted", "not_interested"}]
         keys = {m.lead_key for m in candidate}
         details = _details_for_crm_source(db, source, keys)
-        if source in ("spin", "wedding_gifts"):
+        if source in ("spin", "wedding_gifts", "koc_to_dhruva"):
             workflow = [key for key in keys if not key.startswith("crm-") and key.isdigit()]
             details.update(_workflow_spin_details(workflow, source))
         vendor_by_id = {v.id: v.name for v in db.exec(select(Vendor))} if viewer is None or viewer.sees_all else {}

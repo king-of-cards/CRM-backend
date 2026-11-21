@@ -418,12 +418,19 @@ def get_activity(lead_id: int, db: DbSession, user: DhruvaSectionUser,
     return lead_activity.list_activity(db, source="dhruva", lead_key=str(lead_id), page=page, page_size=page_size)
 
 
+DHRUVA_REMINDER_SOURCES = ("dhruva", "koc_to_dhruva")        # both Dhruva directions
+
+
 @router.get("/reminders/follow-ups")
-def dhruva_follow_up_reminders(db: DbSession, user: DhruvaSectionUser, days: int = Query(7, ge=0, le=30)):
-    if sees_all(user):
-        from app.api.v1.endpoints.reminders import _make_response, _reminder_rows
-        return _make_response([r for r in _reminder_rows(db, None, dhruva_only=True) if r["source"] == "dhruva"],
-                              days, True)
+def dhruva_follow_up_reminders(db: DbSession, user: DhruvaSectionUser, days: int = Query(7, ge=0, le=30),
+                               sources: str | None = Query(None, description="dhruva, koc_to_dhruva or both "
+                                                                             "(default both)")):
+    """Follow-ups of both Dhruva directions: Dhruva -> KOC (source "dhruva") and KOC -> Dhruva
+    (source "koc_to_dhruva"); each item says which. sources narrows it (same parsing as
+    GET /reminders/follow-ups, only these two values)."""
     from app.api.v1.endpoints.reminders import _make_response, _reminder_rows
-    rows = [r for r in _reminder_rows(db, None, dhruva_only=True) if r["source"] == "dhruva"]
-    return _make_response(rows, days, False)
+    from app.services.lead_sources import parse_sources
+
+    wanted = parse_sources(sources, allowed=DHRUVA_REMINDER_SOURCES)
+    rows = [r for r in _reminder_rows(db, None, dhruva_only=True) if r["source"] in wanted]
+    return _make_response(rows, days, sees_all(user))

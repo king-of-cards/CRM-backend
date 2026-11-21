@@ -36,6 +36,8 @@ from app.models.vendor import Vendor
 SOURCES = ("spin", "wedding_gifts", "whatsapp", "wedding", "wedding_planner")
 # Sources whose leads all go to one vendor (by name, from settings); branch / area / sheet rules don't apply
 SOURCE_DEFAULT_VENDOR_SETTINGS = {"wedding_gifts": "WEDDING_GIFTS_VENDOR_NAME"}
+# Sources whose leads are never assigned to a vendor (no rules, no default vendor)
+UNASSIGNED_SOURCES = ("koc_to_dhruva",)
 
 
 def source_default_vendor_name(source: str) -> str | None:
@@ -200,6 +202,8 @@ def assigned_label(crm: dict | None) -> str:
 
 def source_rules(source: str, vendors: list[Vendor]) -> tuple[bool, Vendor | None]:
     """(whether sheet / branch / area rules apply, the source's default vendor if any and active)."""
+    if source in UNASSIGNED_SOURCES:
+        return False, None
     name = source_default_vendor_name(source)
     if name is None:
         return True, None

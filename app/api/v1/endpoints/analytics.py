@@ -18,7 +18,7 @@ from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import select as sa_select
 from sqlmodel import Session, select
 
@@ -810,4 +810,95 @@ def dhruva_overview(user: DhruvaSectionUser, db: DbSession, period: AllTimeDefau
         "by_status": {"pending": numbers["pending"],
                       **{s.value: sum(1 for r in leads if r.update_status == s.value) for s in UpdateStatus}},
         "latest": [dcrud.serialize(*t, admin=admin, is_hot=str(t[0].id) in hot_keys) for t in latest],
+    }
+
+
+# ── KOC -> Dhruva dashboard ────────────────────────────────────────────
+BUDGET_BANDS = (("70-100", 70, 100), ("100-200", 100, 200), ("200-500", 200, 500), ("500+", 500, None))
+
+
+def _budget_band(budget) -> str:
+    """The estimated budget per card's band (first number): under_70 (quantity-only leads), a band
+    from 70 up, or not_given."""
+    from app.api.v1.endpoints.spin_leads import first_number
+
+    n = first_number(budget)
+    if n is None:
+        return "not_given"
+    if n < 70:
+        return "under_70"
+    return next(label for label, low, high in BUDGET_BANDS if n >= low and (high is None or n < high))
+
+
+@router.get("/koc-to-dhruva")
+def koc_to_dhruva_overview(user: DhruvaSectionUser, db: DbSession, period: AllTimeDefaultPeriod):
+    """KOC -> Dhruva dashboard (its own endpoint: the breakdowns differ from /analytics/dhruva). The
+    shared period rules, all time by default; received = created_at (IST day). CRM numbers are this
+    section's own (source koc_to_dhruva). Admins, view-only and Dhruva logins; vendor logins: 403."""
+    from app.api.v1.endpoints.spin_leads import KOC_REASON_LABELS
+    from app.models.vendor_to_koc import UpdateStatus
+    from app.services import hot_leads, koc_dhruva
+    from app.services.stores import pincode_area
+
+    rows = koc_dhruva.rows(db)
+    if rows is None:
+        raise HTTPException(503, "Read database unavailable")
+    today = periods.today_ist()
+    arrival = [periods.ist_date(r["created"]) for r in rows]
+    if isinstance(period, periods.AllTime):
+        known = [d for d in arrival if d is not None]
+        period = period.resolve(min(known) if known else None, today)
+
+        def in_period(_):
+            return True
+        previous = None
+    else:
+        in_period = period.contains
+        previous = period.previous()
+    current = [r for r, d in zip(rows, arrival) if in_period(d)]
+    before = sum(1 for d in arrival if previous.contains(d)) if previous else None
+
+    metas = kpis.metas_of(db, koc_dhruva.SOURCE)
+    hot = hot_leads.hot_keys(db, koc_dhruva.SOURCE)
+    per_lead = [metas.get(r["key"]) for r in current]
+    numbers = _outcome(per_lead, sum(1 for r in current if r["key"] in hot))
+    numbers.pop("leads", None)
+    numbers["pending"] = sum(1 for m in per_lead if m is None or m.update_status is None)
+    status_of = [m.update_status if m else None for m in per_lead]
+
+    buckets = period.buckets()
+    first = {start: i for i, (start, _) in enumerate(buckets)}
+    inflow = [{"date": s.isoformat(), "end": e.isoformat(), "total": 0, "budget": 0, "quantity": 0}
+              for s, e in buckets]
+    for r, d in zip(rows, arrival):
+        if d is not None and period.contains(d) and in_period(d):
+            point = inflow[first[period.bucket_start(d)]]
+            point["total"] += 1
+            point[r["reason"]] += 1
+
+    occasions = Counter(str(r["occasion"]).strip().title() for r in current if r["occasion"])
+    bands = Counter(_budget_band(r["budget"]) for r in current)
+    band_order = [label for label, _, _ in BUDGET_BANDS] + ["under_70", "not_given"]
+    latest = sorted(current, key=lambda r: (r["created"] or datetime.min, r["key"]), reverse=True)[:6]
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "today": today.isoformat(),
+        "period": period.as_dict(),
+        "received": len(current),
+        "previous_period": before,
+        "change_pct": _change(len(current), before) if before is not None else None,
+        "kpis": numbers,
+        "by_reason": [{"reason": k, "label": label, "count": sum(1 for r in current if r["reason"] == k)}
+                      for k, label in KOC_REASON_LABELS.items()],
+        "by_budget_band": [{"band": b, "count": bands.get(b, 0)} for b in band_order],
+        "by_occasion": _top(occasions, 10),
+        "inflow": inflow,
+        "by_status": {"pending": status_of.count(None),
+                      **{s.value: status_of.count(s.value) for s in UpdateStatus}},
+        "top_cities": _top_cities([(koc_dhruva.SOURCE, r["city"] or pincode_area(r["pincode"])) for r in current]),
+        "latest": [{"lead_key": r["key"], "name": r["name"], "phone": r["phone"], "occasion": r["occasion"],
+                    "reason": r["reason"], "reason_label": r["reason_label"],
+                    "received": r["created"].isoformat() if r["created"] else None,
+                    "update_status": metas[r["key"]].update_status if r["key"] in metas else None,
+                    "is_hot": r["key"] in hot} for r in latest],
     }

@@ -9,6 +9,7 @@ from app.api.v1.endpoints import (
     crm_leads,
     dhruva,
     health,
+    koc_to_dhruva,
     lead_crm,
     notifications,
     reminders,
@@ -44,3 +45,4 @@ api_router.include_router(reminders.router)
 api_router.include_router(crm_leads.router)
 api_router.include_router(vendor_to_koc.router)
 api_router.include_router(dhruva.router)
+api_router.include_router(koc_to_dhruva.router)  # KOC -> Dhruva
