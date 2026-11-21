@@ -1769,7 +1769,10 @@ Dhruva → KOC leads.
 | CRM details | `GET`/`PUT /leads/{lead_key}/crm` |
 | Hot, activity | `POST`/`DELETE /leads/{lead_key}/hot`, `GET /leads/{lead_key}/activity` |
 
-- **List items:** the Spin list's fields plus `lead_key`, `reason`, `reason_label`, `occasion`,
+- **List items** (list, details, export): the Spin list's fields, including the branch exactly as
+  Spin gives it (`branch_id`, and `branch`: `{id, name, code, city}` from the Branches page;
+  `{id, name: "Branch <id>", code: null, city: null}` for an unknown id; `null` without a branch id,
+  no pincode-area fallback), plus `lead_key`, `reason`, `reason_label`, `occasion`,
   `event_date`, `pincode`, `estimated_budget_per_card`, `quantity_required`, `received`, the section's
   `crm` (`update_status`, `notes` = additional comments, `quoted_amount`, `quoted_date`,
   `conversion_amount`, `follow_up_date`), `is_hot` and `also_in`.
@@ -1781,9 +1784,12 @@ Dhruva → KOC leads.
 - **Stats:** `{total, kpis, by_reason}`; `total` equals the list's total for the same filters.
 - **Filter options:** budgets, pincodes, branches, origins and updates (as Spin), plus `occasions`,
   `reasons` and `quantity_range`.
-- **Export columns:** Sl. No, Name, Phone, Email, Occasion, Event date, Branch, Pincode, Estimated
-  budget per card, Quantity required, Reason, Received, Update, Additional comments, Quoted amount,
-  Quoted date, Conversion amount, Follow-up date, Hot.
+- **Export columns:** Sl. No, Name, Phone, Email, Occasion, Event date, Branch, Branch code, Estimated
+  budget per card, Quantity required, Received, Update, Additional comments, Quoted amount, Quoted
+  date, Conversion amount, Follow-up date, Hot. Branch and Branch code are resolved as in the Spin
+  export: the Branches page, then the 12 built-in stores; Branch code is code and city
+  (`JNG-004 · Bangalore`); empty for an unknown or missing branch id. No Reason or Pincode column
+  (the `reason` and `pincode` filters still apply).
 - **`PUT …/crm` body** (send only what changes; `null` clears): `update_status` (the same 7 values),
   `notes`, `quoted_amount`, `quoted_date`, `conversion_amount`, `follow_up_date`. Any other field
   (e.g. `vendor_id`): 422. Each change is logged in the activity.

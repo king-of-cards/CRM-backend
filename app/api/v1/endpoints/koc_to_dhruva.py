@@ -169,9 +169,9 @@ def filter_options(db: DbSession, user: DhruvaSectionUser):
 EXPORT_COLUMNS = [
     files.Column("Sl. No", "int", 8), files.Column("Name", "text", 28), files.Column("Phone", "phone", 16),
     files.Column("Email", "text", 28), files.Column("Occasion", "text", 20), files.Column("Event date", "text", 14),
-    files.Column("Branch", "text", 24), files.Column("Pincode", "text", 10),
+    files.Column("Branch", "text", 24), files.Column("Branch code", "text", 22),
     files.Column("Estimated budget per card", "text", 18), files.Column("Quantity required", "int", 12),
-    files.Column("Reason", "text", 18), files.Column("Received", "datetime", 18), files.Column("Update", "text", 28),
+    files.Column("Received", "datetime", 18), files.Column("Update", "text", 28),
     files.Column("Additional comments", "text", 40), files.Column("Quoted amount", "money", 16),
     files.Column("Quoted date", "date", 14), files.Column("Conversion amount", "money", 18),
     files.Column("Follow-up date", "date", 14), files.Column("Hot", "yesno", 8),
@@ -180,6 +180,18 @@ EXPORT_COLUMNS = [
 
 def _date(value) -> date | None:
     return date.fromisoformat(value) if value else None
+
+
+def _store(item: dict, branches: list[dict]) -> dict:
+    """The lead's branch as the spin export resolves it: the Branches page, then the built-in stores."""
+    from app.services.stores import store_for
+
+    return store_for((item.get("branch") or {}).get("id"), branches) or {}
+
+
+def _branch_code(store: dict) -> str | None:
+    """Code and city, as the spin export's Branch code (JNG-004 · Bangalore)."""
+    return " · ".join(p for p in (store.get("code"), store.get("city")) if p) or None
 
 
 @router.get("/leads/export", response_class=Response, responses={200: {
@@ -194,14 +206,18 @@ def export_leads(db: DbSession, user: DhruvaSectionUser, f: Filters, format: Lit
         raise HTTPException(400, f"The export has {total:,} leads; the limit is {files.EXPORT_MAX_ROWS:,}. "
                                  "Narrow the filters.")
     items = _page(db, user, f, 0, total, sort, order, flt)["items"]
+    from app.services.branches import branches_by_id
+
+    branches = list(branches_by_id(db).values())       # + the built-in stores, as the spin export
     table = []
     for i, item in enumerate(items, start=1):
         crm = item.get("crm") or {}
         quantity = item["quantity_required"]
+        store = _store(item, branches)
         table.append([
             i, koc_dhruva.pick(item, "name"), koc_dhruva.pick(item, "phone"), koc_dhruva.pick(item, "email"),
-            item["occasion"], item["event_date"], (item.get("branch") or {}).get("name"), item["pincode"],
-            item["estimated_budget_per_card"], int(quantity) if quantity is not None else None, item["reason_label"],
+            item["occasion"], item["event_date"], store.get("name"), _branch_code(store),
+            item["estimated_budget_per_card"], int(quantity) if quantity is not None else None,
             files.to_ist(datetime.fromisoformat(item["received"]).replace(tzinfo=timezone.utc))
             if item["received"] else None,
             STATUS_LABELS.get(crm.get("update_status"), crm.get("update_status")), crm.get("notes"),

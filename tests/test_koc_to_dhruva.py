@@ -247,13 +247,59 @@ class FilterTests(KocTestBase):
         with self.logged_in("admin"):
             resp = self.client.get(f"{API}{K2D}/leads/export", params={"format": "csv", "reason": "quantity"})
         lines = list(csv.reader(io.StringIO(resp.content.decode("utf-8-sig"))))
-        self.assertEqual(lines[0], ["Sl. No", "Name", "Phone", "Email", "Occasion", "Event date", "Branch", "Pincode",
-                                    "Estimated budget per card", "Quantity required", "Reason", "Received", "Update",
-                                    "Additional comments", "Quoted amount", "Quoted date", "Conversion amount",
-                                    "Follow-up date", "Hot"])
+        self.assertEqual(lines[0], ["Sl. No", "Name", "Phone", "Email", "Occasion", "Event date", "Branch",
+                                    "Branch code", "Estimated budget per card", "Quantity required", "Received",
+                                    "Update", "Additional comments", "Quoted amount", "Quoted date",
+                                    "Conversion amount", "Follow-up date", "Hot"])
+        self.assertEqual(len(lines), 3)                       # the reason filter still works (302, 306)
         by_name = {r[1]: r for r in lines[1:]}
-        self.assertEqual(by_name["Lead 302"][9:11], ["1000", "Quantity ≥ 1000"])
-        self.assertEqual(by_name["Lead 302"][12:15], ["Will call back", "Call Sunday", "9000"])
+        self.assertEqual(by_name["Lead 302"][9], "1000")
+        self.assertEqual(by_name["Lead 302"][11:14], ["Will call back", "Call Sunday", "9000"])
+
+
+# ── Branch: as the spin list and the spin export ───────────────────────
+BRANCH_ROWS = [dict(r, branch_id=b) for r, b in zip(ROWS, (1, 7, None, None, 999, None, None))]
+#   301: branch 1 (Branches page)   302: 7 (built-in store only)   305: 999 (unknown)   306: none
+
+
+class BranchTests(KocTestBase):
+    def setUp(self):
+        super().setUp()
+        self.branch_rows = mock.patch.object(base, "WORKFLOW_ROWS", BRANCH_ROWS)
+        self.branch_rows.start()
+
+    def tearDown(self):
+        self.branch_rows.stop()
+        super().tearDown()
+
+    def test_items_carry_the_spin_branch(self):
+        koc = {i["lead_key"]: i for i in self.get(f"{K2D}/leads", page_size=100)["items"]}
+        spin = {str(i["id"]): i for i in self.get("/spin-leads", page_size=100)["items"]}
+        for key in ("301", "302", "305", "306"):
+            self.assertEqual((koc[key]["branch_id"], koc[key]["branch"]),
+                             (spin[key]["branch_id"], spin[key]["branch"]), key)
+            self.assertEqual(self.get(f"{K2D}/leads/{key}")["branch"], spin[key]["branch"], key)
+        self.assertEqual(koc["301"]["branch"], {"id": 1, "name": "Chamrajpet", "code": "CHA-001", "city": "Bangalore"})
+        self.assertEqual(koc["305"]["branch"], {"id": 999, "name": "Branch 999", "code": None, "city": None})
+        self.assertIsNone(koc["306"]["branch"])                         # no pincode-area fallback, as spin
+
+    def test_export_branch_and_code_as_the_spin_export(self):
+        with self.logged_in("admin"):
+            koc = self.client.get(f"{API}{K2D}/leads/export", params={"format": "csv"})
+            spin = self.client.get(f"{API}/crm-leads/spin/export", params={"format": "csv"})
+        koc_rows = list(csv.reader(io.StringIO(koc.content.decode("utf-8-sig"))))
+        spin_rows = list(csv.reader(io.StringIO(spin.content.decode("utf-8-sig"))))
+        k, s = koc_rows[0], spin_rows[0]
+        koc_branch = {r[k.index("Name")]: (r[k.index("Branch")], r[k.index("Branch code")]) for r in koc_rows[1:]}
+        spin_branch = {r[s.index("Lead")]: (r[s.index("Branch")], r[s.index("Branch code")]) for r in spin_rows[1:]}
+        self.assertEqual(koc_branch["Lead 301"], ("Chamrajpet", "CHA-001 · Bangalore"))
+        self.assertEqual(koc_branch["Lead 302"], ("Hyderabad - Kondhapur", "HYB-007 · Hyderabad"))   # store fallback
+        self.assertEqual(koc_branch["Lead 305"], ("", ""))                                          # unknown id
+        self.assertEqual(koc_branch["Lead 306"], ("", ""))
+        for name in ("Lead 301", "Lead 302", "Lead 305", "Lead 306"):
+            self.assertEqual(koc_branch[name], spin_branch[name], name)
+        self.assertNotIn("Reason", k)
+        self.assertNotIn("Pincode", k)
 
 
 # ── Dashboard ──────────────────────────────────────────────────────────
