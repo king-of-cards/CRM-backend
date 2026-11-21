@@ -93,13 +93,27 @@ class _Visibility:
 
 
 # ── Per page ───────────────────────────────────────────────────────────
-def _koc_copies(db: Session, workflow: list[tuple[str, str]]) -> list[tuple]:
-    """KOC -> Dhruva has no phones of its own: its leads are workflow rows (same keys, any date).
-    workflow: (lead id, e164) of every workflow row found."""
+def _koc_copies(db: Session, workflow: list[tuple[str, str]], e164s: set[str] | None = None) -> list[tuple]:
+    """KOC -> Dhruva leads with these phones: its live workflow rows (same keys as the workflow;
+    workflow = (lead id, e164) of every workflow row found) and its uploaded rows (kd-<id>)."""
     from app.services import koc_dhruva
 
     koc_keys = koc_dhruva.keys(db)
-    return [(KOC_TO_DHRUVA, key, e164, None, None) for key, e164 in workflow if key in koc_keys]
+    out = [(KOC_TO_DHRUVA, key, e164, None, None) for key, e164 in workflow if key in koc_keys]
+    if e164s:
+        out += [(KOC_TO_DHRUVA, key, e164, None, None) for key, e164 in _koc_uploads(db, sorted(e164s))
+                if key in koc_keys]
+    return out
+
+
+def _koc_uploads(db: Session, chunk: list[str] | None = None) -> list[tuple[str, str]]:
+    """(kd-<id>, e164) of the KOC -> Dhruva uploaded rows (archived too), optionally only these phones."""
+    from app.models.koc_dhruva_lead import KocDhruvaLead
+
+    query = select(KocDhruvaLead)
+    if chunk is not None:
+        query = query.where(col(KocDhruvaLead.phone_e164).in_(chunk))
+    return [(lead.lead_key, lead.phone_e164) for lead in db.exec(query) if lead.phone_e164]
 
 
 def _matches(db: Session, e164s: set[str], include_koc: bool = False) -> list[tuple[str, str, str, int | None, str | None]]:
@@ -134,7 +148,7 @@ def _matches(db: Session, e164s: set[str], include_koc: bool = False) -> list[tu
             or_(col(DhruvaLead.phone_e164).in_(chunk), col(DhruvaLead.alt_phone_e164).in_(chunk)))):
         out += [(DHRUVA, str(lead_id), e, None, None) for e in {phone, alt} if e in e164s]
     if include_koc:
-        out += _koc_copies(db, workflow)
+        out += _koc_copies(db, workflow, e164s)
     return out
 
 
@@ -145,9 +159,17 @@ def _listed_spin_keys(db: Session) -> set[str]:
 
 
 def page_phones(db: Session, source: str, keys: list[str]) -> dict[str, str]:
-    """{lead key: e164} for leads of one of the 4 sources stored in the CRM (one query)."""
+    """{lead key: e164} for leads of one of the 4 sources stored in the CRM (one query); also
+    KOC -> Dhruva's uploaded rows (kd-<id>)."""
     if not keys:
         return {}
+    if source == KOC_TO_DHRUVA:
+        from app.models.koc_dhruva_lead import KOC_KEY_PREFIX, KocDhruvaLead
+
+        ids = [int(k[len(KOC_KEY_PREFIX):]) for k in keys if k.startswith(KOC_KEY_PREFIX)
+               and k[len(KOC_KEY_PREFIX):].isdigit()]
+        return {lead.lead_key: lead.phone_e164 for lead in db.exec(select(KocDhruvaLead).where(
+            col(KocDhruvaLead.id).in_(ids))) if lead.phone_e164} if ids else {}
     model, key_col, to_key, from_key = _key_column(source)
     values = [v for v in (from_key(k) for k in keys) if v is not None]
     if not values:
@@ -246,6 +268,7 @@ def index(db: Session, include_koc: bool = False) -> dict[str, list[tuple[str, s
 
         koc_keys = koc_dhruva.keys(db)
         out[KOC_TO_DHRUVA] = [(k, e, None) for k, e in workflow_phone_index("all").items() if k in koc_keys]
+        out[KOC_TO_DHRUVA] += [(k, e, None) for k, e in _koc_uploads(db) if k in koc_keys]
     return out
 
 

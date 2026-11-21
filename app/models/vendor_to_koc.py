@@ -9,7 +9,7 @@ from datetime import date, datetime
 from enum import Enum
 
 from pydantic import ConfigDict, field_validator
-from sqlalchemy import Index, Text, UniqueConstraint
+from sqlalchemy import Index, Text
 from sqlmodel import Field, SQLModel
 
 
@@ -52,7 +52,9 @@ class LeadSource(str, Enum):
 class VendorToKocLead(SQLModel, table=True):
     __tablename__ = "crm_vendor_to_koc_leads"
     __table_args__ = (
-        UniqueConstraint("vendor_id", "phone", name="uq_vtk_leads_vendor_phone"),
+        # Not unique: the same phone with another name, date or city is another lead (see
+        # migrations/2026-11-22_vtk_drop_vendor_phone_unique.sql)
+        Index("ix_vtk_leads_vendor_phone", "vendor_id", "phone"),
         Index("ix_vtk_leads_vendor_lead_date", "vendor_id", "lead_date"),
     )
 

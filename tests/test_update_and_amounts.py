@@ -116,8 +116,8 @@ class UploadCrmColumnsTest(ApiTestBase, unittest.TestCase):
     def test_duplicates_are_unchanged(self):
         key = self.add_ok("wedding")["lead_key"]                              # 9845010003
         self.put_crm("admin", "wedding", key, {"update_status": "interested", "quoted_amount": 1000})
-        body = self.preview("Contact,Update,Quoted amount,Conversion amount\r\n"
-                            "+91 98450 10003,Converted,99999,88888\r\n")
+        body = self.preview("Contact,Lead,City,Budget,Update,Quoted amount,Conversion amount\r\n"
+                            "+91 98450 10003,Ravi,Bangalore,1.5 lakh,Converted,99999,88888\r\n")   # the same lead
         self.assertEqual(body["rows"][0]["status"], "duplicate")
         self.assertEqual(self.imported(body)["counts"]["imported"], 0)
         meta = self.metas()[key]

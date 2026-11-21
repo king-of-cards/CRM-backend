@@ -447,7 +447,7 @@ Checks an uploaded file and returns every row with its errors and duplicate stat
 | Field | Meaning |
 |---|---|
 | `row` | Row number in the file. |
-| `status` | `duplicate` (the phone matches an existing lead or an earlier row of the file; skipped), else `error` (no usable phone, or field errors), else `ok` (will be imported). A duplicate stays a duplicate even if other fields have errors; those errors are still listed, for information. |
+| `status` | `duplicate` (the same lead in every field as an existing lead or an earlier row of the file; skipped), else `error` (no usable phone, or field errors), else `ok` (will be imported). A duplicate stays a duplicate even if other fields have errors; those errors are still listed, for information. |
 | `values` | Every field of the source (abbreviated above). Values are cleaned, in upload formats: dates `20 Dec 2026`, date-times `14 Nov 2026, 10:30 am` (IST), numbers, booleans, branch as id, `assigned_to` as `Phodeo` / `Phodeo · auto` / `Automatic` / `Unassigned`. A field that has an error keeps the text as written. Send these to `POST /import` unchanged, or after the user fixes them. |
 | `errors` | `[{field, message}]`, empty when the row is valid. |
 | `duplicate` | `null`, or a duplicate object. See [Duplicates](#4-duplicates). |
@@ -666,7 +666,7 @@ Adds one lead (`origin = added`). Not for spin: `POST /crm-leads/spin` answers
 
 - `values`: field key to value. Strings, numbers and booleans are accepted. For spin,
   `branch` can be the branch name or its numeric id.
-- `allow_duplicate` (default `false`): save even if the phone already exists in this
+- `allow_duplicate` (default `false`): save even if the same lead (every field) already exists in this
   source. Available only on this endpoint.
 - `values.assigned_to` (optional): a vendor name = manual, `Unassigned` = unassigned, empty,
   `Automatic`, `Auto` or `<vendor> · auto` = automatic.
@@ -707,7 +707,8 @@ Adds one lead (`origin = added`). Not for spin: `POST /crm-leads/spin` answers
 }
 ```
 
-The `duplicate` object follows [Duplicates](#4-duplicates). It is never `in_file` here.
+The `duplicate` object follows [Duplicates](#4-duplicates) (every field the same). It is never
+`in_file` here. The `message` is "This lead already exists (the same phone and every other field).".
 
 ---
 
@@ -743,7 +744,7 @@ Edits an added/imported lead (archived ones too). Only the fields sent are chang
 - `whatsapp`: the stored phone already includes its country code, so changing `country` alone
   doesn't change the number. To fix a number read with the wrong country, send `phone`
   (with its country code) together with `country`.
-- Changing `phone` re-runs the duplicate check, ignoring the lead itself. There is no
+- Every edit re-runs the duplicate check (every field), ignoring the lead itself. There is no
   `allow_duplicate` here: a duplicate is always refused with `409`.
 
 **Response `200`:** `{ "lead": { ...lead object } }`
@@ -767,19 +768,34 @@ either one twice is harmless.
 
 ## 4. Duplicates
 
-Duplicates are found on the normalised phone, within the same source. Each row (or add) gets
-at most one `duplicate` object. When several apply, the first match in this order wins:
-`existing_sheet`/`existing_workflow`, then `existing_added`, then `in_file`. In uploads a
-duplicate wins over field errors: order **existing > in_file > errors** (a row with a usable phone
-that repeats an existing lead or an earlier row is counted as a duplicate even if other fields
-have errors).
+**A duplicate is the same lead in every field**, in every section (Spin, International, Wedding,
+Wedding planner, KOC → Dhruva uploads; Vendor → KOC and Dhruva → KOC follow the same rule, see their
+sections): the phone (as E.164) **and every other template field** match after normalising:
+trimmed, spaces collapsed, any case, dates as `YYYY-MM-DD` (13-12-2026, 13 Dec 2026, 12/20/2026 …),
+numbers without `.0`, budget ranges with `-` (`10_20` = `₹10–20`), Wedding budgets as amounts
+(`1.5 lakh` = `150000`), and empty = N/A-like (`N/A`, `-`, `nil` …). **The same phone with any other
+field different is not a duplicate.**
+
+- **Compared:** the lead's own template fields. **Not compared:** read-only columns (Branch code,
+  Quoted date, Hot, Estimate …), the CRM columns (Assigned to, Update, amounts, comments,
+  follow-up) and the arrival date (Created / Submitted / Updated / Received: empty means the upload
+  time). A workflow branch id the CRM doesn't know counts as empty (exports show it empty).
+- **Applies to:** bulk upload (against existing leads and earlier rows of the file), single add and
+  edit (an edit that makes a lead equal to another answers `409`).
+- **Unchanged:** archived leads still count; Spin workflow rows before the cut-off are ignored;
+  `also_in` and `other_source` stay phone-only.
+
+Each row (or add) gets at most one `duplicate` object. When several apply, the first match in this
+order wins: `existing_sheet`/`existing_workflow`, then `existing_added`, then `in_file`. In uploads a
+duplicate wins over field errors: order **existing > in_file > errors** (the fields with errors are
+compared as empty, and the errors are still listed, for information).
 
 | `reason` | When | Extra fields |
 |---|---|---|
-| `existing_sheet` | A sheet row in this source has the phone, including rows since removed from the sheet. Not used for spin. | `lead_key` |
-| `existing_workflow` | Spin only: a workflow spin row created on or after the spin cut-off (listed or not) has the phone; older rows are ignored ([section 17](#17-spin-cut-off-gift-leads-and-history-upload)). | `lead_key` (workflow lead id) |
-| `existing_added` | An added/imported lead in this source has the phone, including archived ones. | `lead_key`, `created_at` (ISO 8601 UTC), `archived` |
-| `in_file` | Upload/import only: an earlier valid row in the same file or request has the phone. | `duplicate_of_row` |
+| `existing_sheet` | A sheet row in this source is the same lead, including rows since removed from the sheet. Not used for spin. | `lead_key` |
+| `existing_workflow` | Spin: a workflow spin row created on or after the spin cut-off (listed or not) is the same lead; older rows are ignored ([section 17](#17-spin-cut-off-gift-leads-and-history-upload)). KOC → Dhruva uploads: a live workflow row of the section. | `lead_key` (workflow lead id) |
+| `existing_added` | An added/imported lead in this source is the same lead, including archived ones. | `lead_key`, `created_at` (ISO 8601 UTC), `archived` |
+| `in_file` | Upload/import only: an earlier valid row in the same file or request is the same lead. | `duplicate_of_row` |
 
 ```json
 { "reason": "in_file", "duplicate_of_row": 2 }
@@ -788,6 +804,13 @@ have errors).
 { "reason": "existing_added", "lead_key": "crm-7", "created_at": "2026-11-14T05:00:00+00:00", "archived": false }
 ```
 
+**Required fields and empty values (every section).** Only the phone is required (Dhruva → KOC:
+a name or a phone). `N/A`, `NA`, `n/a`, `-`, `--`, `nil`, `none`, `null` and `.` (any case and
+spacing) are **empty**, never invalid, in every field. An empty date is allowed; an empty
+Created / Submitted / Received / Updated is the upload time. Other unreadable values (an email
+without a domain, a date that isn't one, a quantity that isn't a number) stay row errors, as do
+invalid phones. Upload dates also accept `YYYY-MM-DD`.
+
 **Across sources (not blocking).** When the phone exists in *other* sources, the row or add
 gets `{"type": "other_source", "sources": [...]}` with the sorted source names (for example
 `["spin", "wedding"]`). Workflow spin rows on or after the spin cut-off count as `spin`. These rows are still imported.
@@ -795,7 +818,7 @@ gets `{"type": "other_source", "sources": [...]}` with the sorted source names (
 | Endpoint | Duplicate in this source |
 |---|---|
 | Single add | `409`, unless `allow_duplicate: true` |
-| Edit (phone change) | Always `409` |
+| Edit (any field) | `409` when the edited lead equals another lead |
 | Import | Skipped, `status: "duplicate"` |
 
 ---
@@ -819,7 +842,7 @@ can't see.
 | Field | Admin | Vendor user of the assigned vendor | Other vendor users |
 |---|---|---|---|
 | `update_status` (`converted`, `not_converted`, `purchased_elsewhere`, `purchased_with_us`, `will_call_back`, `interested`, `not_interested`; `null` = Pending), `quoted_amount`, `quoted_date`, `conversion_amount` (rupees, 0–100,000,000) | ✔ | ✔ | **404** |
-| `vendor_id` (a vendor = manual; `null` = automatic) | ✔ | **403** `Only an admin can assign leads.` | **404** |
+| `vendor_id` (an **active** vendor = manual; `null` = automatic; an inactive vendor: **422** `This vendor is inactive; choose an active vendor.`; unknown: 404) | ✔ | **403** `Only an admin can assign leads.` | **404** |
 | `assigned_to`: `"unassigned"` (manual Unassigned: `vendor_id` cleared, `auto_assign = false`, no automatic rule ever assigns it, the vendor stops seeing it) or `"automatic"` (back to the automatic rules) | ✔ | **403** | **404** |
 | `notes` | ✔ | ✔ | **404** |
 | `follow_up_date` (`YYYY-MM-DD` or `null`) | ✔ | ✔ | **404** |
@@ -831,6 +854,10 @@ can't see.
   `interest`, `converted` and `converted_at` are gone.
 - Setting `vendor_id` to `null` also switches a lead uploaded as unassigned to automatic
   assignment.
+- A lead manually assigned to a vendor that is later made inactive keeps showing that vendor's name
+  (`vendor_source: "manual"`); automatic rules only use active vendors. For the Assigned to dropdown,
+  `GET /vendors` lists active vendors (each with `is_active`); `?include_inactive=true` adds the
+  inactive ones (`is_active: false`) so a screen can show or hide them.
 - `vendor_id` and `assigned_to` together, or another `assigned_to` value, answer **422**. An
   `assigned_to` change is logged in the activity as `assigned`, field `assigned_to`, old and new
   values such as `Phodeo` → `Unassigned` → `Automatic`. The answer has `vendor: null` and
@@ -1229,7 +1256,7 @@ paths, shapes and rules. Base path: `/api/v1/vendor-to-koc`.
 | `phone` | **Required.** A 10-digit Indian mobile number starting with 6–9. `+91`, a 12-digit `91…`, a leading `0`, spaces, dashes and a leading `'` (the CSV export's formula guard) are removed. Stored as the 10 digits |
 | `name`, `city` | Optional, at most 100 characters |
 | `date` (the lead's own date) | Optional. Files: a real date, or text `DD-MM-YYYY` (day first) or `13 Dec 2026` / `13 December 2026` (the export's format). JSON: `YYYY-MM-DD` |
-| Duplicates | One lead per vendor and phone. Duplicates are skipped in bulk and answer 409 for a single add |
+| Duplicates | The same vendor's lead with the same phone **and** name, date and city (any case and spacing; N/A-like = empty). The same phone with another name, date or city is a new lead. Duplicates are skipped in bulk and answer 409 for a single add. Only the phone is required; N/A-like name, date or city are empty. (Database: `migrations/2026-11-22_vtk_drop_vendor_phone_unique.sql` replaces the unique (vendor_id, phone) index.) |
 | Exported files | An export (CSV or Excel) uploads back unchanged: Name, Date, Phone and City are read, the other columns ignored, and its rows show as duplicates when that vendor's login uploads it (an admin's export too) |
 | Template example row | The template's example row, uploaded unchanged, is an error (`"This is the example row from the template; delete it"`) |
 | `update_status` | `null` (pending), `converted`, `not_converted`, `purchased_elsewhere`, `purchased_with_us`, `will_call_back`, `interested`, `not_interested` |
@@ -1424,11 +1451,13 @@ admins get `status_updated_by` (user id) on list/detail responses and in the exp
 | `date` | Kept as typed (`event_date_text`, spacing collapsed). `event_date` is filled when the text is one clear date: a real Excel date, `DD-MM-YYYY`, `YYYY-MM-DD`, or one day and one month in any order ("Dec 4th", "12th Dec", "Feb 28th, Tentative date", "April 23rd 2027"). **Without a year: the next time that day comes** (today included), counted from the day it's entered, and not recalculated later. Text only (no `event_date`): a month alone ("March"), ranges and choices ("Jan 22nd -24th 2027", "Feb 24&25th 2027", "Dec 5th or 6th", "10th & 11th Feb 2027"), "Nil". An impossible date (`31-02-2026`): error |
 | A lead | Needs a name or a phone. **Without a phone it's allowed** and flagged `no_phone` |
 
-**Duplicates** (archived leads count): a lead is a duplicate only when its phone or alt phone in
-E.164 form matches another lead's phone or alt phone **and** its name, venue, date text, and event
-type all match after trimming, collapsing whitespace, and ignoring case. This applies to an earlier
-row of the same file/request (`in_file`) and saved leads (`existing`). A lead without a phone is not
-a duplicate. `allow_duplicate: true` skips the duplicate rejection on single add and edit.
+**Duplicates** (archived leads count): every field the same: name, venue, event type (trimmed,
+spaces collapsed, any case), the date (as a date when known, else its text) and the phones (E.164;
+phone and alt phone as a pair, in either order). The same phone with any other field different, or
+only one of the two phones shared, is not a duplicate. Leads without a phone compare the same way
+(all their fields). This applies to an earlier row of the same file/request (`in_file`) and saved
+leads (`existing`). N/A-like values (`N/A`, `-`, `nil`, `.` …) are empty in every field.
+`allow_duplicate: true` skips the duplicate rejection on single add and edit.
 
 ### Endpoints
 
@@ -1520,8 +1549,8 @@ comments, Follow-up date, Quoted amount, Conversion amount (₹ number cells; CS
 Received, Updated by (a name), Updated by ID (`status_updated_by`), Updated at (`status_updated_at`,
 IST), Hot. Dhruva logins receive admin fields read-only; PATCH of admin fields remains 403. Formats and
 formula safety as the other exports.
-An export preserves the identifying fields so rows with a phone upload back as duplicates; leads
-without a phone are never duplicates.
+An export preserves every compared field, so all its rows (with or without a phone) upload back as
+duplicates.
 
 ### Dashboard: `GET /api/v1/analytics/dhruva`
 
@@ -1756,18 +1785,24 @@ KOC shares with Dhruva by rule. Dhruva works these leads (the receiver edits), a
 Dhruva → KOC leads.
 
 - **Rule:** every workflow `spin_lead` row (listed as Spin or not: `otherWeddingServices` doesn't
-  matter; **any date**: the spin cut-off doesn't apply) where the first number of `estimatedBudgetPerCard` is
+  matter) **created on or after `SPIN_LIVE_FROM`** (the Spin cut-off; older rows are hidden here
+  everywhere: list, stats, export, details, dashboard, reminders, `also_in`) where the first number of `estimatedBudgetPerCard` is
   **≥ 70** (`70-100`, `70_100`, `100-200`, `500+`, `500_PLUS`, `400` …; `50_100` and `UNDER_50`
   count as 50), **or** `quantityRequired` is **≥ 1000** (also when the budget is empty or below 70).
   Which rule matched is not returned; the `reason` filter (`budget`: the budget rule; `quantity`:
   only the quantity rule) still narrows lists, stats and exports.
-- **CRM spin leads are never included** (added or uploaded, whatever their budget or quantity).
+- **Uploaded rows:** the history before the cut-off is uploaded by admins (see Upload below) into
+  `crm_koc_dhruva_leads` (keys `kd-<id>`). **Every uploaded row is listed**; the budget / quantity
+  rule is only shown (`potential_value`), never a filter. They count everywhere the workflow rows do
+  (list, stats, export, details, dashboard, reminders, `also_in`), and the CRM details, hot star and
+  activity work on them exactly as on workflow rows, for admins and Dhruva logins.
+- **CRM spin leads are never included** (added or uploaded to Spin, whatever their budget or quantity).
 - **In both places:** leads on or after the spin cut-off are in Spin too. This section keeps its own
   CRM details (`crm_lead_meta` with `source = "koc_to_dhruva"`), hot flags and activity, so a Dhruva
   Update or quote never changes the Spin record, and the other way round. Lead keys are the same
   (`spin_lead` id).
 - **Never assigned:** no vendor, no automatic rules (`crm.vendor` is always `null`).
-- **No add or upload:** rows come only from the rule. No migration was needed.
+- **No single add**, and no edit or archive of an uploaded row's basic fields yet.
 
 ### Who
 
@@ -1786,6 +1821,26 @@ Dhruva → KOC leads.
 | One lead | `GET /leads/{lead_key}` (404 when the lead doesn't match the rule) |
 | CRM details | `GET`/`PUT /leads/{lead_key}/crm` |
 | Hot, activity | `POST`/`DELETE /leads/{lead_key}/hot`, `GET /leads/{lead_key}/activity` |
+| Upload (admins) | `GET /leads/template?format=xlsx\|csv`, `POST /leads/import/preview` (file), `POST /leads/import` (rows) |
+
+### Upload (admins only; view-only, Dhruva and vendor logins: 403)
+
+Preview → fix → submit, like the KOC → Vendors uploads.
+- **Template:** the export's columns without Sl. No: Name, **Phone** (required), Email, Occasion,
+  Event date, Branch, Branch code (read-only), Estimated budget per card, Quantity required, Received
+  (empty = now), Update, Additional comments, Quoted amount, Quoted date (read-only), Conversion
+  amount, Follow-up date, Hot (read-only). Optional extra columns: Pincode, Other wedding services.
+  An export uploads back (its rows show as duplicates).
+- **`POST /leads/import/preview`** (`multipart/form-data`: `file`, `sheet_name`): the same answer as
+  `POST /crm-leads/{source}/import/preview` (`columns`, `ignored_columns`, `read_only_columns`,
+  `rows` with `status` / `values` / `errors` / `duplicate`, `counts`). Saves nothing.
+- **`POST /leads/import`** (`{rows: [{row, values}]}`, ≤ 5,000): checks every row again and saves the
+  passing ones; Update, Additional comments, Quoted amount, Conversion amount and Follow-up date go to
+  the section's CRM details (never a vendor). Answer as `POST /crm-leads/{source}/import`.
+- **Duplicates** ([every field the same](#4-duplicates)): an uploaded row (archived too), a live
+  workflow row of the section, or an earlier row of the file. Workflow rows before the cut-off are
+  ignored, so the history can be uploaded even when the workflow still has it.
+- **Migration:** `migrations/2026-11-22_koc_dhruva_uploads.sql` creates the table.
 
 - **List items** (list, details, export): the Spin list's fields, including the branch exactly as
   Spin gives it (`branch_id`, and `branch`: `{id, name, code, city}` from the Branches page;

@@ -94,7 +94,7 @@ def _is_gift_lead(db, source: str, lead_key: str) -> bool:
 
 def _answer(db, source: str, lead_key: str, meta: LeadMeta | None, body: LeadCrmUpdate | None = None) -> dict:
     vendors = lead_crm.active_vendors(db)
-    by_id = {v.id: v for v in vendors}
+    by_id = lead_crm.vendors_by_id(db)          # an inactive vendor chosen earlier keeps its name
     rules, default = lead_crm.lead_rules(source, vendors, gift=_is_gift_lead(db, source, lead_key))
     return lead_crm.meta_out(
         meta,
@@ -150,8 +150,10 @@ def save_lead_crm(source: Source, lead_key: str, body: LeadCrmUpdate, viewer: Le
 
     if changes.get("vendor_id") is not None:
         vendor = db.get(Vendor, changes["vendor_id"])
-        if vendor is None or not vendor.is_active:
+        if vendor is None:
             raise HTTPException(404, "Vendor not found")
+        if not vendor.is_active:
+            raise HTTPException(422, "This vendor is inactive; choose an active vendor.")
     if "notes" in changes and changes["notes"] is not None:
         changes["notes"] = changes["notes"].strip() or None
 

@@ -12,7 +12,9 @@ Paging runs over that combined list, so every lead appears exactly once across t
 Every CRM spin lead is listed in spin, whatever its date (the spin cut-off, SPIN_LIVE_FROM, only
 hides workflow rows), so the history can be uploaded. A lead whose otherWeddingServices names
 "Wedding Gifts & Return Gifts" is a gift lead: same list, other automatic vendor (lead_crm.lead_rules).
-KOC -> Dhruva (koc_to_dhruva) reads workflow rows only: CRM spin leads are never in it.
+KOC -> Dhruva (koc_to_dhruva) never includes CRM spin leads: its own uploaded rows
+(crm_koc_dhruva_leads, the same columns) are read with the same helpers (flow "koc_to_dhruva"),
+and every one of them is listed (the budget / quantity rule is only shown).
 """
 import json
 import re
@@ -22,6 +24,7 @@ from typing import Any
 from sqlmodel import Session, select
 
 from app.models.crm_spin_lead import CrmSpinLead
+from app.models.koc_dhruva_lead import KocDhruvaLead
 
 # Same names and rules as app/api/v1/endpoints/spin_leads.py
 PINCODE_FIELD_NAMES = ("pincode", "pin", "zipcode", "postalcode")
@@ -80,9 +83,14 @@ def koc_reason(lead: CrmSpinLead) -> str | None:
     return reason_of(_details(lead))
 
 
-def _in_flow(lead: CrmSpinLead, flow: str | None) -> bool:
-    """spin (or None): every CRM spin lead; koc_to_dhruva: none (workflow rows only)."""
-    return flow != "koc_to_dhruva"
+def _model(flow: str | None):
+    """spin (or None): crm_spin_leads; koc_to_dhruva: its uploaded rows (crm_koc_dhruva_leads)."""
+    return KocDhruvaLead if flow == "koc_to_dhruva" else CrmSpinLead
+
+
+def _in_flow(lead, flow: str | None) -> bool:
+    """Every row of the flow's table is listed (archived ones are left out by the callers)."""
+    return True
 
 
 def _like(term: str, text: str) -> bool:
@@ -170,12 +178,13 @@ def matching(
     flt: dict | None,
     flow: str | None = "spin",
 ) -> list[CrmSpinLead]:
-    """CRM leads of the view that pass the list's filters, in the list's sort order (spin: all;
-    koc_to_dhruva: none)."""
+    """CRM leads of the view that pass the list's filters, in the list's sort order (spin: CRM spin
+    leads; koc_to_dhruva: its uploaded rows)."""
     term = (search or "").strip()
+    model = _model(flow)
     leads = [
         lead
-        for lead in session.exec(select(CrmSpinLead).where(CrmSpinLead.is_deleted == False))  # noqa: E712
+        for lead in session.exec(select(model).where(model.is_deleted == False))  # noqa: E712
         if _in_flow(lead, flow) and _matches(lead, term, branch, flt or {})
     ]
     desc = order == "desc"
@@ -189,9 +198,10 @@ def matching(
 
 
 def active(session: Session, flow: str | None = "spin") -> list[CrmSpinLead]:
-    """CRM spin leads that count (archived ones are hidden from lists, counts and exports).
-    flow koc_to_dhruva: none."""
-    return [lead for lead in session.exec(select(CrmSpinLead).where(CrmSpinLead.is_deleted == False))  # noqa: E712
+    """CRM rows of the view that count (archived ones are hidden from lists, counts and exports).
+    flow koc_to_dhruva: its uploaded rows."""
+    model = _model(flow)
+    return [lead for lead in session.exec(select(model).where(model.is_deleted == False))  # noqa: E712
             if _in_flow(lead, flow)]
 
 

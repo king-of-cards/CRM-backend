@@ -23,17 +23,28 @@ def utcnow() -> datetime:
 
 
 # ── Duplicates ─────────────────────────────────────────────────────────
-def _duplicate_text(value: str | None) -> str:
-    """Normalize the four identifying text fields for Dhruva's duplicate rule."""
-    return re.sub(r"\s+", " ", value or "").strip().casefold()
+def _key(name, venue, event_date, event_date_text, event_type, e164s) -> tuple:
+    """Every template field, as the duplicate check compares them: name, venue, event type (trimmed,
+    spaces collapsed, any case), the date (ISO when known, else its text) and the phones (E.164;
+    phone and alt phone as a set). N/A-like values are empty."""
+    from app.services.lead_values import dup_norm
+
+    when = event_date.isoformat() if event_date else dup_norm(event_date_text, "date")
+    return dup_norm(name), dup_norm(venue), when, dup_norm(event_type), frozenset(e for e in e164s if e)
 
 
-def _duplicate_details(lead: CleanLead) -> tuple[str, str, str, str]:
-    return tuple(_duplicate_text(value) for value in
-                 (lead.name, lead.venue, lead.event_date_text, lead.event_type))
+def _lead_key(lead: CleanLead) -> tuple:
+    return _key(lead.name, lead.venue, lead.event_date, lead.event_date_text, lead.event_type, lead.e164s)
+
+
+def _row_key(row: DhruvaLead) -> tuple:
+    return _key(row.name, row.venue, row.event_date, row.event_date_text, row.event_type,
+                {row.phone_e164, row.alt_phone_e164})
 
 
 def _matching_existing(db: Session, leads: list[CleanLead], exclude_id: int | None = None) -> list[DhruvaLead]:
+    """Leads (archived too) that could be the same: one of the phones, or (leads without a phone)
+    no phone and the same name."""
     e164s = set().union(*(lead.e164s for lead in leads)) if leads else set()
     rows: list[DhruvaLead] = []
     numbers = sorted(e164s)
@@ -42,33 +53,31 @@ def _matching_existing(db: Session, leads: list[CleanLead], exclude_id: int | No
         stmt = select(DhruvaLead).where(
             or_(col(DhruvaLead.phone_e164).in_(chunk), col(DhruvaLead.alt_phone_e164).in_(chunk)))
         rows.extend(row for row in db.exec(stmt) if row.id != exclude_id)
+    names = sorted({lead.name.strip().lower() for lead in leads if not lead.e164s and lead.name})
+    for i in range(0, len(names), 500):
+        stmt = select(DhruvaLead).where(DhruvaLead.phone_e164.is_(None), DhruvaLead.alt_phone_e164.is_(None),
+                                        func.lower(func.trim(DhruvaLead.name)).in_(names[i:i + 500]))
+        rows.extend(row for row in db.exec(stmt) if row.id != exclude_id)
     return rows
 
 
 def check_duplicates(db: Session, leads: list[CleanLead], exclude_id: int | None = None) -> list[dict | None]:
     """One entry per lead: None, or {"reason": "existing", "lead_id"} / {"reason": "in_file", "row_index"}.
-    A phone/alt phone match is a duplicate only when name, venue, date text, and event type also
-    match after whitespace and case normalization. Leads without a phone are never duplicates."""
-    existing = _matching_existing(db, leads, exclude_id)
-    seen: dict[tuple[str, tuple[str, str, str, str]], int] = {}
+    A duplicate has EVERY template field equal (_key): the same phone(s) with any other field
+    different is not one. Leads without a phone compare the same way (all their fields)."""
+    existing = {}
+    for row in _matching_existing(db, leads, exclude_id):
+        existing.setdefault(_row_key(row), row)
+    seen: dict[tuple, int] = {}
     out: list[dict | None] = []
     for index, lead in enumerate(leads):
+        key = _lead_key(lead)
         dup = None
-        details = _duplicate_details(lead)
-        if lead.e164s:
-            hit = next((row for row in existing
-                        if lead.e164s.intersection({row.phone_e164, row.alt_phone_e164})
-                        and details == tuple(_duplicate_text(value) for value in
-                            (row.name, row.venue, row.event_date_text, row.event_type))), None)
-            if hit is not None:
-                dup = {"reason": "existing", "lead_id": hit.id}
-            else:
-                earlier = next((seen[(phone, details)] for phone in sorted(lead.e164s)
-                                if (phone, details) in seen), None)
-                if earlier is not None:
-                    dup = {"reason": "in_file", "row_index": earlier}
-            for phone in lead.e164s:
-                seen.setdefault((phone, details), index)
+        if key in existing:
+            dup = {"reason": "existing", "lead_id": existing[key].id}
+        elif key in seen:
+            dup = {"reason": "in_file", "row_index": seen[key]}
+        seen.setdefault(key, index)
         out.append(dup)
     return out
 

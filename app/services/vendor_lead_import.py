@@ -75,7 +75,18 @@ class CleanLead:
 
 # ── Value cleaning ─────────────────────────────────────────────────────
 def _is_blank(value: Any) -> bool:
-    return value is None or (isinstance(value, str) and not value.strip())
+    """Empty or N/A-like ("N/A", "-", "nil", "none", "." …): never a value, never an error."""
+    from app.services.lead_values import is_na
+
+    return is_na(value)
+
+
+def signature(lead: "CleanLead") -> tuple:
+    """Every template field but the phone, as the duplicate check compares them (the phone is
+    matched first): name, date, city (trimmed, spaces collapsed, any case; the date as ISO)."""
+    from app.services.lead_values import dup_norm
+
+    return dup_norm(lead.name), dup_norm(lead.date, "date"), dup_norm(lead.city)
 
 
 def clean_text(value: Any) -> str | None:
@@ -83,7 +94,10 @@ def clean_text(value: Any) -> str | None:
         return None
     if isinstance(value, float) and value.is_integer():
         value = int(value)
-    return str(value).strip()
+    text = str(value).strip()
+    if len(text) > 1 and text[0] == "'" and text[1] in "=+-@":     # the CSV export's formula guard
+        text = text[1:]
+    return text
 
 
 def clean_phone(value: Any) -> str | None:

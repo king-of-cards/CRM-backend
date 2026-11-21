@@ -104,19 +104,21 @@ class UploadTest(DhruvaTestBase, unittest.TestCase):
                          ("+919800000002", "+919000000002", "bulk_upload", self.users["dhruva"].id))
         self.assertEqual((leads["Month Only"].event_date, leads["Month Only"].event_date_text), (None, "March"))
         self.assertIsNone(leads["No Phone One"].phone_e164)
-        # The same file again: phone-bearing rows match; rows without a phone remain valid.
+        # The same file again: every saved row matches in every field (rows without a phone too)
         counts = self.preview().json()["counts"]
-        self.assertEqual((counts["valid"], counts["duplicates_by_reason"]["existing"]), (3, 9))
-        self.assertEqual(self.upload_all()["added"], 3)
+        self.assertEqual((counts["valid"], counts["duplicates_by_reason"]["existing"]), (0, 12))
+        self.assertEqual(self.upload_all()["added"], 0)
 
     def test_duplicates_by_alt_phone_and_archived(self):
         base = {"name": "A", "venue": "Hall", "date": "Dec 4th", "event_type": "wedding"}
         self.assertEqual(self.add(**{**base, "phone": "9800000301\n9800000302"}).status_code, 201)
-        resp = self.add(**{**base, "phone": "9800000302"})                            # = A's alt phone
+        resp = self.add(**{**base, "phone": "9800000302"})                    # only A's alt phone: other phones
+        self.assertEqual(resp.status_code, 201)
+        resp = self.add(**{**base, "phone": "9800000399", "alt_phone": "+91 98000 00301"})  # alt = A's phone
+        self.assertEqual(resp.status_code, 201)
+        resp = self.add(**{**base, "phone": "98000 00302", "alt_phone": "+919800000301"})  # both phones, swapped
         self.assertEqual(resp.status_code, 409)
         self.assertEqual(resp.json()["detail"]["duplicate"]["reason"], "existing")
-        resp = self.add(**{**base, "phone": "9800000399", "alt_phone": "+91 98000 00301"})  # alt = A's phone
-        self.assertEqual(resp.status_code, 409)
         archived = {"name": "D", "venue": "Hall", "date": "Dec 5th", "event_type": "wedding", "phone": "9800000401"}
         lead_id = self.add(**archived).json()["id"]
         self.assertEqual(self.call("admin", "POST", f"/leads/{lead_id}/archive").status_code, 200)
@@ -156,7 +158,7 @@ class UploadTest(DhruvaTestBase, unittest.TestCase):
             self.assertEqual(resp.status_code, 422, body)
             self.assertIn(field, [e["field"] for e in resp.json()["detail"]], body)
         self.assertEqual(self.add(name="No Phone", date="Dec 9th").status_code, 201)
-        self.assertEqual(self.add(name="no  phone", date="9-12-2026").status_code, 201)  # no phone means no duplicate
+        self.assertEqual(self.add(name="no  phone", date="9-12-2026").status_code, 409)  # every field the same
         self.assertEqual(self.add(name="No Phone", date="Dec 10th").status_code, 201)
 
     def test_csv_upload(self):

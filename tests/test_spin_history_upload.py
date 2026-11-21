@@ -56,6 +56,9 @@ ROWS = [
     row(406, "9845080006", "2026-10-01T05:00:00", budget="100-200"),            # history, KOC (budget)
 ]
 LIVE = {"403", "404"}
+# Every upload field of the workflow rows 403 / 405 (but the name)
+LIVE_403 = {"name": "Lead 403", "pincode": "560011", "occasionDate": "20-12-2026", "estimatedBudgetPerCard": "10-20",
+            "otherWeddingServices": "Photography & Videography"}
 
 
 def fake_analytics_rows():
@@ -171,7 +174,7 @@ class CutoffSqlTests(unittest.TestCase):
         self.assertIn("spin_lead.created_at >= '2026-11-20 18:30:00'", spin)
         self.assertIn("'otherWeddingServices'", spin)                    # listed rows only
         self.assertNotIn("LIKE", spin)                                    # no gift split any more
-        self.assertNotIn("created_at", koc)                              # KOC -> Dhruva: every date
+        self.assertIn("spin_lead.created_at >= '2026-11-20 18:30:00'", koc)   # KOC -> Dhruva: the same cut-off
         self.assertEqual(sql(sl.live_filter(Table("t", MetaData(), Column("id", BigInteger)))), "false")
 
 
@@ -210,11 +213,12 @@ class CutoffTests(SpinTestBase):
     def test_upload_duplicate_check_ignores_rows_before_the_cutoff(self):
         rows = self.import_rows([
             {"phone": "9845080001", "name": "History 401", "created_at": "10-11-2026 10:30"},   # hidden row: ok
-            {"phone": "9845080003", "name": "Live 403"},                                         # live row
-            {"phone": "9845080005", "name": "Live, not listed"},                                 # live row too
+            {"phone": "9845080003", **LIVE_403},                                                 # live row
+            {"phone": "9845080005", **LIVE_403, "name": "Lead 405"},                             # live row too
+            {"phone": "9845080003", **LIVE_403, "name": "Someone else"},                         # same phone only
         ])
-        self.assertEqual([r["status"] for r in rows], ["imported", "duplicate", "duplicate"])
-        self.assertEqual({r["duplicate"]["reason"] for r in rows[1:]}, {"existing_workflow"})
+        self.assertEqual([r["status"] for r in rows], ["imported", "duplicate", "duplicate", "imported"])
+        self.assertEqual({r["duplicate"]["reason"] for r in rows[1:3]}, {"existing_workflow"})
         self.assertEqual(rows[1]["duplicate"]["lead_key"], "403")
         # Other sources no longer warn about the hidden row
         with self.logged_in("admin"):
@@ -280,11 +284,9 @@ class HistoryUploadTests(SpinTestBase):
 
 # ── KOC -> Dhruva unchanged, totals ────────────────────────────────────
 class KocAndTotalsTests(SpinTestBase):
-    def test_koc_reads_every_workflow_row_of_any_date(self):
-        koc = {i["lead_key"] for i in self.get(f"{K2D}/leads", page_size=100)["items"]}
-        self.assertEqual(koc, {"406"})                                       # hidden from spin, still here
-        self.assertEqual(self.get(f"{K2D}/leads/406")["lead_key"], "406")
-        self.assertEqual(self.get(f"{K2D}/leads/406/crm")["vendor"], None)
+    def test_koc_hides_workflow_rows_before_the_cutoff_too(self):
+        self.assertEqual(self.get(f"{K2D}/leads", page_size=100)["items"], [])   # 406 (history): hidden
+        self.get(f"{K2D}/leads/406", status=404)
         self.assertNotIn("406", self.spin_items())
 
     def test_list_stats_export_and_dashboard_agree(self):

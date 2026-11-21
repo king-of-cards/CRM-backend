@@ -207,14 +207,27 @@ def spin_columns(columns_meta: list[dict], branches: list[dict] | None = None) -
     ]
 
 
+# KOC -> Dhruva upload template: its export's columns (koc_to_dhruva.EXPORT_COLUMNS) without "Sl. No"
+KOC_TEMPLATE_COLUMNS: list[tuple[str, str]] = [
+    ("Name", "text"), ("Phone", "phone"), ("Email", "text"), ("Occasion", "text"), ("Event date", "date"),
+    ("Branch", "text"), ("Branch code", "text"), ("Estimated budget per card", "text"), ("Quantity required", "int"),
+    ("Received", "datetime"), ("Update", "text"), ("Additional comments", "text"), ("Quoted amount", "money"),
+    ("Quoted date", "date"), ("Conversion amount", "money"), ("Follow-up date", "date"), ("Hot", "yesno"),
+]
+
+
 def headers(source: str) -> list[str]:
     """The column headers of a source's export and template."""
+    if source == "koc_to_dhruva":
+        return [h for h, _ in KOC_TEMPLATE_COLUMNS]
     if source == "spin":
         return [c[0] for c in spin_columns([])]
     return [c[0] for c in SHEET_COLUMNS[source]]
 
 
 def kinds(source: str) -> list[str]:
+    if source == "koc_to_dhruva":
+        return [k for _, k in KOC_TEMPLATE_COLUMNS]
     cols = spin_columns([]) if source == "spin" else SHEET_COLUMNS[source]
     return [c[2] for c in cols]
 

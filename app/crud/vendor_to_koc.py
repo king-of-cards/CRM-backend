@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 
-from sqlalchemy import case, false, func, insert, or_
+from sqlalchemy import case, false, func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
 from sqlmodel import Session, col, select
@@ -15,11 +15,10 @@ from app.models.vendor_to_koc import (
     CLOSED_STATUSES, AdminLeadRead, LeadSource, UpdateStatus, VendorLeadRead, VendorRead, VendorToKocLead,
 )
 from app.models.vendor_user import VendorUser
-from app.services.vendor_lead_import import CleanLead
+from app.services.vendor_lead_import import CleanLead, signature
 
 LIKE_ESCAPE = "/"
 PHONE_LIKE_RE = re.compile(r"^[\d\s+\-()]*\d[\d\s+\-()]*$")   # digits with phone punctuation only
-INSERT_CHUNK = 1000
 PHONE_LOOKUP_CHUNK = 1000
 
 
@@ -28,7 +27,7 @@ def utcnow() -> datetime:
 
 
 class DuplicateLead(Exception):
-    """This vendor already has a lead with this phone."""
+    """This vendor already has this lead (the same phone, name, date and city)."""
 
 
 class DuplicateVendorName(Exception):
@@ -36,16 +35,22 @@ class DuplicateVendorName(Exception):
 
 
 # ── Leads: writing ─────────────────────────────────────────────────────
-def existing_phones(db: Session, vendor_id: int, phones: set[str]) -> set[str]:
-    found: set[str] = set()
+def existing_keys(db: Session, vendor_id: int, phones: set[str]) -> set[tuple]:
+    """(phone, signature) of this vendor's leads with these phones: a new lead is a duplicate only
+    when its phone AND every other field match one of them."""
+    found: set[tuple] = set()
     phone_list = sorted(phones)
     for i in range(0, len(phone_list), PHONE_LOOKUP_CHUNK):
         chunk = phone_list[i:i + PHONE_LOOKUP_CHUNK]
-        found.update(db.exec(
-            select(VendorToKocLead.phone)
-            .where(VendorToKocLead.vendor_id == vendor_id, col(VendorToKocLead.phone).in_(chunk))
-        ).all())
+        for row in db.exec(select(VendorToKocLead).where(VendorToKocLead.vendor_id == vendor_id,
+                                                         col(VendorToKocLead.phone).in_(chunk))):
+            found.add(lead_key(CleanLead(name=row.name, date=row.lead_date, date_display=None, phone=row.phone,
+                                         city=row.city)))
     return found
+
+
+def lead_key(lead: CleanLead) -> tuple:
+    return (lead.phone, *signature(lead))
 
 
 def _row(vendor_id: int, lead: CleanLead, source: LeadSource, user_id: int, now: datetime) -> dict:
@@ -56,26 +61,26 @@ def _row(vendor_id: int, lead: CleanLead, source: LeadSource, user_id: int, now:
     }
 
 
-def insert_ignoring_duplicates(db: Session, vendor_id: int, leads: list[CleanLead],
-                               user_id: int) -> int:
-    """Insert valid leads; rows whose (vendor_id, phone) already exists are skipped by the
-    database, so a parallel request can't cause an error. Returns the number inserted."""
+def insert_new(db: Session, vendor_id: int, leads: list[CleanLead], user_id: int) -> list[VendorToKocLead]:
+    """Insert valid leads that aren't duplicates (checked again here, in the same transaction).
+    Returns the rows inserted."""
     now = utcnow()
-    stmt = (insert(VendorToKocLead)
-            .prefix_with("IGNORE", dialect="mysql")
-            .prefix_with("OR IGNORE", dialect="sqlite"))
-    added = 0
-    for i in range(0, len(leads), INSERT_CHUNK):
-        rows = [_row(vendor_id, lead, LeadSource.BULK_UPLOAD, user_id, now)
-                for lead in leads[i:i + INSERT_CHUNK]]
-        result = db.connection().execute(stmt, rows)   # same transaction as the session
-        added += max(result.rowcount, 0)
+    existing = existing_keys(db, vendor_id, {lead.phone for lead in leads})
+    new = []
+    for lead in leads:
+        if lead_key(lead) not in existing:
+            existing.add(lead_key(lead))
+            new.append(lead)
+    rows = [VendorToKocLead(**_row(vendor_id, lead, LeadSource.BULK_UPLOAD, user_id, now)) for lead in new]
+    db.add_all(rows)
     db.commit()
-    return added
+    for row in rows:
+        db.refresh(row)
+    return rows
 
 
 def create_lead(db: Session, vendor_id: int, lead: CleanLead, user_id: int) -> int:
-    if existing_phones(db, vendor_id, {lead.phone}):
+    if lead_key(lead) in existing_keys(db, vendor_id, {lead.phone}):
         raise DuplicateLead()
     row = VendorToKocLead(**_row(vendor_id, lead, LeadSource.MANUAL, user_id, utcnow()))
     db.add(row)

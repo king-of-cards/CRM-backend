@@ -92,6 +92,12 @@ def seed_vendors(session: Session) -> None:
     session.commit()
 
 
+def vendors_by_id(session: Session) -> dict[int, Vendor]:
+    """Every vendor (inactive ones too): a lead manually assigned to a vendor that was made
+    inactive keeps showing that vendor's name. Automatic rules only ever use active_vendors."""
+    return {v.id: v for v in session.exec(select(Vendor))}
+
+
 def active_vendors(session: Session) -> list[Vendor]:
     return list(session.exec(select(Vendor).where(Vendor.is_active == True).order_by(Vendor.priority, Vendor.id)))  # noqa: E712
 
@@ -224,7 +230,7 @@ def attach(
     from app.models.hot_lead import CrmHotLead
 
     vendors = active_vendors(session)
-    by_id = {v.id: v for v in vendors}
+    by_id = vendors_by_id(session)              # manual choices: inactive vendors keep their name
     plain_rules = lead_rules(source, vendors)
     gift_rules = lead_rules(source, vendors, gift=True)
     keys = [str(key(i)) for i in items if key(i) is not None]
@@ -274,7 +280,7 @@ def effective_vendor_counts(session: Session, source: str, rows: Iterable[tuple]
     """rows: (lead_key, location, pincode, sheet_vendor[, branch_vendor_id[, is_gift]]). Returns one
     dict per lead with the effective vendor and the lead's CRM status, for vendor statistics."""
     vendors = active_vendors(session)
-    by_id = {v.id: v for v in vendors}
+    by_id = vendors_by_id(session)
     plain_rules = lead_rules(source, vendors)
     gift_rules = lead_rules(source, vendors, gift=True)
     metas = {m.lead_key: m for m in session.exec(select(LeadMeta).where(LeadMeta.source == source))}

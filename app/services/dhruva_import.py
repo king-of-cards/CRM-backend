@@ -52,7 +52,7 @@ HEADINGS: dict[str, tuple[str, ...]] = {
     "event_type": ("eventtype", "event", "typeofevent", "occasion"),
 }
 FIELDS = ("name", "venue", "date", "phone", "alt_phone", "event_type")
-NO_VALUE = {"", "nil", "na", "n/a", "none", "-", "--", "nill", "null"}
+NO_VALUE = {"", "nil", "na", "n/a", "none", "-", "--", "nill", "null", "."}   # = lead_values.NA_VALUES
 
 MSG_TOO_MANY_PHONES = "At most two numbers (phone and alternate phone)"
 MSG_NAME_OR_PHONE = "A name or a phone is required"
@@ -191,11 +191,18 @@ def as_text(value: Any) -> str:
 
 
 def one_line(value: Any) -> str | None:
+    """One line of text; N/A-like values ("N/A", "-", "nil", …) are empty."""
+    from app.services.lead_values import is_na
+
     text = re.sub(r"\s+", " ", as_text(value)).strip()
-    return text or None
+    return None if is_na(text) else text
 
 
 def clean_event_type(value: Any) -> str | None:
+    from app.services.lead_values import is_na
+
+    if is_na(as_text(value)):
+        return None
     parts = [re.sub(r"\s+", " ", p).strip(" ,") for p in re.split(r"[\r\n]+", as_text(value))]
     text = ", ".join(p for p in parts if p)
     return text or None

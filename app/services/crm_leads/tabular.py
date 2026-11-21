@@ -23,7 +23,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 
 from app.models.vendor_to_koc import STATUS_LABELS as UPDATE_LABELS
 from app.services.crm_leads.fields import (
-    FIELDS, READ_ONLY_COLUMNS, SOURCE_LABELS, UPLOAD_CRM_FIELDS, display_date, display_datetime,
+    FIELDS, READ_ONLY_COLUMNS, SOURCE_LABELS, UPLOAD_CRM_FIELDS, display_date, display_datetime, upload_crm_fields,
 )
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -243,7 +243,7 @@ def template(source: str, fmt: str, branch_names: list[str], vendor_names: list[
         return write_csv(headers, [example], kinds), CSV_TYPE, "csv"
 
     read_only = set(READ_ONLY_COLUMNS[source])
-    defs = {f.label: f for f in (*FIELDS[source], *UPLOAD_CRM_FIELDS)}
+    defs = {f.label: f for f in (*FIELDS[source], *upload_crm_fields(source))}
     wb = Workbook()
     ws = wb.active
     ws.title = "Leads"
@@ -280,7 +280,7 @@ def template(source: str, fmt: str, branch_names: list[str], vendor_names: list[
 
     lists = wb.create_sheet("Lists")
     choices = {
-        "Branch": branch_names if source == "spin" else [],
+        "Branch": branch_names if source in ("spin", "koc_to_dhruva") else [],
         # "<vendor> · auto" isn't offered (Automatic covers it) but uploads still accept it
         "Assigned to": ["Automatic", "Unassigned"] + vendor_names,
         "Update": [label for label in UPDATE_LABELS.values()],          # Pending first
@@ -316,6 +316,11 @@ EXAMPLES: dict[str, dict[str, Any]] = {
                  "Assigned to": "Automatic", "Submitted": _T},
     "wedding": {"Lead": "Ravi Kumar", "Email": "ravi@example.com", "Contact": "+919845010003", "Occasion": "Wedding",
                 "Event date": _D, "City": "Bangalore", "Budget": 150000, "Assigned to": "Phodeo", "Submitted": _T},
+    "koc_to_dhruva": {"Name": "Asha Rao", "Phone": "+919845012345", "Email": "asha@example.com",
+                      "Occasion": "Wedding", "Event date": _D, "Branch": "Jayanagar", "Branch code": "JNG-004 · Bangalore",
+                      "Estimated budget per card": "70-100", "Quantity required": 500, "Received": _T,
+                      "Update": "Interested", "Additional comments": "Call after 6 pm", "Quoted amount": 45000,
+                      "Follow-up date": date(2026, 11, 25)},
     "wedding_planner": {"Lead": "Meera", "Role": "Bride", "Email": "meera@example.com", "Contact": "+919845010004",
                         "Wedding date": date(2027, 12, 20), "Wedding city": "Udaipur", "Guests": 300,
                         "Guests staying": 120, "Budget": 2500000, "Budget range": "20L–30L", "Assigned to": "",

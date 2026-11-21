@@ -37,7 +37,7 @@ from app.models.whatsapp_lead import WhatsAppLead
 from app.services.crm_leads import export as export_cols
 from app.services.crm_leads import service, tabular
 from app.services.crm_leads.fields import (
-    FIELDS, SOURCE_LABELS, SPIN_SOURCES, UPLOAD_CRM_KEYS, clean_row, from_model, header_map, norm_header,
+    FIELDS, KOC, SOURCE_LABELS, SPIN_SOURCES, UPLOAD_CRM_KEYS, clean_row, from_model, header_map, norm_header,
     read_only_headers,
 )
 from app.services.branches import branches_by_id
@@ -100,12 +100,17 @@ async def import_preview(
 ):
     """Check an uploaded file. Nothing is saved: send the rows' "values" to POST /import."""
     content = await file.read(tabular.MAX_UPLOAD_BYTES + 1)
+    return preview_file(db, source, file.filename or "", content, sheet_name)
+
+
+def preview_file(db, source: str, filename: str, content: bytes, sheet_name: str | None) -> dict:
+    """The upload preview of any source (also KOC -> Dhruva): columns, checked rows, counts."""
     try:
-        headers, data = tabular.read_upload(file.filename or "", content, sheet_name)
+        headers, data = tabular.read_upload(filename, content, sheet_name)
     except tabular.UploadError as exc:
         raise HTTPException(400, str(exc))
 
-    names = header_map(source, upload=True)          # + Update, Quoted amount, Conversion amount
+    names = header_map(source, upload=True)          # + the CRM columns (Update, Quoted amount, …)
     read_only = read_only_headers(source)
     mapping: dict[int, str] = {}
     matched: dict[str, str] = {}
@@ -149,10 +154,16 @@ class ImportBody(BaseModel):
 def import_rows(source: Source, body: ImportBody, user: AdminUser, db: DbSession):
     """Save every row that passes (origin=imported). Rows with errors and duplicates are
     skipped and reported; each row is checked again here, whatever the preview said."""
-    if not body.rows:
+    return import_rows_into(db, source, body.rows, user)
+
+
+def import_rows_into(db, source: str, rows: list, user) -> dict:
+    """The bulk save of any source (also KOC -> Dhruva): checks every row again, saves the passing
+    ones with their CRM columns, logs "created"."""
+    if not rows:
         raise HTTPException(400, "No rows to import.")
     try:
-        results, counts, cleaned = service.check_rows(db, source, [(r.row, r.values) for r in body.rows])
+        results, counts, cleaned = service.check_rows(db, source, [(r.row, r.values) for r in rows])
     except service.WorkflowUnavailable:
         raise _workflow_down()
     imported = 0
@@ -162,9 +173,12 @@ def import_rows(source: Source, body: ImportBody, user: AdminUser, db: DbSession
         lead = service.create(db, source, c, ORIGIN_IMPORTED, user.id)
         result["status"] = "imported"
         result["lead_key"] = service.lead_key_of(source, lead)
-        # Empty Assigned to: unassigned. "Automatic" on a spin gift lead: the gifts vendor (Kraftyz)
-        service.save_assignment(db, source, result["lead_key"], c.assignment, user.id, empty_means_unassigned=True,
-                                crm={k: c.values.get(k) for k in UPLOAD_CRM_KEYS})
+        if source == KOC:                       # never assigned: only the section's CRM details
+            service.save_koc_crm(db, result["lead_key"], c.values, user.id)
+        else:
+            # Empty Assigned to: unassigned. "Automatic" on a spin gift lead: the gifts vendor (Kraftyz)
+            service.save_assignment(db, source, result["lead_key"], c.assignment, user.id,
+                                    empty_means_unassigned=True, crm={k: c.values.get(k) for k in UPLOAD_CRM_KEYS})
         imported += 1
     db.commit()
     for result in results:
@@ -278,7 +292,7 @@ class AddBody(BaseModel):
 
 def _duplicate_409(duplicate: dict, others: list[str]) -> HTTPException:
     return HTTPException(409, {
-        "message": "A lead with this phone number already exists.",
+        "message": "This lead already exists (the same phone and every other field).",
         "duplicate": duplicate,
         "warnings": [{"type": "other_source", "sources": others}] if others else [],
     })
@@ -298,7 +312,8 @@ def add_lead(source: Source, body: AddBody, user: AdminUser, db: DbSession):
     if not c.ok:
         raise HTTPException(422, {"message": "Please fix the highlighted fields.", "errors": c.errors})
     try:
-        duplicate, others = service.classify(source, c.phone.e164, service.lookup(db, {c.phone.e164}))
+        duplicate, others = service.classify(source, c.phone.e164, service.lookup(db, {c.phone.e164}),
+                                             values=c.values)
     except service.WorkflowUnavailable:
         raise _workflow_down()
     if duplicate and not body.allow_duplicate:
@@ -347,10 +362,13 @@ def edit_lead(source: Source, lead_key: str, body: EditBody, user: AdminUser, db
     c = clean_row(source, raw, service.context(db), partial=True)
     if not c.ok:
         raise HTTPException(422, {"message": "Please fix the highlighted fields.", "errors": c.errors})
-    if "phone" in raw and c.phone.e164 != lead.phone_e164:
+    # The edited lead may now equal another one (every field): same 409 as an add
+    e164 = c.phone.e164 if "phone" in raw and c.phone is not None else lead.phone_e164
+    if e164:
+        merged = {**from_model(source, lead), **{k: v for k, v in c.values.items() if k in raw}}
         try:
-            duplicate, others = service.classify(source, c.phone.e164, service.lookup(db, {c.phone.e164}),
-                                                 exclude_key=lead_key)
+            duplicate, others = service.classify(source, e164, service.lookup(db, {e164}), exclude_key=lead_key,
+                                                 values=merged)
         except service.WorkflowUnavailable:
             raise _workflow_down()
         if duplicate:

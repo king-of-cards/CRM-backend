@@ -40,13 +40,15 @@ def phodeo_rows():
         [2, "13-01-2026", "Ravi Kumar", None, "+91 98450-12345", "Mysuru", *tail],
         [3, None, "Meena", None, "0 98450 54321", None, *tail],
         [4, "05-01-2026", "Short Phone", None, 984501234, "Pune", *tail],          # 9 digits
-        [5, "06-01-2026", "Repeat", None, 8095852272, "Delhi", *tail],             # repeated in file
+        [5, "05-01-2026", "asha  RAO", None, 8095852272, "bengaluru", *tail],      # repeats row 2 (any case/spacing)
         [6, "07-01-2026", "Already Saved", None, "9123456789", "Chennai", *tail],  # already saved
         [7, "03-04-2026", "Day First", None, "919876543210", "Goa", *tail],        # 3 April
         [None] * 12,                                                                # empty row
         [9, "2026/01/05", "Bad Date", None, "7012345678", "Kochi", *tail],
     ]
 
+
+SAVED = {"name": "Already Saved", "lead_date": date(2026, 1, 7), "city": "Chennai"}
 
 EXPECTED_PREVIEW = [
     {"row": 2, "name": "Asha Rao", "date": "2026-01-05", "phone": "8095852272", "city": "Bengaluru",
@@ -58,7 +60,7 @@ EXPECTED_PREVIEW = [
     {"row": 5, "name": "Short Phone", "date": "2026-01-05", "phone": "984501234", "city": "Pune",
      "errors": [{"field": "phone", "message": "Phone must be a 10-digit Indian mobile number "
                                               "starting with 6, 7, 8 or 9"}], "duplicate": False},
-    {"row": 6, "name": "Repeat", "date": "2026-01-06", "phone": "8095852272", "city": "Delhi",
+    {"row": 6, "name": "asha  RAO", "date": "2026-01-05", "phone": "8095852272", "city": "bengaluru",
      "errors": [], "duplicate": True},
     {"row": 7, "name": "Already Saved", "date": "2026-01-07", "phone": "9123456789", "city": "Chennai",
      "errors": [], "duplicate": True},
@@ -213,8 +215,9 @@ class NotificationsAndHotTests(VendorToKocTestCase):
 class PreviewTests(VendorToKocTestCase):
     def setUp(self):
         super().setUp()
-        self.add_lead(self.phodeo_id, "9123456789")         # makes row 7 a duplicate
-        self.add_lead(self.other_id, "9845012345")          # other vendor: not a duplicate
+        self.add_lead(self.phodeo_id, "9123456789", **SAVED)  # makes row 7 a duplicate (every field)
+        self.add_lead(self.other_id, "9845012345", name="Ravi Kumar", lead_date=date(2026, 1, 13),
+                      city="Mysuru")                        # other vendor: not a duplicate
 
     def test_phodeo_sheet_preview(self):
         before = len(self.leads())
@@ -289,15 +292,16 @@ class PreviewTests(VendorToKocTestCase):
 # ── Bulk save ───────────────────────────────────────────────────────────
 class BulkTests(VendorToKocTestCase):
     def test_bulk_revalidates_edited_rows(self):
-        self.add_lead(self.phodeo_id, "9123456789")
+        self.add_lead(self.phodeo_id, "9123456789", **SAVED)
         preview = self.preview(self.phodeo, make_xlsx(phodeo_rows())).json()
         leads = [{k: r[k] for k in ("name", "date", "phone", "city")}
                  for r in preview["rows"] if not r["errors"] and not r["duplicate"]]
         # The user edits rows in the UI before saving:
         leads[0]["phone"] = "98450123"          # valid in the preview, now too short
-        leads[1]["phone"] = leads[2]["phone"]   # now repeats another row
+        leads[1] = dict(leads[2])               # now repeats another row (every field)
         leads.append({"name": "Edited Date", "date": "13-01-2026", "phone": "7012345678"})
-        leads.append({"name": "Fixed", "date": "2026-01-05", "phone": "9123456789"})  # saved before
+        leads.append({"name": "already saved", "date": "2026-01-07", "phone": "9123456789",
+                      "city": "Chennai"})          # saved before (any case)
         resp = self.client.post(f"{BASE}/leads/bulk", headers=self.phodeo, json={"leads": leads})
         self.assertEqual(resp.status_code, 200, resp.text)
         body = resp.json()

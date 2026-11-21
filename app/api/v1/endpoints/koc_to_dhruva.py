@@ -10,18 +10,20 @@ the central 403 on writes); vendor logins: 403. No add or upload: rows come only
 """
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 from sqlmodel import select
 
-from app.api.deps import DbSession, DhruvaSectionUser, PageSize, common_filter_params
+from app.api.deps import AdminUser, DbSession, DhruvaSectionUser, PageSize, ReadAdmin, common_filter_params
 from app.api.v1.endpoints import spin_leads as sl
 from app.core import response_cache
 from app.models.lead_meta import LeadMeta
 from app.models.vendor_to_koc import STATUS_LABELS
-from app.services import also_in, hot_leads, kpis, koc_dhruva, lead_activity, lead_crm, lead_filters, periods, phones
+from app.services import (
+    access, also_in, hot_leads, kpis, koc_dhruva, lead_activity, lead_crm, lead_filters, periods, phones,
+)
 from app.services import vendor_lead_export as files
 from app.services.access import Viewer
 
@@ -100,8 +102,8 @@ def _page(db, user, f: KocFilters, start: int, length: int, sort, order, flt: di
 
 
 def _attach_also_in(db, user, items: list[dict]) -> None:
-    # Workflow rows only (crm_spin_leads.matching gives none for this section); kept for crm- keys
-    e164_of = also_in.page_phones(db, "spin", [i["lead_key"] for i in items if i["lead_key"].startswith("crm-")])
+    # Uploaded rows (kd-<id>): their stored phones; workflow rows: the phone in the item
+    e164_of = also_in.page_phones(db, SOURCE, [i["lead_key"] for i in items if i["lead_key"].startswith("kd-")])
     for item in items:
         if item["lead_key"] not in e164_of and item.get("phone"):
             e164 = phones.normalize(str(item["phone"]), lenient=True).e164
@@ -223,6 +225,58 @@ def export_leads(db: DbSession, user: DhruvaSectionUser, f: Filters, format: Lit
     return Response(content, media_type=media, headers={
         "Content-Disposition": f'attachment; filename="koc_to_dhruva_leads_{periods.today_ist().isoformat()}.{format}"',
         "Cache-Control": "no-store"})
+
+
+# ── Upload (admins): template, preview, save ──────────────────────────
+@router.get("/leads/template")
+def upload_template(db: DbSession, _: ReadAdmin, format: Literal["xlsx", "csv"] = Query("xlsx")):
+    """The export's columns (without Sl. No) with one example row; Branch code, Quoted date and Hot
+    are read-only. Only Phone is required."""
+    from app.api.v1.endpoints.crm_leads import _branch_names, _file_response
+    from app.services.crm_leads import tabular
+
+    content, media_type, ext = tabular.template(SOURCE, format, _branch_names(db), [])
+    return _file_response(content, media_type, tabular.filename("koc-to-dhruva-leads-template", ext))
+
+
+@router.post("/leads/import/preview")
+async def upload_preview(
+    db: DbSession,
+    _: AdminUser,
+    file: UploadFile = File(...),
+    sheet_name: str | None = Form(None, max_length=31,
+                                  description='Excel sheet to read (default "Leads", else the first). Ignored for CSV.'),
+):
+    """Check an uploaded file (the history before the cut-off). Nothing is saved: send the rows'
+    "values" (fixed where needed) to POST /leads/import. Duplicates: every field the same as an
+    uploaded row (archived too), a live workflow row of the section, or an earlier row of the file."""
+    from app.api.v1.endpoints.crm_leads import preview_file
+    from app.services.crm_leads import tabular
+
+    content = await file.read(tabular.MAX_UPLOAD_BYTES + 1)
+    return preview_file(db, SOURCE, file.filename or "", content, sheet_name)
+
+
+class KocImportRow(BaseModel):
+    row: int = Field(ge=1, description="Row number in the file, echoed back in the results")
+    values: dict[str, Any]
+
+
+class KocImportBody(BaseModel):
+    rows: list[KocImportRow] = Field(max_length=5000)
+
+
+@router.post("/leads/import")
+def upload_save(body: KocImportBody, db: DbSession, user: AdminUser):
+    """Save every row that passes (checked again), into crm_koc_dhruva_leads (keys kd-<id>), with
+    its Update, Additional comments, Quoted amount, Conversion amount and Follow-up date as this
+    section's CRM details. Every uploaded row is listed (the budget / quantity rule is only shown)."""
+    from app.api.v1.endpoints.crm_leads import import_rows_into
+
+    out = import_rows_into(db, SOURCE, body.rows, user)
+    response_cache.clear("analytics")
+    access.forget()                       # the section's keys changed (koc_dhruva.rows)
+    return out
 
 
 # ── One lead ───────────────────────────────────────────────────────────

@@ -120,12 +120,12 @@ class DhruvaListTest(DhruvaTestBase, unittest.TestCase):
         self.assertEqual(rows["Month Only"][3], "March")                   # text-only date stays text
         self.assertEqual(rows["Ravi Kumarfake"][5], "+919000000002")
         self.assertEqual(rows["Nil Phone"][7], "Pending")
-        # CSV, then the export uploads back: rows with phones duplicate; no-phone rows don't.
+        # CSV, then the export uploads back: every row is a duplicate (every field; no-phone rows too)
         csv_resp = self.call("dhruva", "GET", "/leads/export", params={"format": "csv"})
         body = self.preview(content=csv_resp.content, filename="export.csv").json()
-        self.assertEqual((body["counts"]["total"], body["counts"]["duplicates"], body["counts"]["valid"]), (17, 13, 4))
+        self.assertEqual((body["counts"]["total"], body["counts"]["duplicates"], body["counts"]["valid"]), (17, 17, 0))
         body = self.preview(content=resp.content, filename="export.xlsx").json()
-        self.assertEqual((body["counts"]["duplicates"], body["counts"]["valid"]), (13, 4))
+        self.assertEqual((body["counts"]["duplicates"], body["counts"]["valid"]), (17, 0))
 
     def test_filter_options(self):
         o = self.call("dhruva", "GET", "/leads/filter-options").json()

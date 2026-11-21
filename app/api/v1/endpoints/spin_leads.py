@@ -7,8 +7,9 @@ the upload duplicate check), so the history can be uploaded as CRM spin leads (c
 which are always listed. Gift leads (otherWeddingServices names "Wedding Gifts & Return Gifts",
 see `is_gift`) are ordinary spin leads; only their automatic vendor differs (lead_crm.lead_rules).
 
-A second view, koc_to_dhruva (the Dhruva section "KOC -> Dhruva"), is a rule over ALL workflow
-rows (listed or not, every date) and never includes CRM spin leads: see `koc_filter` / `koc_reason`.
+A second view, koc_to_dhruva (the Dhruva section "KOC -> Dhruva"), is a rule over the workflow rows
+(listed or not) created on or after the same cut-off, plus its own uploaded rows
+(crm_koc_dhruva_leads, every one listed); never CRM spin leads: see `koc_filter` / `koc_reason`.
 
 Settings you may want to adjust (module level, below):
   HIDDEN_COLUMNS       table columns that are never selected, returned, searched or sorted
@@ -274,9 +275,9 @@ def koc_filter(table: Table) -> list[ColumnElement]:
 
 def base_filter(table: Table, flow: str = SPIN) -> list[ColumnElement]:
     """What every listed query of a view applies: spin = `spin_filter`; koc_to_dhruva: its own rule
-    over every row (all dates)."""
+    over every row (listed or not) created on or after the cut-off (SPIN_LIVE_FROM)."""
     if flow == KOC_TO_DHRUVA:
-        return koc_filter(table)
+        return koc_filter(table) + live_filter(table)
     if flow != SPIN:
         raise ValueError(f"unknown flow {flow!r}")
     return spin_filter(table)

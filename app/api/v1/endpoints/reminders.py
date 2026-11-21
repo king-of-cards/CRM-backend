@@ -37,12 +37,14 @@ def _details_for_crm_source(db: Session, source: str, keys: set[str]) -> dict[st
             WeddingPlan.plan_id.in_(keys), WeddingPlan.is_deleted == False)).all()  # noqa: E712
         return {str(k): (name, phone) for k, name, phone in rows}
     from app.models.crm_spin_lead import CrmSpinLead
+    from app.models.koc_dhruva_lead import KOC_KEY_PREFIX, KocDhruvaLead
     from app.models.lead_origin import CRM_KEY_PREFIX
-    local = {k for k in keys if k.startswith(CRM_KEY_PREFIX)}
+    # spin: CRM spin leads (crm-<id>); koc_to_dhruva: its uploaded rows (kd-<id>)
+    model, prefix = (KocDhruvaLead, KOC_KEY_PREFIX) if source == "koc_to_dhruva" else (CrmSpinLead, CRM_KEY_PREFIX)
     output = {}
-    ids = [int(k[len(CRM_KEY_PREFIX):]) for k in local if k[len(CRM_KEY_PREFIX):].isdigit()]
+    ids = [int(k[len(prefix):]) for k in keys if k.startswith(prefix) and k[len(prefix):].isdigit()]
     if ids:
-        for row in db.exec(select(CrmSpinLead).where(CrmSpinLead.id.in_(ids), CrmSpinLead.is_deleted == False)):  # noqa: E712
+        for row in db.exec(select(model).where(model.id.in_(ids), model.is_deleted == False)):  # noqa: E712
             output[row.lead_key] = (row.name, row.phone)
     return output
 
