@@ -1,9 +1,10 @@
 """KOC -> Dhruva (source key koc_to_dhruva): spin leads KOC shares with Dhruva by rule.
 
 Rows: the workflow spin_lead rows (listed as spin or not) created on or after the cut-off
-(SPIN_LIVE_FROM) whose estimatedBudgetPerCard's first number is >= 70 or quantityRequired >= 1000
-(spin_leads.koc_filter / koc_reason), plus every row uploaded to crm_koc_dhruva_leads (keys
-"kd-<id>"; the rule is only shown there, never a filter). CRM spin leads are never included. A live
+(SPIN_LIVE_FROM) whose estimatedBudgetPerCard is >= 70 or else quantityRequired >= 1000, each read as
+its starting number, "under…" / "below…" never (spin_leads.rule_number; koc_filter / koc_reason), plus every row uploaded to crm_koc_dhruva_leads (keys
+"kd-<id>"; the rule is only shown there, never a filter). CRM spin leads are never included, and an
+upload row never creates a Spin lead (the Spin link is only shown: crm_leads.service.plan_spin). A live
 workflow lead stays in spin too; this section keeps its own CRM details, hot flags and activity
 under source "koc_to_dhruva", and no vendor is ever assigned.
 
@@ -12,6 +13,7 @@ central 403); vendor logins never see these leads.
 """
 import logging
 from datetime import datetime, timezone
+from functools import lru_cache
 from typing import Any
 
 from sqlmodel import Session
@@ -29,21 +31,30 @@ WORKFLOW_LIMIT = 100_000          # every rule row in one query (869 today)
 CACHE_SECONDS = 30                # cleared with the access cache (access.forget)
 
 
+@lru_cache(maxsize=4096)
 def _norm(name: str) -> str:
     return "".join(ch for ch in name.lower().split(".")[-1] if ch.isalnum())
 
 
-def pick(item: dict, *names: str) -> Any:
-    """The first non-empty value among fields whose last name part matches (any case / punctuation)."""
-    wanted = [_norm(n) for n in names]
+def _by_norm(item: dict) -> dict[str, Any]:
+    """{normalised field name: value}, the first field of each name winning."""
     by_norm: dict[str, Any] = {}
     for key, value in item.items():
         by_norm.setdefault(_norm(key), value)
-    for w in wanted:
-        value = by_norm.get(w)
+    return by_norm
+
+
+def _pick_from(by_norm: dict[str, Any], *names: str) -> Any:
+    for name in names:
+        value = by_norm.get(_norm(name))
         if value not in (None, ""):
             return value
     return None
+
+
+def pick(item: dict, *names: str) -> Any:
+    """The first non-empty value among fields whose last name part matches (any case / punctuation)."""
+    return _pick_from(_by_norm(item), *names)
 
 
 def _datetime(value: Any) -> datetime | None:
@@ -62,51 +73,29 @@ def is_open(update_status: str | None) -> bool:
     return update_status not in CLOSED_STATUSES
 
 
-def budget_lower_bound(budget: Any) -> float | None:
-    """The estimated budget per card's lower bound in rupees: its first number ("70-100" -> 70,
-    "500_PLUS" -> 500), 0 for "UNDER_…" budgets, None when there is no number. The Python twin of
-    spin_leads.koc_potential_expr."""
-    from app.api.v1.endpoints.spin_leads import first_number
-
-    if isinstance(budget, str) and budget.strip().lower().startswith("under"):
-        return 0.0 if first_number(budget) is not None else None
-    return first_number(budget)
-
-
-def potential_value(budget: Any, quantity: Any) -> float | int | None:
-    """Budget lower bound x quantity (rupees), or None when either is missing."""
-    from app.api.v1.endpoints.spin_leads import first_number
-
-    low, qty = budget_lower_bound(budget), first_number(quantity)
-    if low is None or qty is None:
-        return None
-    value = round(low * qty, 2)
-    return int(value) if value == int(value) else value
-
-
 def row_of(item: dict) -> dict:
     """A list item (workflow or CRM) -> the fields the section works with."""
     from app.api.v1.endpoints.spin_leads import KOC_REASON_LABELS, first_number, koc_reason
 
-    budget = pick(item, "estimatedBudgetPerCard")
-    quantity = pick(item, "quantityRequired")
+    fields = _by_norm(item)               # once per item (not once per field)
+    budget = _pick_from(fields, "estimatedBudgetPerCard")
+    quantity = _pick_from(fields, "quantityRequired")
     reason = koc_reason({"estimatedBudgetPerCard": budget, "quantityRequired": quantity})
     return {
         "key": str(item.get("id")),
-        "name": pick(item, "name"),
-        "phone": pick(item, "phone"),
-        "email": pick(item, "email"),
-        "occasion": pick(item, "occasionType"),
-        "event_date": pick(item, "occasionDate"),
-        "pincode": pick(item, "pincode"),
-        "city": pick(item, "city", "location"),
-        "branch_id": pick(item, "branch_id", "branchId"),
+        "name": _pick_from(fields, "name"),
+        "phone": _pick_from(fields, "phone"),
+        "email": _pick_from(fields, "email"),
+        "occasion": _pick_from(fields, "occasionType"),
+        "event_date": _pick_from(fields, "occasionDate"),
+        "pincode": _pick_from(fields, "pincode"),
+        "city": _pick_from(fields, "city", "location"),
+        "branch_id": _pick_from(fields, "branch_id", "branchId"),
         "budget": budget,
         "quantity": first_number(quantity),
-        "potential_value": potential_value(budget, quantity),
         "reason": reason,                 # internal (the reason filter); never returned
         "reason_label": KOC_REASON_LABELS.get(reason),
-        "created": _datetime(pick(item, "created_at", "createdAt", "created")),
+        "created": _datetime(_pick_from(fields, "created_at", "createdAt", "created")),
         "origin": item.get("origin") or "workflow",
     }
 

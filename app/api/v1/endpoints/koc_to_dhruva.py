@@ -5,8 +5,10 @@ Rule and storage: app/services/koc_dhruva.py. Paths (prefix /api/v1/koc-to-dhruv
   PUT  leads/{lead_key}/crm          Update, comments, quoted amount / date, conversion amount, follow-up
   POST / DELETE leads/{lead_key}/hot
   GET  leads/{lead_key}/activity
+  GET  leads/template; POST leads/import/preview, leads/import   (admins: bulk upload)
 Who: admins, view-only and Dhruva logins read; admins and Dhruva logins edit (view-only logins get
-the central 403 on writes); vendor logins: 403. No add or upload: rows come only from the rule.
+the central 403 on writes); vendor logins: 403. No single add. Upload rows are matched with Spin by
+phone (last 10 digits) only to show the link: never a Spin lead, never vendor rules.
 """
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -84,7 +86,7 @@ def _filters_for(db, user, f: KocFilters) -> dict:
 def _enrich(item: dict) -> dict:
     row = koc_dhruva.row_of(item)
     item.update({
-        "lead_key": row["key"], "potential_value": row["potential_value"],
+        "lead_key": row["key"],
         "occasion": row["occasion"], "event_date": row["event_date"], "pincode": row["pincode"],
         "estimated_budget_per_card": row["budget"], "quantity_required": row["quantity"],
         "received": row["created"].isoformat() if row["created"] else None,
@@ -119,12 +121,11 @@ def list_leads(
     f: Filters,
     page: int = Query(1, ge=1),
     page_size: PageSize = 10,
-    sort: str | None = Query(None, description="Column name, additional_details.<key>, or potential_value "
-                                                "(budget lower bound x quantity; empty values last)"),
+    sort: str | None = Query(None, description="Column name or additional_details.<key> (empty values last)"),
     order: Literal["asc", "desc"] = Query("asc"),
 ):
     """KOC -> Dhruva leads (workflow rows of any date; never CRM-uploaded spin leads) with this
-    section's CRM details (crm), potential_value and also_in."""
+    section's CRM details (crm) and also_in."""
     data = _page(db, user, f, (page - 1) * page_size, page_size, sort, order)
     _attach_also_in(db, user, data["items"])
     return {**data, "page": page, "page_size": page_size}
@@ -249,7 +250,9 @@ async def upload_preview(
 ):
     """Check an uploaded file (the history before the cut-off). Nothing is saved: send the rows'
     "values" (fixed where needed) to POST /leads/import. Duplicates: every field the same as an
-    uploaded row (archived too), a live workflow row of the section, or an earlier row of the file."""
+    uploaded row (archived too), a live workflow row of the section, or an earlier row of the file.
+    Each row's "spin" / "also_in": its Spin leads (last 10 phone digits) and their vendors
+    ("matched"), or "not_in_spin" (service.plan_spin). Nothing is created in Spin."""
     from app.api.v1.endpoints.crm_leads import preview_file
     from app.services.crm_leads import tabular
 
@@ -270,7 +273,9 @@ class KocImportBody(BaseModel):
 def upload_save(body: KocImportBody, db: DbSession, user: AdminUser):
     """Save every row that passes (checked again), into crm_koc_dhruva_leads (keys kd-<id>), with
     its Update, Additional comments, Quoted amount, Conversion amount and Follow-up date as this
-    section's CRM details. Every uploaded row is listed (the budget / quantity rule is only shown)."""
+    section's CRM details. Every uploaded row is listed (the budget / quantity rule is only shown).
+    Only KOC -> Dhruva rows are saved: never a Spin lead, never vendor rules; matched Spin leads and
+    their vendors are left as they are."""
     from app.api.v1.endpoints.crm_leads import import_rows_into
 
     out = import_rows_into(db, SOURCE, body.rows, user)
@@ -317,7 +322,8 @@ def _answer(db, lead_key: str, meta: LeadMeta | None) -> dict:
 
 
 def _meta(db, lead_key: str) -> LeadMeta | None:
-    return db.exec(select(LeadMeta).where(LeadMeta.source == SOURCE, LeadMeta.lead_key == lead_key)).first()
+    return db.exec(select(LeadMeta).where(LeadMeta.source == SOURCE, LeadMeta.lead_key == lead_key,
+                                          LeadMeta.copy_vendor_id == 0)).first()     # never a vendor copy
 
 
 @router.get("/leads/{lead_key}/crm")

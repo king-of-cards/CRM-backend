@@ -229,6 +229,12 @@ def content_disposition(name: str) -> str:
 
 
 # ── Template ───────────────────────────────────────────────────────────
+# Template columns formatted as Text (besides phones), so Excel keeps what is typed
+TEXT_COLUMNS: dict[str, tuple[str, ...]] = {
+    "koc_to_dhruva": ("Estimated budget per card", "Quantity required"),
+}
+
+
 def template(source: str, fmt: str, branch_names: list[str], vendor_names: list[str]) -> tuple[bytes, str, str]:
     """The export's columns, with one example row in the screen's formats. Read-only columns
     (Quoted date, Branch code, Estimate…) are kept so files match the export; they are ignored
@@ -257,8 +263,9 @@ def template(source: str, fmt: str, branch_names: list[str], vendor_names: list[
         color = "C00000" if required else ("808080" if h in read_only else None)
         ws.cell(row=1, column=i).font = Font(bold=True, color=color)
         ws.column_dimensions[letter].width = max(14, len(h) + 4)
-        if kinds[i - 1] == "phone":
-            for r in range(3, 2002):                     # keep + signs as text
+        if kinds[i - 1] == "phone" or h in TEXT_COLUMNS.get(source, ()):
+            # Text cells: keep + signs, and ranges such as 1-10 (Excel turns them into dates)
+            for r in range(2, 2002):
                 ws.cell(row=r, column=i).number_format = "@"
 
     info = wb.create_sheet("Instructions")
@@ -318,9 +325,9 @@ EXAMPLES: dict[str, dict[str, Any]] = {
                 "Event date": _D, "City": "Bangalore", "Budget": 150000, "Assigned to": "Phodeo", "Submitted": _T},
     "koc_to_dhruva": {"Name": "Asha Rao", "Phone": "+919845012345", "Email": "asha@example.com",
                       "Occasion": "Wedding", "Event date": _D, "Branch": "Jayanagar", "Branch code": "JNG-004 · Bangalore",
-                      "Estimated budget per card": "70-100", "Quantity required": 500, "Received": _T,
+                      "Estimated budget per card": "70-100", "Quantity required": "500", "Received": _T,
                       "Update": "Interested", "Additional comments": "Call after 6 pm", "Quoted amount": 45000,
-                      "Follow-up date": date(2026, 11, 25)},
+                      "Follow-up date": date(2026, 11, 25), "Source": "Instagram", "Relation": "Sister"},
     "wedding_planner": {"Lead": "Meera", "Role": "Bride", "Email": "meera@example.com", "Contact": "+919845010004",
                         "Wedding date": date(2027, 12, 20), "Wedding city": "Udaipur", "Guests": 300,
                         "Guests staying": 120, "Budget": 2500000, "Budget range": "20L–30L", "Assigned to": "",

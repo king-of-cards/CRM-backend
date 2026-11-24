@@ -116,15 +116,16 @@ class VendorToKocAndDhruvaTests(KocTestBase):
         self.assertFalse([c for c in VendorToKocLead.__table__.constraints
                           if type(c).__name__ == "UniqueConstraint"], "no unique (vendor_id, phone)")
 
-    def test_dhruva_keeps_name_or_phone_and_na_is_empty(self):
+    def test_dhruva_name_required_and_na_is_empty(self):
         resp = self.add(name="Only Name", venue="N/A", event_type="-")
         self.assertEqual(resp.status_code, 201, resp.text)
         self.assertEqual((resp.json()["venue"], resp.json()["event_type"]), (None, None))
-        self.assertEqual(self.add(venue="Hall").status_code, 422)                        # neither name nor phone
-        self.assertEqual(self.add(name="only  name").status_code, 409)                   # every field the same
-        self.assertEqual(self.add(name="Phone A", phone="9845060001").status_code, 201)
-        self.assertEqual(self.add(name="Phone B", phone="9845060001").status_code, 201)  # same phone, other name
-        self.assertEqual(self.add(name="phone b", phone="+91 98450 60001").status_code, 409)
+        self.assertEqual(self.add(venue="Hall", phones=["9845060009"]).status_code, 422)    # no name
+        self.assertEqual(self.add(name="only  name").status_code, 409)                   # same name, no date, no phone
+        self.assertEqual(self.add(name="Only Name", event_dates=["2026-12-04"]).status_code, 201)   # other first date
+        self.assertEqual(self.add(name="Phone A", phones=["9845060001"]).status_code, 201)
+        self.assertEqual(self.add(name="Phone B", phones=["9845060001"]).status_code, 409)  # same phone
+        self.assertEqual(self.add(name="Phone C", phones=["98450"]).status_code, 422)       # not 10 digits
 
 
 # ── KOC -> Dhruva: cut-off and upload ──────────────────────────────────
@@ -186,6 +187,13 @@ class KocUploadTests(KocTestBase):
         self.assertEqual(rows[5]["duplicate"], {"reason": "in_file", "duplicate_of_row": 4})
         self.assertEqual(rows[6]["errors"][0]["field"], "phone")
         self.assertEqual(set(body["read_only_columns"]), {"Sl. No", "Hot"})
+        # Spin: 701 (live, listed) is a Spin lead; 702 (before the cut-off) isn't. Never created in Spin
+        spin = {r["row"]: r["spin"]["action"] for r in body["rows"]}
+        self.assertEqual(spin, {2: "not_in_spin", 3: "matched", 4: "not_in_spin", 5: "not_in_spin",
+                                6: "not_in_spin", 7: "not_in_spin", 8: "not_in_spin"})
+        self.assertEqual([m["lead_key"] for m in rows[3]["spin"]["leads"]], ["701"])
+        self.assertEqual(rows[3]["also_in"][0]["source"], "spin")
+        self.assertEqual((body["counts"]["spin_matched"], body["counts"]["spin_not_in_spin"]), (1, 6))
         with self.logged_in("admin"):
             saved = self.client.post(f"{API}{K2D}/leads/import", json={"rows": [
                 {"row": r["row"], "values": r["values"]} for r in body["rows"]]})
@@ -196,6 +204,7 @@ class KocUploadTests(KocTestBase):
             meta = s.exec(select(LeadMeta).where(LeadMeta.source == "koc_to_dhruva")).one()
             self.assertEqual(s.exec(select(CrmSpinLead)).all(), [])               # never a spin lead
         self.assertEqual(set(uploaded), {"History", "Small", "Blanks", "Other name"})
+        self.assertNotIn("spin_created", saved.json()["counts"])
         small = uploaded["Small"].lead_key
         self.assertTrue(small.startswith("kd-"))
         self.assertEqual((meta.lead_key, meta.update_status, meta.notes, meta.quoted_amount, meta.follow_up_date,
@@ -205,7 +214,7 @@ class KocUploadTests(KocTestBase):
         # Listed (every uploaded row, also below the rule), stats, export, details, dashboard
         items = {i["lead_key"]: i for i in self.get(f"{K2D}/leads", page_size=100)["items"]}
         self.assertEqual(set(items), {"701", *(u.lead_key for u in uploaded.values())})
-        self.assertEqual(items[small]["potential_value"], 1000)                    # 10 x 100, only shown
+        self.assertNotIn("potential_value", items[small])                          # removed
         self.assertEqual(items[small]["crm"]["update_status"], "interested")
         self.assertFalse({"reason", "reason_label"} & set(items[small]))
         self.assertEqual(self.get(f"{K2D}/leads/stats")["total"], 5)
@@ -215,6 +224,7 @@ class KocUploadTests(KocTestBase):
         # A second upload of the same file: everything already there
         again = self.upload().json()["counts"]
         self.assertEqual((again["ok"], again["duplicates"]), (0, 6))
+        self.assertEqual((again["spin_matched"], again["spin_not_in_spin"]), (1, 6))  # still not in Spin
 
     def test_crm_hot_activity_and_reminders_on_uploaded_rows(self):
         body = self.upload().json()
@@ -253,7 +263,8 @@ class KocUploadTests(KocTestBase):
             export = self.client.get(f"{API}{K2D}/leads/export")
         headers = [c.value for c in load_workbook(io.BytesIO(template.content))["Leads"][1]]
         export_headers = [c.value for c in load_workbook(io.BytesIO(export.content)).active[1]]
-        self.assertEqual(headers, [h for h in export_headers if h != "Sl. No"])
+        # The export's columns (without Sl. No), then the optional upload-only Source and Relation
+        self.assertEqual(headers, [h for h in export_headers if h != "Sl. No"] + ["Source", "Relation"])
 
 
 # ── Only active vendors can be chosen ──────────────────────────────────

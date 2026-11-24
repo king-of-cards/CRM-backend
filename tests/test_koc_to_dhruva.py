@@ -9,6 +9,7 @@ details. In-memory SQLite and the fake workflow database only. Run:
 import csv
 import io
 import json
+import re
 import unittest
 from datetime import date, datetime, timezone
 from unittest import mock
@@ -52,7 +53,7 @@ ROWS = [
     row(304, "9845070004", "50_100", None),                                   # 50: no       spin
     row(305, "9845070005", "500_PLUS", None, occasion="Reception"),           # budget       spin
     row(306, "9845070006", None, 1500, occasion="Birthday", created="2026-10-01T05:00:00"),   # quantity
-    row(307, "9845070007", "40-70", 999),                                     # no
+    row(307, "9845070007", "40-70", 999),                                     # 40, 999: no
 ]
 KOC_IDS = {"301", "302", "305", "306"}
 
@@ -97,25 +98,59 @@ class KocTestBase(DhruvaTestBase, unittest.TestCase):
 
 # ── The rule ───────────────────────────────────────────────────────────
 class RuleTests(unittest.TestCase):
+    # The rule's number (rule_number): the starting number; "under" / "below" values never qualify
+    RULE = {"70-100": 70, "70_100": 70, "70–100": 70, "70 to 100": 70, "40-70": 40, "100-200": 100, "500+": 500,
+            "500_PLUS": 500, "2000+": 2000, "400": 400, "1000-2000": 1000, "500-1000": 500, "1,000-2,000": 1000,
+            "₹70-100": 70, "12.5-20": 12.5, "50_100": 50, "1,000": 1000, 1500: 1500, 2500.0: 2500,
+            "UNDER_70": None, "UNDER_50": None, "under 70": None, "below 70": None, "Below_100": None,
+            "less than 1000": None, "<1000": None, None: None, "": None, "n/a": None, "N/A": None, "-": None}
+
     def test_budget_formats(self):
         expected = {"70-100": 70, "70_100": 70, "100-200": 100, "500+": 500, "500_PLUS": 500, "400": 400,
                     "500_": 500, "500-2000": 500, "50_100": 50, "UNDER_50": 50, "40-70": 40, "20 to 25": 20,
                     "1,000": 1000, None: None, "": None, "n/a": None}
         for value, number in expected.items():
             self.assertEqual(sl.first_number(value), number, value)
-        for value in ("70-100", "70_100", "100-200", "500+", "500_PLUS", "400"):
+        for value, number in self.RULE.items():
+            self.assertEqual(sl.rule_number(value), number, value)
+        for value in ("70-100", "70_100", "70–100", "70 to 100", "100-200", "500+", "500_PLUS", "2000+", "400",
+                      "₹70-100"):
             self.assertEqual(sl.koc_reason({"estimatedBudgetPerCard": value}), "budget", value)
-        for value in ("50_100", "UNDER_50", "40-70", "10-20", None, ""):
+        for value in ("40-70", "50_100", "60 to 100", "UNDER_70", "under 100", "below 70", "UNDER_50", "10-20",
+                      "69", None, "", "N/A"):
             self.assertIsNone(sl.koc_reason({"estimatedBudgetPerCard": value}), value)
 
     def test_quantity_rule(self):
-        for budget in (None, "", "10-20", "UNDER_50"):
+        for budget in (None, "", "10-20", "40-70", "UNDER_70", "below 100", "N/A"):
             self.assertEqual(sl.koc_reason({"estimatedBudgetPerCard": budget, "quantityRequired": 1000}), "quantity")
-        self.assertEqual(sl.koc_reason({"quantityRequired": "1500"}), "quantity")
-        self.assertEqual(sl.koc_reason({"quantityRequired": 2500.0}), "quantity")
-        self.assertIsNone(sl.koc_reason({"quantityRequired": 999}))
-        self.assertIsNone(sl.koc_reason({"quantityRequired": None}))
+        for qty in ("1500", 2500.0, "1000-2000", "1000_2000", "1000 to 2000", "1,000-2,000", "1000+"):
+            self.assertEqual(sl.koc_reason({"quantityRequired": qty}), "quantity", qty)
+        for qty in (999, "500-1000", "500_1000", "500 to 1000", "800–1200", "under 1000", "below 2000", "<1000",
+                    None, "", "n/a"):
+            self.assertIsNone(sl.koc_reason({"quantityRequired": qty}), qty)
         self.assertEqual(sl.koc_reason({"estimatedBudgetPerCard": "100-200", "quantityRequired": 5000}), "budget")
+
+    def test_sql_and_python_give_the_same_number(self):
+        """The SQL is CASE WHEN text ~* BELOW_PATTERN THEN NULL ELSE CAST(substring(replace(text, ',', '')
+        FROM NUMBER_PATTERN) AS NUMERIC) END: the same patterns as rule_number (substring returns the
+        pattern's one capture group of its leftmost match, as re.search(...).group(1) does)."""
+        def sql_like(value):
+            if value is None:
+                return None
+            t = str(int(value) if isinstance(value, float) and value == int(value) else value)
+            if re.search(sl.BELOW_PATTERN, t, re.IGNORECASE):
+                return None
+            m = re.search(sl.NUMBER_PATTERN, t.replace(",", ""))
+            return float(m.group(1)) if m else None
+        for value in self.RULE:
+            self.assertEqual(sql_like(value), sl.rule_number(value), value)
+        table = Table("spin_lead", MetaData(), Column("id", BigInteger, primary_key=True),
+                      Column("additional_details", JSONB))
+        for hit, minimum in ((sl.koc_budget_hit, ">= 70"), (sl.koc_quantity_hit, ">= 1000")):
+            sql = str(hit(table).compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+            self.assertIn("~*", sql)
+            self.assertIn("CASE WHEN", sql)
+            self.assertIn(minimum, sql)
 
     def test_sql_rule_covers_every_row(self):
         table = Table("spin_lead", MetaData(), Column("id", BigInteger, primary_key=True),
@@ -141,8 +176,7 @@ class InBothTests(KocTestBase):
         spin = {str(i["id"]) for i in self.get("/spin-leads", page_size=100)["items"]}
         self.assertTrue({"301", "302", "305", crm["lead_key"]} <= spin)    # still in spin (302: a gift lead)
         items = {i["lead_key"]: i for i in self.get(f"{K2D}/leads", page_size=100)["items"]}
-        self.assertEqual({k: i["potential_value"] for k, i in items.items()},
-                         {"301": 14000, "302": 10000, "305": None, "306": None})
+        self.assertFalse(any("potential_value" in i for i in items.values()))    # removed
         self.assertFalse({"reason", "reason_label"} & set(items["301"]))
         lead = self.get(f"{K2D}/leads/306")
         self.assertEqual((lead["quantity_required"], lead["occasion"], lead["estimated_budget_per_card"]),
@@ -366,20 +400,20 @@ class DashboardTests(KocTestBase):
         self.assertEqual((k["converted"], k["converted_pct"], k["conversion_total"]), (1, 14.3, 38000))
         self.assertEqual((k["conversion_amount_count"], k["conversion_amount_total"]), (1, 38000))
         self.assertEqual(k["follow_ups_due"], 2)                    # 501 today, 505 overdue; 507 is closed
-        self.assertEqual(k["potential_value"], 170000)              # open: 501 + 503 + 504 (0); 505 has no budget
+        self.assertNotIn("potential_value", k)                       # removed
         self.assertEqual([(f["stage"], f["count"]) for f in o["funnel"]],
                          [("shared", 7), ("contacted", 5), ("interested", 4), ("quoted", 2), ("converted", 1)])
 
-    def test_upcoming_top_value_and_stale(self):
+    def test_upcoming_and_stale(self):
         o = self.get("/analytics/koc-to-dhruva")
         u = o["upcoming_events"]
         self.assertEqual((u["next_30_days"], u["next_60_days"], u["next_90_days"]), (1, 2, 3))
         self.assertEqual([e["lead_key"] for e in u["next"]], ["501", "503", "504"])   # open only, by date
         self.assertEqual(u["next"][0], {"lead_key": "501", "name": "Lead 501", "event_date": "2026-12-01",
-                                        "budget": "70-100", "quantity": 1000, "potential_value": 70000,
+                                        "budget": "70-100", "quantity": 1000,
                                         "update_status": "interested", "status_label": "Interested"})
-        self.assertEqual([(e["lead_key"], e["potential_value"]) for e in o["top_value_leads"]],
-                         [("503", 100000), ("501", 70000), ("504", 0)])
+        self.assertNotIn("top_value_leads", o)                      # removed with the potential value
+        self.assertNotIn("potential_value", json.dumps(o))
         self.assertEqual(o["stale"]["count"], 2)                    # 503 never touched, 505 untouched 20 days
         self.assertEqual([e["lead_key"] for e in o["stale"]["oldest"]], ["503", "505"])
         self.assertEqual((o["stale"]["oldest"][0]["last_update"], o["stale"]["oldest"][1]["last_update"][:10]),
@@ -414,49 +448,35 @@ class DashboardTests(KocTestBase):
 
     def test_period_limits_everything_but_follow_ups(self):
         o = self.get("/analytics/koc-to-dhruva", date_from="2026-11-01", date_to="2026-11-21")
-        self.assertEqual((o["kpis"]["shared"], o["kpis"]["follow_ups_due"], o["kpis"]["potential_value"]), (5, 2, 70000))
+        self.assertEqual((o["kpis"]["shared"], o["kpis"]["follow_ups_due"]), (5, 2))
         self.assertEqual([m["month"] for m in o["monthly"]], ["2026-11"])
-        self.assertEqual([e["lead_key"] for e in o["top_value_leads"]], ["501", "504"])
         self.assertEqual(o["stale"]["count"], 0)
 
-    def test_list_items_and_potential_value_sort(self):
-        items = self.get(f"{K2D}/leads", page_size=100, sort="potential_value", order="desc")["items"]
-        self.assertEqual([(i["lead_key"], i["potential_value"]) for i in items],
-                         [("503", 100000), ("501", 70000), ("502", 50000), ("507", 21000), ("506", 20000),
-                          ("504", 0), ("505", None)])                # empty last
+    def test_list_items_have_no_potential_value(self):
+        items = self.get(f"{K2D}/leads", page_size=100)["items"]
+        self.assertEqual(len(items), 7)
+        self.assertNotIn("potential_value", json.dumps(items))
         self.assertNotIn("reason", json.dumps(items))
-        self.assertEqual(self.get(f"{K2D}/leads/503")["potential_value"], 100000)
+        self.assertNotIn("potential_value", self.get(f"{K2D}/leads/503"))
         self.assertNotIn("reasons", self.get(f"{K2D}/leads/filter-options"))
         self.assertNotIn("by_reason", self.get(f"{K2D}/leads/stats"))
         self.assertEqual(self.get(f"{K2D}/leads/stats", reason="quantity")["total"], 2)   # filter still works
 
 
-class PotentialValueRuleTests(unittest.TestCase):
-    def test_python_rule(self):
-        cases = [("70-100", 1000, 70000), ("500_PLUS", 200, 100000), ("UNDER_50", 1500, 0), ("under 50", 10, 0),
-                 ("12.5-20", 3, 37.5), (None, 1000, None), ("70-100", None, None), ("n/a", 10, None)]
-        for budget, qty, value in cases:
-            self.assertEqual(koc_dhruva.potential_value(budget, qty), value, (budget, qty))
+class OpenLeadTests(unittest.TestCase):
+    def test_open_statuses(self):
+        self.assertFalse(hasattr(koc_dhruva, "potential_value"))        # removed
         self.assertTrue(koc_dhruva.is_open(None) and koc_dhruva.is_open("interested")
                         and koc_dhruva.is_open("will_call_back"))
         for closed in ("converted", "purchased_with_us", "not_converted", "not_interested", "purchased_elsewhere"):
             self.assertFalse(koc_dhruva.is_open(closed), closed)
-
-    def test_sql_rule(self):
-        table = Table("spin_lead", MetaData(), Column("id", BigInteger, primary_key=True),
-                      Column("additional_details", JSONB))
-        sql = str(sl.koc_potential_expr(table).compile(dialect=postgresql.dialect(),
-                                                        compile_kwargs={"literal_binds": True}))
-        self.assertIn("LIKE 'under%", sql)
-        self.assertIn("'estimatedBudgetPerCard'", sql)
-        self.assertIn("'quantityRequired'", sql)
 
 
 # ── Reminders and also_in ──────────────────────────────────────────────
 class RemindersAndAlsoInTests(KocTestBase):
     def test_reminders_cover_both_dhruva_directions(self):
         self.put("301", {"follow_up_date": "2026-11-18"})
-        lead = self.add(name="Dhruva lead", venue="Hall", date="Dec 4th", phone="9800000555", event_type="wedding")
+        lead = self.add(name="Dhruva lead", venue="Hall", event_dates=["2026-12-04"], phones=["9800000555"], event_type="wedding")
         with self.logged_in("admin"):
             self.client.patch(f"{API}/dhruva/leads/{lead.json()['id']}", json={"follow_up_date": "2026-11-17"})
         both = self.get("/dhruva/reminders/follow-ups", "dhruva")

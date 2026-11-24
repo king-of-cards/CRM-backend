@@ -33,7 +33,7 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import (
     Boolean, LargeBinary, MetaData, Numeric, String, Table, Text, literal_column,
-    ColumnElement, and_, bindparam, case, cast, false, func, or_, select, true,
+    ColumnElement, and_, bindparam, case, cast, false, func, null, or_, select, true,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import NoSuchTableError, SQLAlchemyError
@@ -64,12 +64,14 @@ GIFT_KEY = "otherWeddingServices"           # also the list's "Other wedding ser
 GIFT_PHRASE = "Wedding Gifts & Return Gifts"
 IST_OFFSET = timedelta(hours=5, minutes=30)
 
-# KOC -> Dhruva: estimatedBudgetPerCard's first number >= 70, or quantityRequired >= 1000
+# KOC -> Dhruva: estimatedBudgetPerCard's starting number >= 70, or else quantityRequired's >= 1000 (rule_number)
 KOC_TO_DHRUVA = "koc_to_dhruva"
 KOC_BUDGET_KEY, KOC_QUANTITY_KEY = "estimatedBudgetPerCard", "quantityRequired"
 KOC_BUDGET_MIN, KOC_QUANTITY_MIN = 70, 1000
 KOC_REASON_LABELS = {"budget": "Budget ≥ ₹70", "quantity": "Quantity ≥ 1000"}
 NUMBER_PATTERN = r"([0-9]+(?:\.[0-9]+)?)"          # the first number anywhere ("UNDER_50" -> 50)
+# "UNDER_70", "below 70", "less than 70", "<70": never qualify for the KOC -> Dhruva rule (any case)
+BELOW_PATTERN = r"^\s*(?:under|below|less\s*than|<)"
 BLANK_PATTERN = r"^\s*$"                      # empty or whitespace-only text
 
 JSON_KEYS_CACHE_SECONDS = 600    # re-discover JSON keys every 10 minutes
@@ -224,15 +226,25 @@ def first_number(value: Any) -> float | None:
     return float(m.group(1)) if m else None
 
 
+def rule_number(value: Any) -> float | None:
+    """The KOC -> Dhruva rule's number: the starting (first) number of the value ("70-100" -> 70,
+    "40-70" -> 40, "1000-2000" -> 1000, "500 to 1000" -> 500, "2000+" -> 2000, "1,000" -> 1000);
+    None for "UNDER_…" / "below …" / "less than …" / "<…" values (never qualify) and values without a
+    number. The Python twin of `_rule_number_expr`."""
+    if isinstance(value, str) and re.match(BELOW_PATTERN, value, re.IGNORECASE):
+        return None
+    return first_number(value)
+
+
 def koc_reason(details: Any) -> str | None:
-    """"budget" (first number of estimatedBudgetPerCard >= 70, wins when both match), "quantity"
-    (quantityRequired >= 1000), or None (not a KOC -> Dhruva lead)."""
+    """"budget" (estimatedBudgetPerCard's rule_number >= 70, wins when both match), "quantity"
+    (quantityRequired's rule_number >= 1000), or None (not a KOC -> Dhruva lead)."""
     if not isinstance(details, dict):
         return None
-    budget = first_number(details.get(KOC_BUDGET_KEY))
+    budget = rule_number(details.get(KOC_BUDGET_KEY))
     if budget is not None and budget >= KOC_BUDGET_MIN:
         return "budget"
-    quantity = first_number(details.get(KOC_QUANTITY_KEY))
+    quantity = rule_number(details.get(KOC_QUANTITY_KEY))
     if quantity is not None and quantity >= KOC_QUANTITY_MIN:
         return "quantity"
     return None
@@ -249,22 +261,19 @@ def _number_expr(table: Table, key: str):
     return cast(func.substring(text_value, bindparam(None, NUMBER_PATTERN, type_=Text)), Numeric)
 
 
+def _rule_number_expr(table: Table, key: str):
+    """CASE WHEN details ->> key ~* BELOW_PATTERN THEN NULL ELSE the first number END (PostgreSQL):
+    the rule's number. The SQL twin of `rule_number`."""
+    below = _detail_text(table, key).op("~*", return_type=Boolean)(bindparam(None, BELOW_PATTERN, type_=Text))
+    return case((below, null()), else_=_number_expr(table, key))
+
+
 def koc_budget_hit(table: Table):
-    return func.coalesce(_number_expr(table, KOC_BUDGET_KEY) >= KOC_BUDGET_MIN, false())
+    return func.coalesce(_rule_number_expr(table, KOC_BUDGET_KEY) >= KOC_BUDGET_MIN, false())
 
 
 def koc_quantity_hit(table: Table):
-    return func.coalesce(_number_expr(table, KOC_QUANTITY_KEY) >= KOC_QUANTITY_MIN, false())
-
-
-def koc_potential_expr(table: Table):
-    """KOC -> Dhruva potential value: budget lower bound x quantity (NULL when either is missing).
-    Lower bound: the budget's first number, 0 for "UNDER_…" budgets. The SQL twin of
-    koc_dhruva.potential_value (used to sort the list)."""
-    budget = _number_expr(table, KOC_BUDGET_KEY)
-    under = func.lower(func.ltrim(_detail_text(table, KOC_BUDGET_KEY))).like(bindparam(None, "under%", type_=Text))
-    low = case((under, budget * 0), else_=budget)
-    return low * _number_expr(table, KOC_QUANTITY_KEY)
+    return func.coalesce(_rule_number_expr(table, KOC_QUANTITY_KEY) >= KOC_QUANTITY_MIN, false())
 
 
 def koc_filter(table: Table) -> list[ColumnElement]:
@@ -633,9 +642,6 @@ def list_spin_leads(
         if isinstance(col.type, String):
             text_exprs.append(cast(col, Text))
 
-    if flow == KOC_TO_DHRUVA:
-        sortable["potential_value"] = koc_potential_expr(table)   # computed, not a column
-
     # Sort: only names listed in "columns" (json-typed fields excluded); empty values last
     order_by = []
     if sort is not None:
@@ -872,7 +878,7 @@ def filter_options(viewer, db, flow: str = SPIN) -> dict:
         **out,
         "branches": branches,
         "origins": origins,
-        "updates": lead_filters.update_options(db, flow, keys),
+        "updates": lead_filters.update_options(db, flow, keys, viewer),
         "vendors": lead_filters.vendor_options(db, viewer),
     }
 
@@ -887,7 +893,9 @@ def stats(viewer, db, f: SpinFilters, flow: str = SPIN) -> dict:
     workflow = list_spin_leads(None, 1, 1, f.common.search, None, "asc", f.branch, filters or None, keys_only=True,
                                flow=flow)
     keys = [lead.lead_key for lead in added] + list(workflow["keys"])
-    return {"total": len(keys), "kpis": kpis.for_keys(db, flow, keys)}
+    from app.services import lead_crm
+
+    return {"total": len(keys), "kpis": kpis.for_keys(db, flow, keys, lead_crm.viewer_copy(viewer))}
 
 
 def list_page(viewer, db, f: SpinFilters, page: int, page_size: int, sort, order, flow: str = SPIN) -> dict:
@@ -906,6 +914,9 @@ def list_page(viewer, db, f: SpinFilters, page: int, page_size: int, sort, order
             if e164:
                 e164_of[key] = e164
     also_in.attach(db, viewer, flow, data["items"], key_of=lambda i: i.get(pk), e164_of=e164_of)
+    from app.services import lead_crm
+
+    data["items"] = [lead_crm.for_viewer(i, viewer) for i in data["items"]]     # vendor logins: their own copy
     return {**data, "page": page, "page_size": page_size}
 
 
@@ -976,8 +987,8 @@ def merged_page(db, start: int, length: int, search, sort, order, branch, filter
     def branch_of(item):
         return branches.get(str(item.get(branch_key))) if branch_key and item.get(branch_key) is not None else None
 
-    # Gift leads go to the gifts vendor (lead_crm.lead_rules): CRM leads from their details, workflow
-    # rows from their otherWeddingServices field
+    # Gift leads also go to the gifts partner (lead_crm.PARTNER_RULES): CRM leads from their details,
+    # workflow rows from their otherWeddingServices field; received = created_at
     gift_keys = {lead.lead_key for lead in added_page if is_gift_details(lead.additional_details)}
     services_key = next((c["name"] for c in data["columns"] if _norm_name(c["name"]) == _norm_name(GIFT_KEY)), None)
 
@@ -995,6 +1006,7 @@ def merged_page(db, start: int, length: int, search, sort, order, branch, filter
         pincode=lambda i: str(i.get(pin_key) or "") if pin_key else None,
         branch_vendor=lambda i: (branch_of(i) or {}).get("vendor_id"),
         gift=gift_of if flow == SPIN else None,
+        received=lambda i: i.get("created_at"),
     )
     # The lead's branch (store), from the Branches page
     for item in items:

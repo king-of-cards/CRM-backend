@@ -21,6 +21,7 @@ stored in crm_koc_dhruva_leads with the same columns as crm_spin_leads (DETAIL_S
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
+from functools import lru_cache
 from typing import Any
 
 from app.services import lead_values, phones
@@ -62,7 +63,8 @@ class FieldDef:
 
 
 PHONE_HELP_IN = "Indian numbers can be written without +91; other countries need their country code."
-ASSIGNED_HELP = ('A vendor name (e.g. Phodeo) assigns the lead to that vendor. "Automatic" (or "Auto", or '
+ASSIGNED_HELP = ('A vendor name (e.g. Phodeo) assigns the lead to that vendor; several vendors separated by '
+                 'commas (e.g. "Phodeo, Kraftyz") give it to each of them. "Automatic" (or "Auto", or '
                  '"Phodeo · auto") leaves it to the automatic rules. Empty or Unassigned: the lead stays '
                  "unassigned until an admin assigns it.")
 DATE_HELP = "13 Dec 2026 or 13-12-2026."
@@ -162,30 +164,46 @@ FIELDS: dict[str, list[FieldDef]] = {
 
 # KOC -> Dhruva upload: the list's / export's columns (keys as in spin_lead.additional_details)
 FIELDS[KOC] = [
-    FieldDef("name", "Name", max_length=150, aliases=("lead", "fullname")),
+    # Aliases: the KOC -> Dhruva and Spin export headers and the workflow names (header_map also
+    # accepts the key and "additional_details.<key>"); any case, spaces and punctuation ignored
+    FieldDef("name", "Name", max_length=150, aliases=("lead", "fullname", "leadname", "customername")),
     FieldDef("phone", "Phone", "phone", True, 20, ("contact", "mobile", "phonenumber", "contactnumber",
-                                                  "whatsappnumber"), help=PHONE_HELP_IN),
-    FieldDef("email", "Email", "email", max_length=150, aliases=("emailaddress",)),
-    FieldDef("occasionType", "Occasion", max_length=100, detail=True, aliases=("occasiontype",)),
-    FieldDef("occasionDate", "Event date", "date", detail=True, aliases=("occasiondate",), help=DATE_HELP),
-    FieldDef("branch", "Branch", "branch", aliases=("store", "branchname"),
+                                                  "whatsappnumber", "mobilenumber"), help=PHONE_HELP_IN),
+    FieldDef("email", "Email", "email", max_length=150, aliases=("emailaddress", "emailid", "mail")),
+    FieldDef("occasionType", "Occasion", max_length=100, detail=True,
+             aliases=("occasiontype", "eventtype", "typeofoccasion")),
+    FieldDef("occasionDate", "Event date", "date", detail=True,
+             aliases=("occasiondate", "eventdate", "weddingdate", "dateofevent"), help=DATE_HELP),
+    FieldDef("branch", "Branch", "branch", aliases=("store", "branchname", "storename", "branchid"),
              help="Branch name exactly as on the Branches page."),
     FieldDef("estimatedBudgetPerCard", "Estimated budget per card", "range", max_length=100, detail=True,
-             aliases=("budget", "budgetpercard"), help="A range such as 70-100, or 500+."),
-    FieldDef("quantityRequired", "Quantity required", "int", detail=True, aliases=("quantity",)),
-    FieldDef("created_at", "Received", "datetime", aliases=("createdat", "created"), help=DATETIME_HELP),
+             aliases=("budget", "budgetpercard", "estimatedbudget", "budgetpercardrs", "pricepercard"),
+             help="A range such as 70-100, or 500+. Format the column as Text in Excel (Excel turns 1-10 "
+                  "into a date; such dates are read back as the range)."),
+    FieldDef("quantityRequired", "Quantity required", "int", detail=True,
+             aliases=("quantity", "qty", "noofcards", "numberofcards", "cards")),
+    FieldDef("created_at", "Received", "datetime",
+             aliases=("createdat", "created", "timestamp", "receivedat", "receivedon", "datereceived",
+                      "submittedat", "submitted"),
+             help=DATETIME_HELP + " Empty: the Spin game lead's received date, else now."),
+    # Optional (template only, not in the export)
+    FieldDef("source", "Source", max_length=50, aliases=("leadsource", "utmsource"),
+             help="Where the lead came from, e.g. Instagram. Empty: none (stored as crm)."),
+    FieldDef("occasion", "Relation", max_length=100, aliases=("leadoccasion", "relationship", "relationtocouple"),
+             help="E.g. Sister or Self."),
     # Extra columns (not in the export; optional)
     FieldDef("pincode", "Pincode", "pincode", detail=True, aliases=("pin", "zipcode", "postalcode")),
-    FieldDef("otherWeddingServices", "Other wedding services", max_length=500, detail=True),
+    FieldDef("otherWeddingServices", "Other wedding services", max_length=500, detail=True,
+             aliases=("otherservices", "weddingservices", "services")),
 ]
 
 # Read-only columns present in exports and/or templates; never read back from an upload
 READ_ONLY_COLUMNS: dict[str, tuple[str, ...]] = {
     KOC: ("Sl. No", "Branch code", "Quoted date", "Hot"),
-    "spin": ("Branch code", "Quoted date", "Hot"),
-    "whatsapp": ("Quoted date", "Hot"),
-    "wedding": ("Quoted date", "Hot"),
-    "wedding_planner": ("Estimate", "Fits budget", "Quoted date", "Last step", "Hot"),
+    "spin": ("Branch code", "Vendor updates", "Quoted date", "Hot"),
+    "whatsapp": ("Vendor updates", "Quoted date", "Hot"),
+    "wedding": ("Vendor updates", "Quoted date", "Hot"),
+    "wedding_planner": ("Estimate", "Fits budget", "Vendor updates", "Quoted date", "Last step", "Hot"),
 }
 UPDATE_HELP = ("Empty or Pending, Converted, Not converted, Already purchased somewhere else, Already purchased "
                "with us, Will call back, Interested or Not interested.")
@@ -225,7 +243,7 @@ def header_map(source: str, *, upload: bool = False) -> dict[str, str]:
     Update, Quoted amount and Conversion amount."""
     out: dict[str, str] = {}
     for f in (*FIELDS[source], *(upload_crm_fields(source) if upload else ())):
-        for name in (f.label, f.key, *f.aliases):
+        for name in (f.label, f.key, *f.aliases, f"additional_details.{f.key}"):
             out.setdefault(norm_header(name), f.key)
     return out
 
@@ -240,6 +258,31 @@ class Invalid(ValueError):
 
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_DATE_TEXT_RE = re.compile(r"^\s*\d{1,2} [A-Za-z]{3} \d{4}\s*$")     # how a date cell reads ("01 Oct 2026")
+
+
+def excel_range(value: Any, year: int | None = None) -> str | None:
+    """A range Excel turned into a date, back to the range; None when the value isn't such a date.
+    A date cell (or its text, "01 Oct 2026") of the 1st in another year than `year` (default: this
+    year, India time) was month-year: "10-20" -> 1 Oct 2020 -> "10-20". Otherwise day and month,
+    lower first: "1-10" -> 1 Oct 2026 -> "1-10" (also when Excel read it month-first)."""
+    if isinstance(value, datetime):
+        when = value.date()
+    elif isinstance(value, date):
+        when = value
+    elif isinstance(value, str) and _DATE_TEXT_RE.match(value):
+        try:
+            when = datetime.strptime(value.strip(), "%d %b %Y").date()
+        except ValueError:
+            return None
+    else:
+        return None
+    if year is None:
+        year = datetime.now(timezone(timedelta(hours=5, minutes=30))).year
+    if when.day == 1 and when.year != year:
+        return f"{when.month}-{when.year % 100}"
+    low, high = sorted((when.day, when.month))
+    return f"{low}-{high}"
 _MONTHS = ("%B %Y", "%b %Y", "%m/%Y", "%m-%Y", "%Y-%m")
 # Uploads: the screen's formats (13 Dec 2026 / 14 Nov 2026, 10:30 am) and DD-MM-YYYY; time optional
 _UPLOAD_DATES = ("%d-%m-%Y", "%d %b %Y", "%d %B %Y", "%Y-%m-%d")     # ISO too (exports re-uploaded)
@@ -281,6 +324,7 @@ def _clean_text(value: Any) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+@lru_cache(maxsize=8192)                # uploads repeat the same dates; pure, immutable result
 def _upload_datetime(text: str) -> datetime | None:
     """Naive datetime (India time) from the accepted upload formats, or None."""
     for d in _UPLOAD_DATES:
@@ -419,26 +463,45 @@ class Cleaned:
     errors: list[dict]                     # [{"field": key, "message": ...}]
     phone: phones.Phone | None = None
     phone_input: str = ""
-    # "Assigned to": None = column empty/absent; ("none", None) | ("auto", id) | ("manual", id)
-    assignment: tuple[str, int | None] | None = None
+    # "Assigned to": None = column empty/absent; ("none", []) | ("auto", []) | ("manual", [vendor ids])
+    assignment: tuple[str, list[int]] | None = None
 
     @property
     def ok(self) -> bool:
         return not self.errors
 
 
-def parse_assigned(text: str, ctx: RowContext) -> tuple[tuple[str, int | None], str]:
-    """-> ((mode, vendor id), canonical text)."""
+_ASSIGNED_SPLIT = re.compile(r"[,;\n]+")
+
+
+def parse_assigned(text: str, ctx: RowContext) -> tuple[tuple[str, list[int]], str]:
+    """-> ((mode, vendor ids), canonical text). Several vendors are separated by commas (or ";"),
+    as the export writes them ("Phodeo, Kraftyz · auto"). The vendors named without "· auto" are
+    the lead's manual vendors (they replace the automatic one; partner rules such as Kraftyz still
+    add theirs); only "· auto" names (or "Automatic") = the automatic rules decide."""
     if norm_header(text) in ("", "unassigned", "none"):
-        return ("none", None), "Unassigned"
+        return ("none", []), "Unassigned"
     if norm_header(text) in ("automatic", "auto"):
-        return ("auto", None), "Automatic"          # same as "<vendor> · auto": the automatic rules decide
-    auto = _AUTO_RE.match(text)
-    name, mode = (auto.group(1), "auto") if auto and auto.group(1).strip() else (text, "manual")
-    vendor = ctx.vendors_by_name.get(norm_header(name))
-    if vendor is None:
-        raise Invalid(f"Unknown vendor '{name.strip()}'")
-    return (mode, vendor[0]), (f"{vendor[1]} · auto" if mode == "auto" else vendor[1])
+        return ("auto", []), "Automatic"          # same as "<vendor> · auto": the automatic rules decide
+    manual: list[tuple[int, str]] = []
+    autos: list[str] = []
+    for part in (p.strip() for p in _ASSIGNED_SPLIT.split(text)):
+        if not part:
+            continue
+        auto = _AUTO_RE.match(part)
+        name, is_auto = (auto.group(1), True) if auto and auto.group(1).strip() else (part, False)
+        if norm_header(name) in ("automatic", "auto"):
+            continue
+        vendor = ctx.vendors_by_name.get(norm_header(name))
+        if vendor is None:
+            raise Invalid(f"Unknown vendor '{name.strip()}'")
+        if is_auto:
+            autos.append(f"{vendor[1]} · auto")
+        elif vendor[0] not in [vid for vid, _ in manual]:
+            manual.append(vendor)
+    if not manual:
+        return ("auto", []), ", ".join(autos) or "Automatic"
+    return ("manual", [vid for vid, _ in manual]), ", ".join(name for _, name in manual)
 
 
 WEDDING_MONTH_MAX = 50       # crm_wedding_plans.wedding_month
@@ -495,7 +558,7 @@ def clean_row(source: str, raw: dict[str, Any], ctx: RowContext, *, partial: boo
             elif f.type in ("text", "country"):
                 values[f.key] = text
             elif f.type == "range":
-                values[f.key] = re.sub(r"\s*[–—]\s*", "-", text.replace("₹", "")).strip()
+                values[f.key] = excel_range(value) or re.sub(r"\s*[–—]\s*", "-", text.replace("₹", "")).strip()
             elif f.type == "email":
                 if not _EMAIL_RE.match(text):
                     raise Invalid("Not a valid email address")

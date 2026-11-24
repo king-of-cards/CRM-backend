@@ -167,25 +167,44 @@ def import_rows_into(db, source: str, rows: list, user) -> dict:
     except service.WorkflowUnavailable:
         raise _workflow_down()
     imported = 0
+    waiting: list[str] = []                     # automatic leads whose CRM values wait on the vendor-less row
+    new = []
     for result, c in zip(results, cleaned):
         if result["status"] != "ok":
             continue
-        lead = service.create(db, source, c, ORIGIN_IMPORTED, user.id)
+        lead = service.create(db, source, c, ORIGIN_IMPORTED, user.id, flush=False)
+        if result.get("fill"):                  # spin: empty fields from the workflow row ("Spin game")
+            service.fill_lead(lead, result["fill"]["fields"])
+        new.append((result, c, lead))
+    db.flush()                                  # every new lead at once: their ids (keys)
+    crm_rows: list = []                         # assignments and CRM details: one insert per table
+    for result, c, lead in new:
         result["status"] = "imported"
         result["lead_key"] = service.lead_key_of(source, lead)
         if source == KOC:                       # never assigned: only the section's CRM details
-            service.save_koc_crm(db, result["lead_key"], c.values, user.id)
+            service.save_koc_crm(db, result["lead_key"], c.values, user.id, out=crm_rows)   # never a Spin lead
         else:
             # Empty Assigned to: unassigned. "Automatic" on a spin gift lead: the gifts vendor (Kraftyz)
-            service.save_assignment(db, source, result["lead_key"], c.assignment, user.id,
-                                    empty_means_unassigned=True, crm={k: c.values.get(k) for k in UPLOAD_CRM_KEYS})
+            # Several vendors ("Phodeo, Kraftyz"): each gets the lead; the CRM values go to the first one's copy
+            if service.save_assignment(db, source, result["lead_key"], c.assignment, user.id,
+                                       empty_means_unassigned=True,
+                                       crm={k: c.values.get(k) for k in UPLOAD_CRM_KEYS}, out=crm_rows):
+                waiting.append(result["lead_key"])
         imported += 1
+    service.insert_rows(db, crm_rows)
     db.commit()
+    if waiting:
+        service.place_auto_copies(db, source, waiting)
+    entries = []                                # one insert and one commit for the whole upload
     for result in results:
         if result.get("status") == "imported":
-            lead_activity.log_action(db, source=source, lead_key=result["lead_key"], action="created",
-                field="lead", old=None, new="created", actor_user_id=user.id,
-                actor_name=user.name, actor_role=user.role)
+            entries.append({"source": source, "lead_key": result["lead_key"], "action": "created", "field": "lead",
+                            "old": None, "new": "created"})
+            if result.get("fill"):
+                entries.append({"source": source, "lead_key": result["lead_key"], "action": service.FILLED_ACTION,
+                                "field": ", ".join(sorted(result["fill"]["fields"])), "old": None,
+                                "new": f"workflow lead {result['fill']['workflow_id']}"})
+    lead_activity.log_actions(db, entries, actor_user_id=user.id, actor_name=user.name, actor_role=user.role)
     if imported:
         service.clear_caches()
     counts["imported"] = imported
@@ -203,8 +222,11 @@ def _check_cap(total: int) -> None:
 
 
 def _export(source: str, format: str, columns, items, viewer) -> Response:
-    if not viewer.sees_all:               # vendor logins: no Assigned to column
-        columns = [c for c in columns if c[0] != export_cols.ASSIGNED_HEADER]
+    from app.services import lead_crm
+
+    if not viewer.sees_all:               # vendor logins: no Assigned to column, only their own copy's fields
+        columns = [c for c in columns if c[0] not in export_cols.ADMIN_ONLY_HEADERS]
+        items = [lead_crm.for_viewer(i, viewer) for i in items]
     headers, rows, kinds = export_cols.build(columns, items)
     content, media_type, ext = tabular.write_table(format, SOURCE_LABELS[source], headers, rows, kinds)
     return _file_response(content, media_type, tabular.filename(f"{source}-leads", ext))
