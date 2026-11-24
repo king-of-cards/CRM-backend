@@ -184,12 +184,16 @@ def allowed_keys(db: Session, source: str, viewer, f: CommonFilters) -> set[str]
     if visible is not None:
         sets.append(visible)
     if viewer.sees_all and (f.vendor_ids or f.unassigned):
+        # "Assigned to": any of the lead's vendors matches; unassigned = no vendor at all
         assignment = access.assignments(db, source)
         wanted = set(f.vendor_ids)
-        sets.append({k for k, v in assignment.items() if (v is not None and v in wanted) or (f.unassigned and v is None)})
+        sets.append({k for k, ids in assignment.items() if (wanted & set(ids)) or (f.unassigned and not ids)})
     if f.has_crm_filters:
+        from app.services import lead_crm
+
         universe = set(access.assignments(db, source))          # every listed lead of the source
-        metas = {m.lead_key: m for m in db.exec(select(LeadMeta).where(LeadMeta.source == source))}
+        own = lead_crm.viewer_copy(viewer)                      # vendor logins: their own copy
+        metas = lead_crm.records(db, source, own)               # admins: every copy merged
 
         def meta_of(key):
             return metas.get(key)
@@ -210,7 +214,7 @@ def allowed_keys(db: Session, source: str, viewer, f: CommonFilters) -> set[str]
         if f.hot is not None:
             from app.services import hot_leads
 
-            marked = hot_leads.hot_keys(db, source)
+            marked = hot_leads.hot_keys(db, source, lead_crm.viewer_copy(viewer))
             sets.append(universe & marked if f.hot else universe - marked)
         if f.follow_up:
             from app.models.vendor_to_koc import CLOSED_STATUSES
@@ -253,10 +257,13 @@ def search_condition(text: str, text_columns: list, phone_column) -> Any:
 
 
 # ── Filter options ─────────────────────────────────────────────────────
-def update_options(db: Session, source: str, keys: set[str]) -> list[dict]:
-    """[{value, count}] over these leads: pending (no update yet), then the 7 update values."""
-    metas = {m.lead_key: m.update_status
-             for m in db.exec(select(LeadMeta).where(LeadMeta.source == source))}
+def update_options(db: Session, source: str, keys: set[str], viewer=None) -> list[dict]:
+    """[{value, count}] over these leads: pending (no update yet), then the 7 update values (each lead
+    once: its overall Update; vendor logins: their own copy's)."""
+    from app.services import lead_crm
+
+    metas = {k: (r.update_status if r else None)
+             for k, r in lead_crm.records(db, source, lead_crm.viewer_copy(viewer)).items()}
     counts = dict.fromkeys(("pending", *UPDATE_VALUES), 0)
     for k in keys:
         value = metas.get(k) or "pending"

@@ -15,3 +15,5 @@ from app.models.crm_spin_lead import CrmSpinLead  # noqa: F401
 from app.models.whatsapp_lead import WhatsAppLead  # noqa: F401
 from app.models.vendor_to_koc import VendorToKocLead  # noqa: F401
 from app.models.koc_dhruva_lead import KocDhruvaLead  # noqa: F401
+from app.models.lead_assignment import LeadAssignment  # noqa: F401
+from app.models.dhruva import DhruvaEventDate, DhruvaLead, DhruvaPhone  # noqa: F401

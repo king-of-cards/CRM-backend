@@ -1,5 +1,5 @@
 import os
-from datetime import date
+from datetime import date, datetime
 from typing import Literal
 from urllib.parse import quote_plus
 
@@ -81,6 +81,9 @@ class Settings(BaseSettings):
     # Spin cut-off (an India date, YYYY-MM-DD): workflow spin rows created before it are hidden from
     # spin everywhere; CRM-uploaded spin leads are always shown (see spin_leads.spin_filter)
     SPIN_LIVE_FROM: date = date(2026, 11, 21)
+    # Spin gift leads received on or after this moment (India time, YYYY-MM-DDTHH:MM:SS) also go to the
+    # gifts vendor (an extra vendor next to the branch / area one); older gift leads don't
+    WEDDING_GIFTS_FROM: datetime = datetime(2026, 11, 21, 0, 0, 0)
 
     @model_validator(mode="after")
     def _check_auth_settings(self):

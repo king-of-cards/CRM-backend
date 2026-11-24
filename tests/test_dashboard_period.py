@@ -265,6 +265,11 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
                 LeadMeta(source="spin", lead_key=crm_key, update_status="converted", updated_at=NOW),
             ])
             s.commit()
+            # Each row becomes its lead's vendor's copy, as scripts/migrate_lead_vendors.py does
+            from app.services import access, lead_vendor_migration as migration
+            migration.apply(s, migration.plan_copies(s), None)
+            s.commit()
+            access.forget()
 
     def test_outcomes_per_source(self):
         self.add_outcomes()

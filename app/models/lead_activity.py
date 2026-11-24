@@ -19,3 +19,4 @@ class LeadActivity(SQLModel, table=True):
     actor_name: str = Field(max_length=100)
     actor_role: str = Field(max_length=30)
     created_at: datetime
+    vendor_id: int | None = Field(default=None, index=True)   # the vendor copy it concerns (None: the lead)

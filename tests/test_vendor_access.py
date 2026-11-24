@@ -45,14 +45,14 @@ WORKFLOW_ROWS = [
 
 HEADERS = {
     "spin": ["Lead", "Email", "Contact", "Branch", "Branch code", "Location", "Occasion", "Event date", "Budget",
-             "Other wedding services", "Quantity required", "Assigned to", "Update", "Quoted amount", "Quoted date", "Conversion amount", "Created", "Hot"],
-    "whatsapp": ["Lead", "Country", "Event date", "Assigned to", "Update", "Quoted amount", "Quoted date",
+             "Other wedding services", "Quantity required", "Assigned to", "Vendor updates", "Update", "Quoted amount", "Quoted date", "Conversion amount", "Created", "Hot"],
+    "whatsapp": ["Lead", "Country", "Event date", "Assigned to", "Vendor updates", "Update", "Quoted amount", "Quoted date",
                  "Conversion amount", "Submitted", "Hot"],
-    "wedding": ["Lead", "Email", "Contact", "Occasion", "Event date", "City", "Budget", "Assigned to", "Update",
+    "wedding": ["Lead", "Email", "Contact", "Occasion", "Event date", "City", "Budget", "Assigned to", "Vendor updates", "Update",
                 "Quoted amount", "Quoted date", "Conversion amount", "Submitted", "Hot"],
     "wedding_planner": ["Lead", "Role", "Email", "Contact", "Wedding date", "Wedding city", "Guests",
                         "Guests staying", "Budget", "Budget range", "Estimate", "Fits budget", "Assigned to",
-                        "Update", "Quoted amount", "Quoted date", "Conversion amount", "Updated", "Last step", "Hot"],
+                        "Vendor updates", "Update", "Quoted amount", "Quoted date", "Conversion amount", "Updated", "Last step", "Hot"],
 }
 
 
@@ -257,8 +257,9 @@ class VendorAccessTest(ApiTestBase, unittest.TestCase):
                         items = self.list_items(source)
                         ws = self.export_sheet(source)
                         rows = list(ws.iter_rows(values_only=True))
-                        # Vendor logins: no Assigned to column
-                        h = HEADERS[source] if who == "admin" else [c for c in HEADERS[source] if c != "Assigned to"]
+                        # Vendor logins: no Assigned to / Vendor updates columns
+                        h = HEADERS[source] if who == "admin" else [c for c in HEADERS[source]
+                                                                   if c not in ("Assigned to", "Vendor updates")]
                         self.assertEqual(list(rows[0]), h)
                         self.assertEqual(len(rows) - 1, len(items))
                         phone_col = h.index("Lead") if source == "whatsapp" else h.index("Contact")

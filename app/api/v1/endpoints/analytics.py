@@ -246,18 +246,21 @@ def _outcome(metas: list, hot_count: int = 0) -> dict:
             "quotes_count": numbers["quoted_count"], "hot_count": hot_count}
 
 
-def _outcomes(db: Session, keys_by_source: dict[str, list[str]], spin_available: bool) -> dict:
-    """{source: outcome, "all": outcome}; spin is None when the workflow database can't be read."""
+def _outcomes(db: Session, keys_by_source: dict[str, list[str]], spin_available: bool,
+              vendor_id: int | None = None) -> dict:
+    """{source: outcome, "all": outcome}; spin is None when the workflow database can't be read. Each
+    lead once, with its overall values (every vendor copy merged); vendor_id: that vendor's copy."""
+    from app.services import lead_crm
     out: dict[str, Any] = {}
     every: list = []
     for source in SOURCES:
         if source == "spin" and not spin_available:
             out[source] = None
             continue
-        metas = {m.lead_key: m for m in db.exec(select(LeadMeta).where(LeadMeta.source == source))}
-        per_lead = [metas.get(k) for k in keys_by_source[source]]
+        metas = lead_crm.records(db, source, vendor_id)
+        per_lead = [metas.get(str(k)) for k in keys_by_source[source]]
         from app.services import hot_leads
-        hot = hot_leads.hot_keys(db, source)
+        hot = hot_leads.hot_keys(db, source, vendor_id)
         hot_count = sum(1 for key in keys_by_source[source] if str(key) in hot)
         out[source] = _outcome(per_lead, hot_count)
         every += per_lead
@@ -387,7 +390,8 @@ def _build(db: Session, keys: dict[str, set[str]] | None = None,
         "wedding_planner": [r[-1] for r in wp_p],
         "spin": [str(r.get("key")) for r in spin_p],
     }
-    outcomes = _outcomes(db, period_keys, spin_available=spin is not None)
+    outcomes = _outcomes(db, period_keys, spin_available=spin is not None,
+                         vendor_id=vtk_vendor_id if keys is not None else None)   # vendor logins: own copy
 
     # Top cities: only the requested sources (Spin drops out when the workflow database is unavailable)
     top_cities_sources = [source for source in city_sources if source != "spin" or spin is not None]
@@ -854,13 +858,7 @@ def _budget_band(budget) -> str:
 
 UPCOMING_WINDOWS = (30, 60, 90)          # days ahead for upcoming_events
 STALE_DAYS = 7                           # open leads untouched this long are stale
-LIST_SIZE = 10                           # upcoming, top value and stale lists
-
-
-def _koc_number(value):
-    """A rupee sum as an int when whole (potential values can have paise)."""
-    value = round(value, 2)
-    return int(value) if value == int(value) else value
+LIST_SIZE = 10                           # upcoming and stale lists
 
 
 @router.get("/koc-to-dhruva")
@@ -869,8 +867,7 @@ def koc_to_dhruva_overview(user: DhruvaSectionUser, db: DbSession, period: AllTi
     shared period rules, all time by default; received = created_at (IST day). CRM numbers are this
     section's own (source koc_to_dhruva). Admins, view-only and Dhruva logins; vendor logins: 403.
 
-    Open lead: Update none, interested or will call back (koc_dhruva.is_open). Potential value:
-    budget lower bound x quantity (koc_dhruva.potential_value). Every number covers the leads received
+    Open lead: Update none, interested or will call back (koc_dhruva.is_open). Every number covers the leads received
     in the period, except follow_ups_due (every open lead with a follow-up due today or earlier)."""
     from app.models.vendor_to_koc import STATUS_LABELS, UpdateStatus
     from app.services import hot_leads, koc_dhruva
@@ -915,7 +912,7 @@ def koc_to_dhruva_overview(user: DhruvaSectionUser, db: DbSession, period: AllTi
 
     def entry(r, *extra):
         out = {"lead_key": r["key"], "name": r["name"], "event_date": r["event_date"], "budget": r["budget"],
-               "quantity": r["quantity"], "potential_value": r["potential_value"], "update_status": status(r),
+               "quantity": r["quantity"], "update_status": status(r),
                "status_label": STATUS_LABELS.get(status(r), status(r))}
         for name in extra:
             if name == "received":
@@ -925,7 +922,7 @@ def koc_to_dhruva_overview(user: DhruvaSectionUser, db: DbSession, period: AllTi
                 out["last_update"] = _iso_utc(m.updated_at) if m and m.updated_at else None
         return out
 
-    # KPIs: the shared six (and AOV inputs) plus pending, follow-ups due and the open potential value
+    # KPIs: the shared six (and AOV inputs) plus pending and follow-ups due
     per_lead = [meta(r) for r in leads]
     numbers = _outcome(per_lead, sum(1 for r in leads if r["key"] in hot))
     numbers.pop("leads", None)
@@ -935,8 +932,6 @@ def koc_to_dhruva_overview(user: DhruvaSectionUser, db: DbSession, period: AllTi
         "pending": sum(1 for r in leads if status(r) is None),
         "follow_ups_due": sum(1 for r in rows if is_open(r) and meta(r) is not None
                               and meta(r).follow_up_date is not None and meta(r).follow_up_date <= today),
-        "potential_value": _koc_number(sum(r["potential_value"] for r in open_leads
-                                           if r["potential_value"] is not None)),
     })
 
     # Funnel: each lead counts at every stage up to the furthest it reached
@@ -949,7 +944,7 @@ def koc_to_dhruva_overview(user: DhruvaSectionUser, db: DbSession, period: AllTi
         ("shared", leads), ("contacted", contacted), ("interested", interested_stage), ("quoted", quoted_stage),
         ("converted", converted))]
 
-    # Upcoming events of open leads (from today), and the open leads worth the most
+    # Upcoming events of open leads (from today)
     events = []
     for r in open_leads:
         d = _parse_iso(r["event_date"])
@@ -960,8 +955,6 @@ def koc_to_dhruva_overview(user: DhruvaSectionUser, db: DbSession, period: AllTi
         **{f"next_{n}_days": sum(1 for d, _ in events if (d - today).days <= n) for n in UPCOMING_WINDOWS},
         "next": [entry(r) for _, r in events[:LIST_SIZE]],
     }
-    valued = sorted((r for r in open_leads if r["potential_value"] is not None),
-                    key=lambda r: (-r["potential_value"], r["key"]))
 
     # Per month received: shared and (today) converted
     months = []
@@ -1029,7 +1022,6 @@ def koc_to_dhruva_overview(user: DhruvaSectionUser, db: DbSession, period: AllTi
         "kpis": numbers,
         "funnel": funnel,
         "upcoming_events": upcoming,
-        "top_value_leads": [entry(r) for r in valued[:LIST_SIZE]],
         "monthly": list(monthly.values()),
         "by_branch": branches,
         "by_budget_band": list(bands.values()),

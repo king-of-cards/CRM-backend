@@ -88,8 +88,17 @@ def _reminder_rows(db: Session, viewer: Viewer | None, dhruva_only: bool = False
         assignments = access.assignments(db, source) if viewer is not None or source == "koc_to_dhruva" else {}
         metas = list(db.exec(select(LeadMeta).where(LeadMeta.source == source, LeadMeta.follow_up_date.is_not(None))))
         existing_keys = set(assignments)
+        own = getattr(viewer, "vendor_id", None) if viewer is not None and not viewer.sees_all else None
+
+        def counts(m) -> bool:
+            # One reminder per vendor copy with a follow-up (the vendor-less row too): a vendor login
+            # only its own copy; a copy of a vendor that no longer has the lead is left out
+            copy = m.copy_vendor_id or 0
+            if own is not None:
+                return copy == own
+            return copy == 0 or copy in (assignments.get(m.lead_key) or [])
         candidate = [m for m in metas if m.lead_key in existing_keys
-                     and (visible is None or m.lead_key in visible)
+                     and (visible is None or m.lead_key in visible) and counts(m)
                      and m.update_status not in {"converted", "not_interested"}]
         keys = {m.lead_key for m in candidate}
         details = _details_for_crm_source(db, source, keys)
@@ -103,9 +112,11 @@ def _reminder_rows(db: Session, viewer: Viewer | None, dhruva_only: bool = False
             if detail is None:
                 continue
             name, phone = detail
-            assigned = assignments.get(meta.lead_key)
+            vendor_ids = assignments.get(meta.lead_key) or []
+            assigned = meta.copy_vendor_id or (vendor_ids[0] if vendor_ids else None)   # the copy's vendor
             rows.append({"source": source, "lead_key": meta.lead_key, "name": name, "phone": phone,
                          "follow_up_date": meta.follow_up_date, "update_status": meta.update_status,
+                         "vendor_id": meta.copy_vendor_id or None,
                          "vendor_name": vendor_by_id.get(assigned) if viewer is not None and viewer.sees_all else None})
 
     vtk_stmt = select(VendorToKocLead, Vendor.name).join(Vendor, Vendor.id == VendorToKocLead.vendor_id)
@@ -143,7 +154,8 @@ def _make_response(rows: list[dict], days: int, admin: bool) -> dict:
     for row in kept:
         item = {"source": row["source"], "lead_key": row["lead_key"], "name": row["name"],
                 "phone": row["phone"], "follow_up_date": row["follow_up_date"].isoformat(),
-                "days_overdue": (today - row["follow_up_date"]).days}
+                "days_overdue": (today - row["follow_up_date"]).days,
+                "vendor_id": row.get("vendor_id")}     # whose copy (KOC -> Vendors leads; None: the lead's own row)
         if admin:
             item["update_status"] = row["update_status"]
             if row["source"] != "dhruva":

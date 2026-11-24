@@ -79,7 +79,7 @@ def _lead_counts(db: Session) -> tuple[dict[int, int], dict[int, int]]:
 
     assigned: Counter = Counter()
     for source in access.KOC_VENDOR_SOURCES:
-        assigned.update(v for v in access.assignments(db, source).values() if v is not None)
+        assigned.update(v for vendor_ids in access.assignments(db, source).values() for v in vendor_ids)
     vtk = dict(db.exec(select(VendorToKocLead.vendor_id, func.count()).group_by(VendorToKocLead.vendor_id)).all())
     return dict(assigned), vtk
 
@@ -182,9 +182,9 @@ def update_vendor(vendor_id: int, body: VendorPatch, _: AdminUser, db: DbSession
 
 # ── Statistics ─────────────────────────────────────────────────────────
 def _spin_rows(db: Session) -> list[tuple]:
-    """(lead id, location, pincode, None, branch vendor id, is_gift) for every lead in spin: the live
-    workflow rows (spin_leads.spin_filter) and the CRM's own (crm-<id>, any date, archived ones left
-    out). is_gift: the lead goes to the gifts vendor (lead_crm.lead_rules)."""
+    """(lead id, location, pincode, None, branch vendor id, is_gift, received) for every lead in spin:
+    the live workflow rows (spin_leads.spin_filter) and the CRM's own (crm-<id>, any date, archived
+    ones left out). is_gift + received: the gifts partner rule (lead_crm.PARTNER_RULES)."""
     from app.services import crm_spin_leads
     from app.services.branches import branches_by_id
 
@@ -193,8 +193,9 @@ def _spin_rows(db: Session) -> list[tuple]:
     for lead in crm_spin_leads.active(db):
         branch = branches.get(str(lead.branch_id)) if lead.branch_id is not None else None
         added.append((lead.lead_key, (branch or {}).get("city"), crm_spin_leads.pincode_of(lead), None,
-                      (branch or {}).get("vendor_id"), crm_spin_leads.is_gift(lead)))
-    workflow = [(*r[:5], bool(r[5]) if len(r) > 5 else False) for r in _workflow_spin_rows(db)]
+                      (branch or {}).get("vendor_id"), crm_spin_leads.is_gift(lead), lead.created_at))
+    workflow = [(*r[:5], bool(r[5]) if len(r) > 5 else False, r[6] if len(r) > 6 else None)
+                for r in _workflow_spin_rows(db)]
     return workflow + added
 
 
@@ -221,6 +222,7 @@ def _workflow_spin_rows(db: Session) -> list[tuple]:
             sl._json_text_expr(table, pin_field) if pin_field else pk.label("no_pin"),
             branch_expr.label("branch") if branch_expr is not None else pk.label("no_branch"),
             sl.gift_expr(table).label("is_gift"),
+            (sl._created_column(table) if sl._created_column(table) is not None else pk).label("received"),
         ]
         with read_engine.connect() as conn:
             rows = conn.execute(sa_select(*exprs).select_from(table).where(*base)).all()
@@ -236,6 +238,7 @@ def _workflow_spin_rows(db: Session) -> list[tuple]:
                     None,
                     (branch or {}).get("vendor_id"),
                     bool(r[4]),                     # gift lead
+                    r[5] if sl._created_column(table) is not None else None,   # received (created_at)
                 )
             )
         return out

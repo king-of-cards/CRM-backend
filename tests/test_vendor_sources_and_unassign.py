@@ -108,7 +108,7 @@ class UnassignTests(Base):
             lead.shared_with = "OHP"
             s.add(lead)
             s.commit()
-        cases = [("spin", spin, ("Phodeo", "branch")), ("spin", gift, ("Kraftyz", "source_default")),
+        cases = [("spin", spin, ("Phodeo", "branch")), ("spin", gift, ("Kraftyz", "partner")),   # no location
                  ("spin", "101", ("RJ", "branch")), ("wedding", wedding, ("OHP", "sheet"))]
         for source, key, (vendor, how) in cases:
             self.assertEqual(self.assigned(source, key)[:2], (vendor, how), key)
@@ -137,7 +137,7 @@ class UnassignTests(Base):
         changes = [(a["field"], a["old_value"], a["new_value"]) for a in
                    self.get(f"/leads/spin/{spin}/activity")["items"] if a["action"] == "assigned"]
         self.assertIn(("assigned_to", "RJ", "Unassigned"), changes)
-        self.assertIn(("assigned_to", "Unassigned", "Automatic"), changes)
+        self.assertIn(("assigned_to", "Unassigned", "Phodeo"), changes)            # its vendors again (branch)
 
 
 # ── 3. Every vendor and Dhruva on /analytics/vendor-to-koc ─────────────

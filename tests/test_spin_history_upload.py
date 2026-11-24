@@ -123,18 +123,23 @@ class SpinTestBase(ApiTestBase, unittest.TestCase):
         crm = item["crm"]
         return (crm["vendor"] or {}).get("name"), crm["vendor_source"]
 
+    @staticmethod
+    def vendors_of(item) -> list[tuple[str, str]]:
+        return [(e["vendor"]["name"], e["vendor_source"]) for e in item["crm"]["vendors"]]
+
 
 # ── A: gift leads in spin -> Kraftyz ───────────────────────────────────
 class GiftVendorTests(SpinTestBase):
     def test_gift_leads_are_spin_leads_assigned_to_kraftyz(self):
         items = self.spin_items()
         self.assertEqual(set(items), LIVE)                                  # gifts listed in spin itself
-        self.assertEqual(self.vendor_of(items["404"]), ("Kraftyz", "source_default"))
-        self.assertEqual(self.vendor_of(items["403"]), ("Phodeo", "suggested"))      # area rules (560011)
-        self.assertEqual(self.get("/leads/spin/404/crm")["vendor"]["name"], "Kraftyz")
+        # A gift lead received after WEDDING_GIFTS_FROM: its area vendor AND Kraftyz (a partner)
+        self.assertEqual(self.vendors_of(items["404"]), [("Phodeo", "suggested"), ("Kraftyz", "partner")])
+        self.assertEqual(self.vendors_of(items["403"]), [("Phodeo", "suggested")])   # area rules (560011)
+        self.assertEqual([e["vendor"]["name"] for e in self.get("/leads/spin/404/crm")["vendors"]], ["Phodeo", "Kraftyz"])
         # Vendor visibility follows the same assignment
         self.assertEqual(set(self.spin_items("kraftyz")), {"404"})
-        self.assertEqual(set(self.spin_items("phodeo")), {"403"})
+        self.assertEqual(set(self.spin_items("phodeo")), {"403", "404"})
         # The old source is gone everywhere
         self.get("/wedding-gifts-leads", status=404)
         self.get("/crm-leads/wedding_gifts/export", status=422)
@@ -146,13 +151,15 @@ class GiftVendorTests(SpinTestBase):
     def test_manual_wins_and_missing_vendor_leaves_it_unassigned(self):
         resp = self.put_crm("admin", "spin", "404", {"vendor_id": self.vendor_ids["rj"]})
         self.assertEqual(resp.status_code, 200, resp.text)
-        self.assertEqual(self.vendor_of(self.spin_items()["404"]), ("RJ", "manual"))
+        self.assertEqual(self.vendors_of(self.spin_items()["404"]), [("RJ", "manual"), ("Kraftyz", "partner")])
         self.put_crm("admin", "spin", "404", {"vendor_id": None})                  # back to automatic
-        self.assertEqual(self.vendor_of(self.spin_items()["404"]), ("Kraftyz", "source_default"))
+        self.assertEqual(self.vendors_of(self.spin_items()["404"]), [("Phodeo", "suggested"), ("Kraftyz", "partner")])
         with mock.patch.object(settings, "WEDDING_GIFTS_VENDOR_NAME", "Someone else"):
             response_cache.clear()
-            self.assertEqual(self.vendor_of(self.spin_items()["404"]), (None, None))   # never the area rules
-            self.assertEqual(self.vendor_of(self.spin_items()["403"]), ("Phodeo", "suggested"))
+            self.assertEqual(self.vendors_of(self.spin_items()["404"]), [("Phodeo", "suggested")])   # no partner
+        with mock.patch.object(settings, "WEDDING_GIFTS_FROM", datetime(2026, 11, 22, 0, 0)):
+            response_cache.clear()                                   # received before the Kraftyz start
+            self.assertEqual(self.vendors_of(self.spin_items()["404"]), [("Phodeo", "suggested")])
 
 
 # ── B: the cut-off ─────────────────────────────────────────────────────
@@ -191,7 +198,7 @@ class CutoffTests(SpinTestBase):
             self.assertEqual(self.put_crm("admin", "spin", key, {"update_status": "converted"}).status_code, 404)
             with self.logged_in("admin"):
                 self.assertEqual(self.client.post(f"{API}/leads/spin/{key}/hot").status_code, 404)
-        self.assertEqual(set(self.spin_items("phodeo")), {"403"})          # 401 (Phodeo's area) hidden
+        self.assertEqual(set(self.spin_items("phodeo")), {"403", "404"})   # 401 (Phodeo's area) hidden
 
     def test_reminders_and_also_in(self):
         with mock.patch.object(settings, "SPIN_LIVE_FROM", date(2000, 1, 1)):    # before: everything live
@@ -248,10 +255,10 @@ class HistoryUploadTests(SpinTestBase):
         key = {r["values"]["name"]: r["lead_key"] for r in rows}
         items = self.spin_items()
         self.assertEqual(self.vendor_of(items[key["Manual"]]), ("OHP", "manual"))
-        self.assertEqual(self.vendor_of(items[key["Auto gift"]]), ("Kraftyz", "source_default"))
+        self.assertEqual(self.vendors_of(items[key["Auto gift"]]), [("Phodeo", "suggested"), ("Kraftyz", "partner")])
         self.assertEqual(self.vendor_of(items[key["Auto plain"]]), ("Phodeo", "suggested"))
         self.assertEqual(self.vendor_of(items[key["Empty"]]), (None, None))          # empty = unassigned
-        self.assertEqual(self.vendor_of(items[key["Gift manual"]]), ("RJ", "manual"))
+        self.assertEqual(self.vendors_of(items[key["Gift manual"]]), [("RJ", "manual"), ("Kraftyz", "partner")])
         self.assertEqual(items[key["Manual"]]["created_at"][:10], "2026-06-01")      # history date kept, listed
         with Session(self.engine) as s:
             lead = s.get(CrmSpinLead, int(key["Auto gift"].split("-")[1]))
@@ -299,7 +306,8 @@ class KocAndTotalsTests(SpinTestBase):
         self.assertEqual(self.get("/analytics/overview", period="all")["totals"]["spin"], total)
         with mock.patch.object(vendors_ep, "engine", self.engine):         # vendor statistics: own session
             stats = self.get("/vendors/stats")
-        self.assertEqual(sum(v["by_source"].get("spin", 0) for v in stats["vendors"]) + stats["unassigned"], total)
+        # Per vendor, a lead counts once for each of its vendors: 404 (a gift lead) for Phodeo and Kraftyz
+        self.assertEqual(sum(v["by_source"].get("spin", 0) for v in stats["vendors"]) + stats["unassigned"], total + 1)
 
 
 # ── Re-key after the history upload ────────────────────────────────────

@@ -81,7 +81,15 @@ def _filled(meta: LeadMeta, name: str) -> bool:
 
 def plan(db: Session, workflow: dict[str, tuple[str | None, datetime | None]], cutoff_utc: datetime) -> Plan:
     """workflow: {workflow id: (phone, created_at naive UTC)} for (at least) the keys with CRM data.
-    cutoff_utc: the spin cut-off as naive UTC (spin_leads.spin_live_from_utc())."""
+    cutoff_utc: the spin cut-off as naive UTC (spin_leads.spin_live_from_utc()).
+    Only for the one-row-per-lead data from before scripts/migrate_lead_vendors.py: refuses to plan
+    once spin has vendor copies or manual vendor choices (crm_lead_assignments)."""
+    from app.models.lead_assignment import LeadAssignment
+
+    if (db.exec(select(LeadMeta.id).where(LeadMeta.source == SOURCE, LeadMeta.copy_vendor_id != 0)).first()
+            or db.exec(select(LeadAssignment.id).where(LeadAssignment.source == SOURCE)).first()):
+        raise ValueError("Spin already has several vendors per lead (scripts/migrate_lead_vendors.py ran): "
+                         "the re-key only handles the data from before that migration.")
     out = Plan()
     copies: dict[str, list[str]] = {}
     for lead in db.exec(select(CrmSpinLead).where(CrmSpinLead.is_deleted == False)):  # noqa: E712

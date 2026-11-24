@@ -62,3 +62,15 @@ desktop.ini
 
 cookies.txt
 openapi.json
+
+# Kraftyz lead sheet for scripts/migrate_lead_vendors.py (personal data: never commit)
+kraftyz_leads.xlsx
+koc_spin_undo.sql
+koc_dhruva_backfill_undo.sql
+dhruva_to_koc_undo.sql
+
+fill_spin_undo.sql
+lead_vendors_undo*.sql
+*_undo*.sql
+kraftyz_leads.xlsx
+*.zip
