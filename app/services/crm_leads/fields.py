@@ -10,19 +10,33 @@ Only the lead's own details are stored on the lead. "Assigned to" is read here b
 crm_lead_meta (a vendor name = manual, "<vendor> · auto" = automatic, empty = unassigned for
 uploads). Uploads (not the add/edit forms) also read Update, Quoted amount and Conversion amount
 for new leads (UPLOAD_CRM_FIELDS); they are saved in crm_lead_meta too. Quoted date is never read.
+
+Only the phone is required. N/A-like values ("N/A", "-", "nil", "none", ".", …: lead_values.is_na)
+are empty, never invalid; an empty Created / Submitted / Updated means the upload time. Other
+unreadable values (an email without a domain, a date that isn't one) stay row errors.
+
+KOC -> Dhruva (koc_to_dhruva) uploads use the same machinery (FIELDS / KOC_CRM_FIELDS); they are
+stored in crm_koc_dhruva_leads with the same columns as crm_spin_leads (DETAIL_SOURCES).
 """
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
+from functools import lru_cache
 from typing import Any
 
-from app.services import phones
+from app.services import lead_values, phones
 from app.services.sheet_sync import parse_budget, parse_event_date
 
 IST = timezone(timedelta(hours=5, minutes=30))
 SOURCES = ("spin", "whatsapp", "wedding", "wedding_planner")
+# Sources stored in crm_spin_leads (the workflow spin_lead table's leads)
+SPIN_SOURCES = ("spin",)
+KOC = "koc_to_dhruva"
+# Sources whose CRM rows keep the lead's details in additional_details (crm_spin_leads, crm_koc_dhruva_leads)
+DETAIL_SOURCES = ("spin", KOC)
 SOURCE_LABELS = {
     "spin": "Spin leads",
+    KOC: "KOC → Dhruva",
     "whatsapp": "International (WhatsApp)",
     "wedding": "Wedding & event photography",
     "wedding_planner": "Wedding planner",
@@ -49,7 +63,8 @@ class FieldDef:
 
 
 PHONE_HELP_IN = "Indian numbers can be written without +91; other countries need their country code."
-ASSIGNED_HELP = ('A vendor name (e.g. Phodeo) assigns the lead to that vendor. "Automatic" (or "Auto", or '
+ASSIGNED_HELP = ('A vendor name (e.g. Phodeo) assigns the lead to that vendor; several vendors separated by '
+                 'commas (e.g. "Phodeo, Kraftyz") give it to each of them. "Automatic" (or "Auto", or '
                  '"Phodeo · auto") leaves it to the automatic rules. Empty or Unassigned: the lead stays '
                  "unassigned until an admin assigns it.")
 DATE_HELP = "13 Dec 2026 or 13-12-2026."
@@ -83,7 +98,9 @@ FIELDS: dict[str, list[FieldDef]] = {
         FieldDef("serviceTypes", "Service types", max_length=300, detail=True),
         FieldDef("serviceBudget", "Service budget", "range", max_length=100, detail=True),
         FieldDef("serviceQuantity", "Service quantity", "int", detail=True),
-        FieldDef("otherWeddingServices", "Other wedding services", max_length=500, detail=True),
+        FieldDef("otherWeddingServices", "Other wedding services", max_length=500, detail=True,
+                 help='E.g. "Photography & Videography, Wedding Gifts & Return Gifts". Leads naming '
+                      '"Wedding Gifts & Return Gifts" go to the gifts vendor (Kraftyz) when Assigned to is Automatic.'),
     ],
     "whatsapp": [
         FieldDef("phone", "Lead", "phone", True, 32,
@@ -145,12 +162,48 @@ FIELDS: dict[str, list[FieldDef]] = {
     ],
 }
 
+# KOC -> Dhruva upload: the list's / export's columns (keys as in spin_lead.additional_details)
+FIELDS[KOC] = [
+    # Aliases: the KOC -> Dhruva and Spin export headers and the workflow names (header_map also
+    # accepts the key and "additional_details.<key>"); any case, spaces and punctuation ignored
+    FieldDef("name", "Name", max_length=150, aliases=("lead", "fullname", "leadname", "customername")),
+    FieldDef("phone", "Phone", "phone", True, 20, ("contact", "mobile", "phonenumber", "contactnumber",
+                                                  "whatsappnumber", "mobilenumber"), help=PHONE_HELP_IN),
+    FieldDef("email", "Email", "email", max_length=150, aliases=("emailaddress", "emailid", "mail")),
+    FieldDef("occasionType", "Occasion", max_length=100, detail=True,
+             aliases=("occasiontype", "eventtype", "typeofoccasion")),
+    FieldDef("occasionDate", "Event date", "date", detail=True,
+             aliases=("occasiondate", "eventdate", "weddingdate", "dateofevent"), help=DATE_HELP),
+    FieldDef("branch", "Branch", "branch", aliases=("store", "branchname", "storename", "branchid"),
+             help="Branch name exactly as on the Branches page."),
+    FieldDef("estimatedBudgetPerCard", "Estimated budget per card", "range", max_length=100, detail=True,
+             aliases=("budget", "budgetpercard", "estimatedbudget", "budgetpercardrs", "pricepercard"),
+             help="A range such as 70-100, or 500+. Format the column as Text in Excel (Excel turns 1-10 "
+                  "into a date; such dates are read back as the range)."),
+    FieldDef("quantityRequired", "Quantity required", "int", detail=True,
+             aliases=("quantity", "qty", "noofcards", "numberofcards", "cards")),
+    FieldDef("created_at", "Received", "datetime",
+             aliases=("createdat", "created", "timestamp", "receivedat", "receivedon", "datereceived",
+                      "submittedat", "submitted"),
+             help=DATETIME_HELP + " Empty: the Spin game lead's received date, else now."),
+    # Optional (template only, not in the export)
+    FieldDef("source", "Source", max_length=50, aliases=("leadsource", "utmsource"),
+             help="Where the lead came from, e.g. Instagram. Empty: none (stored as crm)."),
+    FieldDef("occasion", "Relation", max_length=100, aliases=("leadoccasion", "relationship", "relationtocouple"),
+             help="E.g. Sister or Self."),
+    # Extra columns (not in the export; optional)
+    FieldDef("pincode", "Pincode", "pincode", detail=True, aliases=("pin", "zipcode", "postalcode")),
+    FieldDef("otherWeddingServices", "Other wedding services", max_length=500, detail=True,
+             aliases=("otherservices", "weddingservices", "services")),
+]
+
 # Read-only columns present in exports and/or templates; never read back from an upload
 READ_ONLY_COLUMNS: dict[str, tuple[str, ...]] = {
-    "spin": ("Branch code", "Quoted date", "Hot"),
-    "whatsapp": ("Quoted date", "Hot"),
-    "wedding": ("Quoted date", "Hot"),
-    "wedding_planner": ("Estimate", "Fits budget", "Quoted date", "Last step", "Hot"),
+    KOC: ("Sl. No", "Branch code", "Quoted date", "Hot"),
+    "spin": ("Branch code", "Vendor updates", "Quoted date", "Hot"),
+    "whatsapp": ("Vendor updates", "Quoted date", "Hot"),
+    "wedding": ("Vendor updates", "Quoted date", "Hot"),
+    "wedding_planner": ("Estimate", "Fits budget", "Vendor updates", "Quoted date", "Last step", "Hot"),
 }
 UPDATE_HELP = ("Empty or Pending, Converted, Not converted, Already purchased somewhere else, Already purchased "
                "with us, Will call back, Interested or Not interested.")
@@ -162,7 +215,21 @@ UPLOAD_CRM_FIELDS: tuple[FieldDef, ...] = (
     FieldDef("quoted_amount", "Quoted amount", "amount", aliases=("quotedamount", "quote"), help=AMOUNT_HELP),
     FieldDef("conversion_amount", "Conversion amount", "amount", aliases=("conversionamount",), help=AMOUNT_HELP),
 )
+# KOC -> Dhruva uploads: the section's CRM details for new rows (crm_lead_meta, source koc_to_dhruva)
+KOC_CRM_FIELDS: tuple[FieldDef, ...] = (
+    UPLOAD_CRM_FIELDS[0],
+    FieldDef("notes", "Additional comments", max_length=5000, aliases=("notes", "comments")),
+    UPLOAD_CRM_FIELDS[1],
+    UPLOAD_CRM_FIELDS[2],
+    FieldDef("follow_up_date", "Follow-up date", "date", aliases=("followupdate", "followup"), help=DATE_HELP),
+)
 UPLOAD_CRM_KEYS = tuple(f.key for f in UPLOAD_CRM_FIELDS)
+CRM_KEYS = frozenset(f.key for f in (*UPLOAD_CRM_FIELDS, *KOC_CRM_FIELDS))    # never lead columns
+
+
+def upload_crm_fields(source: str) -> tuple[FieldDef, ...]:
+    """The CRM columns an upload of the source reads for new leads."""
+    return KOC_CRM_FIELDS if source == KOC else UPLOAD_CRM_FIELDS
 MAX_AMOUNT = 100_000_000
 VIRTUAL_KEYS = {"assigned_to", "location", "wedding_when"}     # read from uploads, not lead columns
 
@@ -175,8 +242,8 @@ def header_map(source: str, *, upload: bool = False) -> dict[str, str]:
     """Normalised header -> field key (label, key and aliases all accepted). upload=True adds
     Update, Quoted amount and Conversion amount."""
     out: dict[str, str] = {}
-    for f in (*FIELDS[source], *(UPLOAD_CRM_FIELDS if upload else ())):
-        for name in (f.label, f.key, *f.aliases):
+    for f in (*FIELDS[source], *(upload_crm_fields(source) if upload else ())):
+        for name in (f.label, f.key, *f.aliases, f"additional_details.{f.key}"):
             out.setdefault(norm_header(name), f.key)
     return out
 
@@ -191,9 +258,34 @@ class Invalid(ValueError):
 
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_DATE_TEXT_RE = re.compile(r"^\s*\d{1,2} [A-Za-z]{3} \d{4}\s*$")     # how a date cell reads ("01 Oct 2026")
+
+
+def excel_range(value: Any, year: int | None = None) -> str | None:
+    """A range Excel turned into a date, back to the range; None when the value isn't such a date.
+    A date cell (or its text, "01 Oct 2026") of the 1st in another year than `year` (default: this
+    year, India time) was month-year: "10-20" -> 1 Oct 2020 -> "10-20". Otherwise day and month,
+    lower first: "1-10" -> 1 Oct 2026 -> "1-10" (also when Excel read it month-first)."""
+    if isinstance(value, datetime):
+        when = value.date()
+    elif isinstance(value, date):
+        when = value
+    elif isinstance(value, str) and _DATE_TEXT_RE.match(value):
+        try:
+            when = datetime.strptime(value.strip(), "%d %b %Y").date()
+        except ValueError:
+            return None
+    else:
+        return None
+    if year is None:
+        year = datetime.now(timezone(timedelta(hours=5, minutes=30))).year
+    if when.day == 1 and when.year != year:
+        return f"{when.month}-{when.year % 100}"
+    low, high = sorted((when.day, when.month))
+    return f"{low}-{high}"
 _MONTHS = ("%B %Y", "%b %Y", "%m/%Y", "%m-%Y", "%Y-%m")
 # Uploads: the screen's formats (13 Dec 2026 / 14 Nov 2026, 10:30 am) and DD-MM-YYYY; time optional
-_UPLOAD_DATES = ("%d-%m-%Y", "%d %b %Y", "%d %B %Y")
+_UPLOAD_DATES = ("%d-%m-%Y", "%d %b %Y", "%d %B %Y", "%Y-%m-%d")     # ISO too (exports re-uploaded)
 _UPLOAD_TIMES = ("", " %H:%M", " %H:%M:%S", ", %H:%M", ", %I:%M %p", " %I:%M %p", ", %I:%M:%S %p", " %I:%M:%S %p")
 DATE_ERROR = "Use a date like 13 Dec 2026 or 13-12-2026"
 
@@ -232,6 +324,7 @@ def _clean_text(value: Any) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+@lru_cache(maxsize=8192)                # uploads repeat the same dates; pure, immutable result
 def _upload_datetime(text: str) -> datetime | None:
     """Naive datetime (India time) from the accepted upload formats, or None."""
     for d in _UPLOAD_DATES:
@@ -370,26 +463,45 @@ class Cleaned:
     errors: list[dict]                     # [{"field": key, "message": ...}]
     phone: phones.Phone | None = None
     phone_input: str = ""
-    # "Assigned to": None = column empty/absent; ("none", None) | ("auto", id) | ("manual", id)
-    assignment: tuple[str, int | None] | None = None
+    # "Assigned to": None = column empty/absent; ("none", []) | ("auto", []) | ("manual", [vendor ids])
+    assignment: tuple[str, list[int]] | None = None
 
     @property
     def ok(self) -> bool:
         return not self.errors
 
 
-def parse_assigned(text: str, ctx: RowContext) -> tuple[tuple[str, int | None], str]:
-    """-> ((mode, vendor id), canonical text)."""
+_ASSIGNED_SPLIT = re.compile(r"[,;\n]+")
+
+
+def parse_assigned(text: str, ctx: RowContext) -> tuple[tuple[str, list[int]], str]:
+    """-> ((mode, vendor ids), canonical text). Several vendors are separated by commas (or ";"),
+    as the export writes them ("Phodeo, Kraftyz · auto"). The vendors named without "· auto" are
+    the lead's manual vendors (they replace the automatic one; partner rules such as Kraftyz still
+    add theirs); only "· auto" names (or "Automatic") = the automatic rules decide."""
     if norm_header(text) in ("", "unassigned", "none"):
-        return ("none", None), "Unassigned"
+        return ("none", []), "Unassigned"
     if norm_header(text) in ("automatic", "auto"):
-        return ("auto", None), "Automatic"          # same as "<vendor> · auto": the automatic rules decide
-    auto = _AUTO_RE.match(text)
-    name, mode = (auto.group(1), "auto") if auto and auto.group(1).strip() else (text, "manual")
-    vendor = ctx.vendors_by_name.get(norm_header(name))
-    if vendor is None:
-        raise Invalid(f"Unknown vendor '{name.strip()}'")
-    return (mode, vendor[0]), (f"{vendor[1]} · auto" if mode == "auto" else vendor[1])
+        return ("auto", []), "Automatic"          # same as "<vendor> · auto": the automatic rules decide
+    manual: list[tuple[int, str]] = []
+    autos: list[str] = []
+    for part in (p.strip() for p in _ASSIGNED_SPLIT.split(text)):
+        if not part:
+            continue
+        auto = _AUTO_RE.match(part)
+        name, is_auto = (auto.group(1), True) if auto and auto.group(1).strip() else (part, False)
+        if norm_header(name) in ("automatic", "auto"):
+            continue
+        vendor = ctx.vendors_by_name.get(norm_header(name))
+        if vendor is None:
+            raise Invalid(f"Unknown vendor '{name.strip()}'")
+        if is_auto:
+            autos.append(f"{vendor[1]} · auto")
+        elif vendor[0] not in [vid for vid, _ in manual]:
+            manual.append(vendor)
+    if not manual:
+        return ("auto", []), ", ".join(autos) or "Automatic"
+    return ("manual", [vid for vid, _ in manual]), ", ".join(name for _, name in manual)
 
 
 WEDDING_MONTH_MAX = 50       # crm_wedding_plans.wedding_month
@@ -428,6 +540,8 @@ def clean_row(source: str, raw: dict[str, Any], ctx: RowContext, *, partial: boo
         text = as_text(value)
         if f.type == "branch" and isinstance(value, int) and not isinstance(value, bool):
             text = str(value)
+        if f.type != "assigned" and lead_values.is_na(text):      # N/A-like = empty (not for Assigned to)
+            text, value = "", None
         if not text:
             if f.required:
                 errors.append({"field": f.key, "message": f"{f.label} is required"})
@@ -444,7 +558,7 @@ def clean_row(source: str, raw: dict[str, Any], ctx: RowContext, *, partial: boo
             elif f.type in ("text", "country"):
                 values[f.key] = text
             elif f.type == "range":
-                values[f.key] = re.sub(r"\s*[–—]\s*", "-", text.replace("₹", "")).strip()
+                values[f.key] = excel_range(value) or re.sub(r"\s*[–—]\s*", "-", text.replace("₹", "")).strip()
             elif f.type == "email":
                 if not _EMAIL_RE.match(text):
                     raise Invalid("Not a valid email address")
@@ -506,12 +620,22 @@ def clean_row(source: str, raw: dict[str, Any], ctx: RowContext, *, partial: boo
         except Invalid as exc:
             errors.append({"field": f.key, "message": str(exc)})
     if upload:
-        for f in UPLOAD_CRM_FIELDS:                 # CRM details for new leads (crm_lead_meta)
-            if not as_text(raw.get(f.key)):
+        for f in upload_crm_fields(source):         # CRM details for new leads (crm_lead_meta)
+            text = as_text(raw.get(f.key))
+            if lead_values.is_na(text):
                 values[f.key] = None
                 continue
             try:
-                values[f.key] = parse_update(raw[f.key]) if f.type == "update" else parse_amount(raw[f.key])
+                if f.type == "update":
+                    values[f.key] = parse_update(raw[f.key])
+                elif f.type == "amount":
+                    values[f.key] = parse_amount(raw[f.key])
+                elif f.type == "date":
+                    values[f.key] = parse_date(raw[f.key], upload=True)
+                else:
+                    if f.max_length and len(text) > f.max_length:
+                        raise Invalid(f"Longer than {f.max_length} characters")
+                    values[f.key] = text
             except Invalid as exc:
                 errors.append({"field": f.key, "message": str(exc)})
     return Cleaned(values, errors, phone, phone_input, assignment)
@@ -525,9 +649,9 @@ def field_defs(source: str) -> dict[str, FieldDef]:
 def to_model_kwargs(source: str, values: dict[str, Any], phone: phones.Phone | None) -> dict[str, Any]:
     """Clean form values -> column values for the source's table (only the keys present)."""
     out: dict[str, Any] = {}
-    if source == "spin":
+    if source in DETAIL_SOURCES:
         details = {}
-        for f in FIELDS["spin"]:
+        for f in FIELDS[source]:
             if f.key not in values or f.key in VIRTUAL_KEYS:
                 continue
             v = values[f.key]
@@ -547,7 +671,7 @@ def to_model_kwargs(source: str, values: dict[str, Any], phone: phones.Phone | N
         return out
 
     for key, v in values.items():
-        if key in VIRTUAL_KEYS or key in UPLOAD_CRM_KEYS:     # not lead columns (crm_lead_meta)
+        if key in VIRTUAL_KEYS or key in CRM_KEYS:            # not lead columns (crm_lead_meta)
             continue
         if key == "phone":
             out["phone"] = phone.digits                        # same display form as the sync
@@ -586,9 +710,9 @@ def from_model(source: str, lead) -> dict[str, Any]:
         return v.isoformat() if isinstance(v, (date, datetime)) else v
 
     out: dict[str, Any] = {}
-    if source == "spin":
+    if source in DETAIL_SOURCES:
         details = lead.additional_details or {}
-        for f in FIELDS["spin"]:
+        for f in FIELDS[source]:
             if f.key == "branch":
                 out["branch"] = lead.branch_id
             elif f.key in VIRTUAL_KEYS:

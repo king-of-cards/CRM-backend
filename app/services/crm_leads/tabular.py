@@ -23,7 +23,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 
 from app.models.vendor_to_koc import STATUS_LABELS as UPDATE_LABELS
 from app.services.crm_leads.fields import (
-    FIELDS, READ_ONLY_COLUMNS, SOURCE_LABELS, UPLOAD_CRM_FIELDS, display_date, display_datetime,
+    FIELDS, READ_ONLY_COLUMNS, SOURCE_LABELS, UPLOAD_CRM_FIELDS, display_date, display_datetime, upload_crm_fields,
 )
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -229,6 +229,12 @@ def content_disposition(name: str) -> str:
 
 
 # ── Template ───────────────────────────────────────────────────────────
+# Template columns formatted as Text (besides phones), so Excel keeps what is typed
+TEXT_COLUMNS: dict[str, tuple[str, ...]] = {
+    "koc_to_dhruva": ("Estimated budget per card", "Quantity required"),
+}
+
+
 def template(source: str, fmt: str, branch_names: list[str], vendor_names: list[str]) -> tuple[bytes, str, str]:
     """The export's columns, with one example row in the screen's formats. Read-only columns
     (Quoted date, Branch code, Estimate…) are kept so files match the export; they are ignored
@@ -243,7 +249,7 @@ def template(source: str, fmt: str, branch_names: list[str], vendor_names: list[
         return write_csv(headers, [example], kinds), CSV_TYPE, "csv"
 
     read_only = set(READ_ONLY_COLUMNS[source])
-    defs = {f.label: f for f in (*FIELDS[source], *UPLOAD_CRM_FIELDS)}
+    defs = {f.label: f for f in (*FIELDS[source], *upload_crm_fields(source))}
     wb = Workbook()
     ws = wb.active
     ws.title = "Leads"
@@ -257,8 +263,9 @@ def template(source: str, fmt: str, branch_names: list[str], vendor_names: list[
         color = "C00000" if required else ("808080" if h in read_only else None)
         ws.cell(row=1, column=i).font = Font(bold=True, color=color)
         ws.column_dimensions[letter].width = max(14, len(h) + 4)
-        if kinds[i - 1] == "phone":
-            for r in range(3, 2002):                     # keep + signs as text
+        if kinds[i - 1] == "phone" or h in TEXT_COLUMNS.get(source, ()):
+            # Text cells: keep + signs, and ranges such as 1-10 (Excel turns them into dates)
+            for r in range(2, 2002):
                 ws.cell(row=r, column=i).number_format = "@"
 
     info = wb.create_sheet("Instructions")
@@ -280,7 +287,7 @@ def template(source: str, fmt: str, branch_names: list[str], vendor_names: list[
 
     lists = wb.create_sheet("Lists")
     choices = {
-        "Branch": branch_names if source == "spin" else [],
+        "Branch": branch_names if source in ("spin", "koc_to_dhruva") else [],
         # "<vendor> · auto" isn't offered (Automatic covers it) but uploads still accept it
         "Assigned to": ["Automatic", "Unassigned"] + vendor_names,
         "Update": [label for label in UPDATE_LABELS.values()],          # Pending first
@@ -310,11 +317,17 @@ _T = datetime(2026, 11, 14, 5, 0, tzinfo=timezone.utc)        # 14 Nov 2026, 10:
 EXAMPLES: dict[str, dict[str, Any]] = {
     "spin": {"Lead": "Asha Rao", "Email": "asha@example.com", "Contact": "+919845012345", "Branch": "Jayanagar",
              "Branch code": "JNG-004 · Bangalore", "Location": "Bangalore · 560011", "Occasion": "Wedding", "Event date": _D,
-             "Budget": "₹10–20", "Assigned to": "Phodeo", "Created": _T},
+             "Budget": "₹10–20", "Other wedding services": "Photography & Videography", "Quantity required": 300,
+             "Assigned to": "Phodeo", "Created": _T},
     "whatsapp": {"Lead": "+971501234567", "Country": "United Arab Emirates", "Event date": _D,
                  "Assigned to": "Automatic", "Submitted": _T},
     "wedding": {"Lead": "Ravi Kumar", "Email": "ravi@example.com", "Contact": "+919845010003", "Occasion": "Wedding",
                 "Event date": _D, "City": "Bangalore", "Budget": 150000, "Assigned to": "Phodeo", "Submitted": _T},
+    "koc_to_dhruva": {"Name": "Asha Rao", "Phone": "+919845012345", "Email": "asha@example.com",
+                      "Occasion": "Wedding", "Event date": _D, "Branch": "Jayanagar", "Branch code": "JNG-004 · Bangalore",
+                      "Estimated budget per card": "70-100", "Quantity required": "500", "Received": _T,
+                      "Update": "Interested", "Additional comments": "Call after 6 pm", "Quoted amount": 45000,
+                      "Follow-up date": date(2026, 11, 25), "Source": "Instagram", "Relation": "Sister"},
     "wedding_planner": {"Lead": "Meera", "Role": "Bride", "Email": "meera@example.com", "Contact": "+919845010004",
                         "Wedding date": date(2027, 12, 20), "Wedding city": "Udaipur", "Guests": 300,
                         "Guests staying": 120, "Budget": 2500000, "Budget range": "20L–30L", "Assigned to": "",

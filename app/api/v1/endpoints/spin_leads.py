@@ -1,4 +1,15 @@
-"""GET /spin-leads: admin-only, read-only listing of the PostgreSQL table spin_lead.
+"""GET /spin-leads: read-only listing of the PostgreSQL table spin_lead, plus the CRM's own spin leads.
+
+Spin (see `spin_filter`): the listed rows (REQUIRED_JSON_KEYS) created on or after the
+SPIN_LIVE_FROM setting (an India date; created_at is naive UTC). Older workflow rows are hidden
+from spin everywhere (lists, stats, exports, dashboards, reminders, also_in, vendor visibility,
+the upload duplicate check), so the history can be uploaded as CRM spin leads (crm_spin_leads),
+which are always listed. Gift leads (otherWeddingServices names "Wedding Gifts & Return Gifts",
+see `is_gift`) are ordinary spin leads; only their automatic vendor differs (lead_crm.lead_rules).
+
+A second view, koc_to_dhruva (the Dhruva section "KOC -> Dhruva"), is a rule over the workflow rows
+(listed or not) created on or after the same cut-off, plus its own uploaded rows
+(crm_koc_dhruva_leads, every one listed); never CRM spin leads: see `koc_filter` / `koc_reason`.
 
 Settings you may want to adjust (module level, below):
   HIDDEN_COLUMNS       table columns that are never selected, returned, searched or sorted
@@ -10,18 +21,19 @@ Settings you may want to adjust (module level, below):
 """
 import json
 import logging
+import re
 import threading
 import time as _time
 import uuid
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import (
     Boolean, LargeBinary, MetaData, Numeric, String, Table, Text, literal_column,
-    ColumnElement, and_, bindparam, case, cast, false, func, or_, select, true,
+    ColumnElement, and_, bindparam, case, cast, false, func, null, or_, select, true,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import NoSuchTableError, SQLAlchemyError
@@ -45,6 +57,21 @@ JSON_EXPAND_COLUMNS: list[str] = ["additional_details"]
 RANGE_SORT_KEYS: set[str] = {"estimatedBudgetPerCard", "serviceBudget"}
 REQUIRED_JSON_KEYS: set[str] = {"otherWeddingServices"}
 REQUIRED_JSON_COLUMN = "additional_details"   # the JSON column REQUIRED_JSON_KEYS refer to
+
+# Views of the spin_lead table (see the module docstring)
+SPIN = "spin"
+GIFT_KEY = "otherWeddingServices"           # also the list's "Other wedding services"
+GIFT_PHRASE = "Wedding Gifts & Return Gifts"
+IST_OFFSET = timedelta(hours=5, minutes=30)
+
+# KOC -> Dhruva: estimatedBudgetPerCard's starting number >= 70, or else quantityRequired's >= 1000 (rule_number)
+KOC_TO_DHRUVA = "koc_to_dhruva"
+KOC_BUDGET_KEY, KOC_QUANTITY_KEY = "estimatedBudgetPerCard", "quantityRequired"
+KOC_BUDGET_MIN, KOC_QUANTITY_MIN = 70, 1000
+KOC_REASON_LABELS = {"budget": "Budget ≥ ₹70", "quantity": "Quantity ≥ 1000"}
+NUMBER_PATTERN = r"([0-9]+(?:\.[0-9]+)?)"          # the first number anywhere ("UNDER_50" -> 50)
+# "UNDER_70", "below 70", "less than 70", "<70": never qualify for the KOC -> Dhruva rule (any case)
+BELOW_PATTERN = r"^\s*(?:under|below|less\s*than|<)"
 BLANK_PATTERN = r"^\s*$"                      # empty or whitespace-only text
 
 JSON_KEYS_CACHE_SECONDS = 600    # re-discover JSON keys every 10 minutes
@@ -120,6 +147,149 @@ def _required_filter(table: Table) -> list[ColumnElement]:
             value.op("!~", is_comparison=True)(bindparam(None, BLANK_PATTERN, type_=Text))
         )
     return conditions
+
+
+def is_gift(value: Any) -> bool:
+    """True when an otherWeddingServices value names "Wedding Gifts & Return Gifts"
+    (case-insensitive, anywhere in it). The Python twin of `gift_expr`."""
+    return GIFT_PHRASE.casefold() in str(value or "").casefold()
+
+
+def is_gift_details(details: Any) -> bool:
+    """A gift lead, from its additional_details (CRM leads and fake rows)."""
+    return isinstance(details, dict) and is_gift(details.get(GIFT_KEY))
+
+
+def gift_expr(table: Table):
+    """lower(additional_details ->> 'otherWeddingServices') LIKE '%wedding gifts & return gifts%'
+    (NULL when the key is missing)."""
+    value = _jsonb(table, REQUIRED_JSON_COLUMN).op("->>", return_type=Text)(bindparam(None, GIFT_KEY, type_=Text))
+    pattern = bindparam(None, _like_pattern(GIFT_PHRASE.lower()), type_=Text)
+    return func.lower(value).like(pattern, escape=LIKE_ESCAPE)
+
+
+def split_services(value: Any) -> list[str]:
+    """The individual services of an otherWeddingServices value ("A, B" -> ["A", "B"])."""
+    return [p.strip() for p in str(value or "").split(",") if p.strip()]
+
+
+# ── Spin cut-off (SPIN_LIVE_FROM) ──────────────────────────────────────
+def spin_live_from_utc() -> datetime:
+    """The SPIN_LIVE_FROM India date as the naive UTC instant it starts at (00:00 IST)."""
+    return datetime.combine(settings.SPIN_LIVE_FROM, time.min) - IST_OFFSET
+
+
+def to_naive_utc(value: Any) -> datetime | None:
+    """A created_at value (naive UTC, aware, or ISO text) as naive UTC, or None."""
+    if isinstance(value, str) and value:
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    if isinstance(value, date) and not isinstance(value, datetime):
+        value = datetime.combine(value, time.min)
+    if not isinstance(value, datetime):
+        return None
+    return value.astimezone(timezone.utc).replace(tzinfo=None) if value.tzinfo else value
+
+
+def is_live(created: Any) -> bool:
+    """A workflow row created on or after the cut-off (the Python twin of `live_filter`).
+    No created date: not live."""
+    value = to_naive_utc(created)
+    return value is not None and value >= spin_live_from_utc()
+
+
+def _created_column(table: Table):
+    return next((table.c[c] for c in ("created_at", "createdAt", "created") if c in table.c), None)
+
+
+def live_filter(table: Table) -> list[ColumnElement]:
+    """created_at >= the cut-off (naive UTC, as the workflow stores it). Fails closed."""
+    created = _created_column(table)
+    return [created >= bindparam(None, spin_live_from_utc())] if created is not None else [false()]
+
+
+def spin_filter(table: Table) -> list[ColumnElement]:
+    """The workflow rows in spin: listed (REQUIRED_JSON_KEYS) and created on or after the cut-off."""
+    return _required_filter(table) + live_filter(table)
+
+
+def first_number(value: Any) -> float | None:
+    """The first number in a value ("70-100" -> 70, "500_PLUS" -> 500, "1,000" -> 1000), or None.
+    The Python twin of `_number_expr`."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float, Decimal)):
+        return float(value)
+    m = re.search(NUMBER_PATTERN, str(value).replace(",", ""))
+    return float(m.group(1)) if m else None
+
+
+def rule_number(value: Any) -> float | None:
+    """The KOC -> Dhruva rule's number: the starting (first) number of the value ("70-100" -> 70,
+    "40-70" -> 40, "1000-2000" -> 1000, "500 to 1000" -> 500, "2000+" -> 2000, "1,000" -> 1000);
+    None for "UNDER_…" / "below …" / "less than …" / "<…" values (never qualify) and values without a
+    number. The Python twin of `_rule_number_expr`."""
+    if isinstance(value, str) and re.match(BELOW_PATTERN, value, re.IGNORECASE):
+        return None
+    return first_number(value)
+
+
+def koc_reason(details: Any) -> str | None:
+    """"budget" (estimatedBudgetPerCard's rule_number >= 70, wins when both match), "quantity"
+    (quantityRequired's rule_number >= 1000), or None (not a KOC -> Dhruva lead)."""
+    if not isinstance(details, dict):
+        return None
+    budget = rule_number(details.get(KOC_BUDGET_KEY))
+    if budget is not None and budget >= KOC_BUDGET_MIN:
+        return "budget"
+    quantity = rule_number(details.get(KOC_QUANTITY_KEY))
+    if quantity is not None and quantity >= KOC_QUANTITY_MIN:
+        return "quantity"
+    return None
+
+
+def _detail_text(table: Table, key: str):
+    return _jsonb(table, REQUIRED_JSON_COLUMN).op("->>", return_type=Text)(bindparam(None, key, type_=Text))
+
+
+def _number_expr(table: Table, key: str):
+    """CAST(substring(replace(details ->> key, ',', '') FROM NUMBER_PATTERN) AS NUMERIC):
+    the first number of a JSON value (NULL when it has none)."""
+    text_value = func.replace(_detail_text(table, key), ",", "")
+    return cast(func.substring(text_value, bindparam(None, NUMBER_PATTERN, type_=Text)), Numeric)
+
+
+def _rule_number_expr(table: Table, key: str):
+    """CASE WHEN details ->> key ~* BELOW_PATTERN THEN NULL ELSE the first number END (PostgreSQL):
+    the rule's number. The SQL twin of `rule_number`."""
+    below = _detail_text(table, key).op("~*", return_type=Boolean)(bindparam(None, BELOW_PATTERN, type_=Text))
+    return case((below, null()), else_=_number_expr(table, key))
+
+
+def koc_budget_hit(table: Table):
+    return func.coalesce(_rule_number_expr(table, KOC_BUDGET_KEY) >= KOC_BUDGET_MIN, false())
+
+
+def koc_quantity_hit(table: Table):
+    return func.coalesce(_rule_number_expr(table, KOC_QUANTITY_KEY) >= KOC_QUANTITY_MIN, false())
+
+
+def koc_filter(table: Table) -> list[ColumnElement]:
+    """KOC -> Dhruva rows: every row of the table (no required keys) matching the budget or the
+    quantity rule."""
+    return [or_(koc_budget_hit(table), koc_quantity_hit(table))]
+
+
+def base_filter(table: Table, flow: str = SPIN) -> list[ColumnElement]:
+    """What every listed query of a view applies: spin = `spin_filter`; koc_to_dhruva: its own rule
+    over every row (listed or not) created on or after the cut-off (SPIN_LIVE_FROM)."""
+    if flow == KOC_TO_DHRUVA:
+        return koc_filter(table) + live_filter(table)
+    if flow != SPIN:
+        raise ValueError(f"unknown flow {flow!r}")
+    return spin_filter(table)
 
 
 def _discovery_query(table: Table, source: str, base: list[ColumnElement]):
@@ -292,19 +462,19 @@ def _named_field(table: Table, json_fields: dict, wanted_names: tuple[str, ...])
     return None, None
 
 
-def spin_filter_options(ids: set[str] | None = None) -> dict:
-    """Values for the filter dropdowns: the budget ranges and pincodes used on spin leads, with counts.
-    ids: only count these workflow lead ids (a vendor's own leads); None = all."""
+def spin_filter_options(ids: set[str] | None = None, flow: str = SPIN) -> dict:
+    """Values for the filter dropdowns: the budget ranges and pincodes used on the flow's leads, with
+    counts. ids: only count these workflow lead ids (a vendor's own leads); None = all."""
     if read_engine is None:
         return {"budgets": [], "pincodes": [], "has_branch": False, "has_pincode": False, "has_budget": False,
-                "workflow_branches": {}, "workflow_total": 0}
+                "workflow_branches": {}, "workflow_total": 0, "workflow_other_services": {}}
     try:
         table = _get_table()
-        base = _required_filter(table)
+        json_fields = _get_json_fields(table, _required_filter(table))
+        base = base_filter(table, flow)
         if ids is not None:
             pk_text = cast(list(table.primary_key.columns)[0], Text)
             base = base + [pk_text.in_(sorted(ids)) if ids else false()]
-        json_fields = _get_json_fields(table, base)
         _, branch_expr = _branch_field(table, json_fields)
         _, pin_expr = _named_field(table, json_fields, PINCODE_FIELD_NAMES)
         _, budget_expr = _named_field(table, json_fields, BUDGET_FIELD_NAMES)
@@ -338,6 +508,15 @@ def spin_filter_options(ids: set[str] | None = None) -> dict:
                 branch_counts = {str(b): n for b, n in conn.execute(query).all() if b not in (None, "")}
         with read_engine.connect() as conn:
             workflow_total = conn.execute(select(func.count()).select_from(table).where(*base)).scalar_one()
+        services: dict[str, int] = {}
+        if flow == SPIN:
+            # GROUP BY 1: same reason as above; each value is split into its services
+            query = (select(_detail_text(table, GIFT_KEY).label("s"), func.count()).select_from(table).where(*base)
+                     .group_by(literal_column("1")))
+            with read_engine.connect() as conn:
+                for value, n in conn.execute(query).all():
+                    for service in split_services(value):
+                        services[service] = services.get(service, 0) + n
         return {
             "budgets": budgets,
             "pincodes": pincodes,
@@ -346,17 +525,18 @@ def spin_filter_options(ids: set[str] | None = None) -> dict:
             "has_budget": budget_expr is not None,
             "workflow_branches": branch_counts,           # branch id -> workflow leads (merged with CRM leads below)
             "workflow_total": workflow_total,
+            "workflow_other_services": services,          # service -> workflow leads (merged with CRM leads below)
         }
     except Exception:  # noqa: BLE001
         logger.warning("spin-leads: filter options unavailable", exc_info=True)
         return {"budgets": [], "pincodes": [], "has_branch": False, "has_pincode": False, "has_budget": False,
-                "workflow_branches": {}, "workflow_total": 0}
+                "workflow_branches": {}, "workflow_total": 0, "workflow_other_services": {}}
 
 
-def spin_branch_counts() -> dict[str, int]:
-    """{branch id (text): number of listed spin leads}: workflow leads plus the CRM's own
+def spin_branch_counts(flow: str = SPIN) -> dict[str, int]:
+    """{branch id (text): number of listed leads of the flow}: workflow leads plus the CRM's own
     (archived ones left out). Workflow part empty if the branch isn't stored there."""
-    counts = _workflow_branch_counts()
+    counts = _workflow_branch_counts(flow)
     try:
         from sqlmodel import Session
 
@@ -364,7 +544,7 @@ def spin_branch_counts() -> dict[str, int]:
         from app.services import crm_spin_leads
 
         with Session(engine) as db:
-            for lead in crm_spin_leads.active(db):
+            for lead in crm_spin_leads.active(db, flow):
                 if lead.branch_id is not None:
                     counts[str(lead.branch_id)] = counts.get(str(lead.branch_id), 0) + 1
     except Exception:  # noqa: BLE001
@@ -372,13 +552,13 @@ def spin_branch_counts() -> dict[str, int]:
     return counts
 
 
-def _workflow_branch_counts() -> dict[str, int]:
+def _workflow_branch_counts(flow: str = SPIN) -> dict[str, int]:
     if read_engine is None:
         return {}
     try:
         table = _get_table()
-        base = _required_filter(table)
-        name, expr = _branch_field(table, _get_json_fields(table, base))
+        base = base_filter(table, flow)
+        name, expr = _branch_field(table, _get_json_fields(table, _required_filter(table)))
         if expr is None:
             return {}
         query = select(expr.label("b"), func.count()).select_from(table).where(*base).group_by(literal_column("1"))
@@ -401,13 +581,16 @@ def list_spin_leads(
     offset: int | None = None,
     limit: int | None = None,
     keys_only: bool = False,
+    flow: str = SPIN,
 ):
     """offset/limit override page/page_size (used to page after the CRM's own spin leads).
+    flow: spin or koc_to_dhruva (which rows of spin_lead; see the module docstring).
     keys_only=True: {"keys": [every matching lead id as text], "total"}, no rows (stats).
 
     filters (all optional):
       pincode        leads whose pincode starts with this
       budget         exact budget value (e.g. "10-20")
+      other_services otherWeddingServices contains this (any case)
       ids_in         only these lead ids (from the CRM filters); [] = none
       ids_not_in     never these lead ids
       vendor         {manual_for, manual_other, branch_ids, pins, prefixes, fallback,
@@ -418,8 +601,8 @@ def list_spin_leads(
 
     try:
         table = _get_table()
-        base = _required_filter(table)          # applied to discovery, count and rows
-        json_fields = _get_json_fields(table, base)
+        json_fields = _get_json_fields(table, _required_filter(table))   # one key list for every view
+        base = base_filter(table, flow)         # applied to count and rows
     except RequiredFilterError:
         logger.error("spin-leads: REQUIRED_JSON_COLUMN is missing or hidden; refusing to list leads")
         raise HTTPException(503, "Read database unavailable")
@@ -523,6 +706,20 @@ def list_spin_leads(
                 conditions.append(day <= bindparam(None, flt["event_to"], type_=Text))
     if flt.get("no_workflow"):
         conditions.append(false())                     # origin asked for has no workflow leads
+    if flt.get("other_services"):                       # Other wedding services contains (any case)
+        pattern = bindparam("services_pattern", _like_pattern(flt["other_services"]), type_=Text)
+        conditions.append(_detail_text(table, GIFT_KEY).ilike(pattern, escape=LIKE_ESCAPE))
+    if flt.get("occasion"):                             # occasion type contains (any case)
+        pattern = bindparam("occasion_pattern", _like_pattern(flt["occasion"]), type_=Text)
+        conditions.append(_detail_text(table, "occasionType").ilike(pattern, escape=LIKE_ESCAPE))
+    if flt.get("quantity_min") is not None:
+        conditions.append(_number_expr(table, KOC_QUANTITY_KEY) >= flt["quantity_min"])
+    if flt.get("quantity_max") is not None:
+        conditions.append(_number_expr(table, KOC_QUANTITY_KEY) <= flt["quantity_max"])
+    if flt.get("reason") == "budget":
+        conditions.append(koc_budget_hit(table))
+    elif flt.get("reason") == "quantity":
+        conditions += [koc_budget_hit(table) == false(), koc_quantity_hit(table)]
 
     if keys_only:
         try:
@@ -569,8 +766,9 @@ FRESH_SECONDS = 60
 STALE_SECONDS = 1800
 
 
-def _cache_key(offset, limit, search, sort, order, branch=None):
-    return ("spin", offset, limit, (search or "").strip().lower(), sort, order, branch or None)
+def _cache_key(offset, limit, search, sort, order, branch=None, flow=SPIN):
+    return ("spin", offset, limit, (search or "").strip().lower(), sort, order, branch or None) + \
+        (() if flow == SPIN else (flow,))
 
 
 def _spin_location_keys(columns: list[dict]) -> tuple[str | None, str | None]:
@@ -588,6 +786,7 @@ class SpinFilters:
     branch: str | None = None
     pincode: str | None = None
     budget: str | None = None
+    other_services: str | None = None
 
 
 def spin_filters(
@@ -596,15 +795,18 @@ def spin_filters(
     branch: str | None = Query(None, description="Only leads from this branch id"),
     pincode: str | None = Query(None, max_length=10, description="Pincode starts with"),
     budget: str | None = Query(None, max_length=50, description="Exact budget value, e.g. 10-20"),
+    other_services: str | None = Query(None, max_length=200,
+                                       description="Other wedding services contains this (any case), e.g. "
+                                                   "Wedding Gifts & Return Gifts"),
 ) -> SpinFilters:
     pin = "".join(ch for ch in (pincode or "") if ch.isdigit()) or (pincode or "").strip() or None
-    return SpinFilters(common, branch or None, pin, budget or None)
+    return SpinFilters(common, branch or None, pin, budget or None, (other_services or "").strip() or None)
 
 
 Filters = Annotated[SpinFilters, Depends(spin_filters)]
 
 
-def filters_for(db, viewer, f: SpinFilters) -> dict:
+def filters_for(db, viewer, f: SpinFilters, flow: str = SPIN) -> dict:
     """What list_spin_leads (PostgreSQL) and crm_spin_leads.matching (CRM leads) apply. CRM filters
     and visibility become lead ids, from the same assignment map as vendor visibility. Shared by
     the list and the export."""
@@ -614,7 +816,9 @@ def filters_for(db, viewer, f: SpinFilters) -> dict:
         flt["pincode"] = f.pincode
     if f.budget:
         flt["budget"] = f.budget
-    keys = lead_filters.allowed_keys(db, "spin", viewer, c)
+    if getattr(f, "other_services", None):
+        flt["other_services"] = f.other_services
+    keys = lead_filters.allowed_keys(db, flow, viewer, c)
     if keys is not None:
         flt["ids_in"] = sorted(keys)
     if c.period is not None:
@@ -631,21 +835,21 @@ def filters_for(db, viewer, f: SpinFilters) -> dict:
     return flt
 
 
-@router.get("/filter-options")
-def spin_leads_filter_options(viewer: LeadViewer, db: DbSession):
-    """Values for the filter dropdowns, with counts over the leads the viewer may see (vendor
+def filter_options(viewer, db, flow: str = SPIN) -> dict:
+    """Values for the filter dropdowns, with counts over the flow's leads the viewer may see (vendor
     users: their own): budgets and pincodes (workflow leads), branches, origins, update counts, and
     vendors (admins only). Also which filters this data supports (has_*)."""
     from app.services import crm_spin_leads
     from app.services.branches import branches_by_id
     from app.services.stores import store_for
 
-    visible = access.visible_keys(db, viewer, "spin")
-    if viewer.sees_all:
-        base = response_cache.get(("spin", "filter-options"), spin_filter_options, fresh=600, stale=3600)
+    visible = access.visible_keys(db, viewer, flow)
+    if visible is None:                       # every lead of the flow (admins; Dhruva logins on koc_to_dhruva)
+        base = response_cache.get(("spin", "filter-options") + (() if flow == SPIN else (flow,)),
+                                  lambda: spin_filter_options(None, flow), fresh=600, stale=3600)
     else:
-        base = spin_filter_options({k for k in visible if not k.startswith("crm-")})
-    crm = [lead for lead in crm_spin_leads.active(db) if visible is None or lead.lead_key in visible]
+        base = spin_filter_options({k for k in visible if not k.startswith("crm-")}, flow)
+    crm = [lead for lead in crm_spin_leads.active(db, flow) if visible is None or lead.lead_key in visible]
 
     branch_counts = dict(base.get("workflow_branches", {}))
     for lead in crm:
@@ -661,28 +865,71 @@ def spin_leads_filter_options(viewer: LeadViewer, db: DbSession):
     origins = [{"value": "workflow", "count": base.get("workflow_total", 0)}] + [
         {"value": o, "count": sum(1 for lead in crm if lead.origin == o)} for o in ("added", "imported")
     ]
-    keys = visible if visible is not None else set(access.assignments(db, "spin"))
+    keys = visible if visible is not None else set(access.assignments(db, flow))
     out = {k: v for k, v in base.items() if not k.startswith("workflow_")}
+    if flow == SPIN:                          # Other wedding services: each service with its lead count
+        services = dict(base.get("workflow_other_services", {}))
+        for lead in crm:
+            for service in split_services((lead.additional_details or {}).get(GIFT_KEY)):
+                services[service] = services.get(service, 0) + 1
+        out["other_services"] = [{"value": s, "count": n}
+                                 for s, n in sorted(services.items(), key=lambda kv: (-kv[1], kv[0].casefold()))]
     return {
         **out,
         "branches": branches,
         "origins": origins,
-        "updates": lead_filters.update_options(db, "spin", keys),
+        "updates": lead_filters.update_options(db, flow, keys, viewer),
         "vendors": lead_filters.vendor_options(db, viewer),
     }
 
 
-@router.get("/stats")
-def spin_lead_stats(viewer: LeadViewer, db: DbSession, f: Filters):
+def stats(viewer, db, f: SpinFilters, flow: str = SPIN) -> dict:
     """{total, kpis} over exactly the leads the list shows for the same filters (workflow and
     CRM leads; vendor users: their own). total equals the list's total."""
     from app.services import crm_spin_leads, kpis
 
-    filters = filters_for(db, viewer, f)
-    added = crm_spin_leads.matching(db, f.common.search, None, "asc", f.branch, filters)
-    workflow = list_spin_leads(None, 1, 1, f.common.search, None, "asc", f.branch, filters or None, keys_only=True)
+    filters = filters_for(db, viewer, f, flow)
+    added = crm_spin_leads.matching(db, f.common.search, None, "asc", f.branch, filters, flow)
+    workflow = list_spin_leads(None, 1, 1, f.common.search, None, "asc", f.branch, filters or None, keys_only=True,
+                               flow=flow)
     keys = [lead.lead_key for lead in added] + list(workflow["keys"])
-    return {"total": len(keys), "kpis": kpis.for_keys(db, "spin", keys)}
+    from app.services import lead_crm
+
+    return {"total": len(keys), "kpis": kpis.for_keys(db, flow, keys, lead_crm.viewer_copy(viewer))}
+
+
+def list_page(viewer, db, f: SpinFilters, page: int, page_size: int, sort, order, flow: str = SPIN) -> dict:
+    """Filters: app/services/lead_filters.py (common) + branch, pincode, budget. Vendor users only
+    ever get their own leads (vendor_id / unassigned are ignored for them)."""
+    from app.services import also_in, phones
+
+    data = merged_page(db, (page - 1) * page_size, page_size, f.common.search, sort, order, f.branch,
+                       filters_for(db, viewer, f, flow), flow=flow)
+    pk = next((c.name for c in _get_table().primary_key.columns), "id")
+    keys = [str(i.get(pk)) for i in data["items"]]
+    e164_of = also_in.page_phones(db, flow, [k for k in keys if k.startswith("crm-")])   # CRM leads
+    for item, key in zip(data["items"], keys):                                          # workflow leads
+        if key not in e164_of and item.get("phone"):
+            e164 = phones.normalize(str(item["phone"]), lenient=True).e164
+            if e164:
+                e164_of[key] = e164
+    also_in.attach(db, viewer, flow, data["items"], key_of=lambda i: i.get(pk), e164_of=e164_of)
+    from app.services import lead_crm
+
+    data["items"] = [lead_crm.for_viewer(i, viewer) for i in data["items"]]     # vendor logins: their own copy
+    return {**data, "page": page, "page_size": page_size}
+
+
+@router.get("/filter-options")
+def spin_leads_filter_options(viewer: LeadViewer, db: DbSession):
+    """Spin leads: see `filter_options`."""
+    return filter_options(viewer, db, SPIN)
+
+
+@router.get("/stats")
+def spin_lead_stats(viewer: LeadViewer, db: DbSession, f: Filters):
+    """Spin leads: see `stats`."""
+    return stats(viewer, db, f, SPIN)
 
 
 @router.get("")
@@ -695,26 +942,13 @@ def spin_leads_endpoint(
     sort: str | None = Query(None, description="Column name or additional_details.<key>"),
     order: Literal["asc", "desc"] = Query("asc"),
 ):
-    """Filters: app/services/lead_filters.py (common) + branch, pincode, budget. Vendor users only
-    ever get their own leads (vendor_id / unassigned are ignored for them)."""
-    from app.services import also_in, phones
-
-    data = merged_page(db, (page - 1) * page_size, page_size, f.common.search, sort, order, f.branch,
-                       filters_for(db, viewer, f))
-    pk = next((c.name for c in _get_table().primary_key.columns), "id")
-    keys = [str(i.get(pk)) for i in data["items"]]
-    e164_of = also_in.page_phones(db, "spin", [k for k in keys if k.startswith("crm-")])   # CRM spin leads
-    for item, key in zip(data["items"], keys):                                            # workflow leads
-        if key not in e164_of and item.get("phone"):
-            e164 = phones.normalize(str(item["phone"]), lenient=True).e164
-            if e164:
-                e164_of[key] = e164
-    also_in.attach(db, viewer, "spin", data["items"], key_of=lambda i: i.get(pk), e164_of=e164_of)
-    return {**data, "page": page, "page_size": page_size}
+    """Spin leads (live workflow rows and every CRM spin lead): see `list_page`."""
+    return list_page(viewer, db, f, page, page_size, sort, order, SPIN)
 
 
-def merged_page(db, start: int, length: int, search, sort, order, branch, filters: dict, use_cache: bool = True) -> dict:
-    """Rows [start, start + length) of the combined spin list, with CRM details and branch.
+def merged_page(db, start: int, length: int, search, sort, order, branch, filters: dict, use_cache: bool = True,
+                flow: str = SPIN) -> dict:
+    """Rows [start, start + length) of the combined list of a flow, with CRM details and branch.
 
     Spin leads added/imported in the CRM (MySQL, archived ones left out) come first, then the
     workflow leads (PostgreSQL); paging runs over both. The CRM ones are read fresh every time.
@@ -722,18 +956,20 @@ def merged_page(db, start: int, length: int, search, sort, order, branch, filter
     from app.services import crm_spin_leads, lead_crm
     from app.services.branches import branches_by_id
 
-    added = crm_spin_leads.matching(db, search, sort, order, branch, filters)
+    added = crm_spin_leads.matching(db, search, sort, order, branch, filters, flow)
     added_page = added[start:start + length]
     pg_offset = max(0, start - len(added))
     pg_limit = length - len(added_page)
 
     if filters or not use_cache:
         # Filters that use the CRM's own data change whenever someone edits a lead: no cache
-        data = list_spin_leads(None, 1, length, search, sort, order, branch, filters or None, pg_offset, pg_limit)
+        data = list_spin_leads(None, 1, length, search, sort, order, branch, filters or None, pg_offset, pg_limit,
+                               flow=flow)
     else:
         data = response_cache.get(
-            _cache_key(pg_offset, pg_limit, search, sort, order, branch),
-            lambda: list_spin_leads(None, 1, length, search, sort, order, branch, None, pg_offset, pg_limit),
+            _cache_key(pg_offset, pg_limit, search, sort, order, branch, flow),
+            lambda: list_spin_leads(None, 1, length, search, sort, order, branch, None, pg_offset, pg_limit,
+                                    flow=flow),
             fresh=FRESH_SECONDS,
             stale=STALE_SECONDS,
         )
@@ -751,14 +987,26 @@ def merged_page(db, start: int, length: int, search, sort, order, branch, filter
     def branch_of(item):
         return branches.get(str(item.get(branch_key))) if branch_key and item.get(branch_key) is not None else None
 
+    # Gift leads also go to the gifts partner (lead_crm.PARTNER_RULES): CRM leads from their details,
+    # workflow rows from their otherWeddingServices field; received = created_at
+    gift_keys = {lead.lead_key for lead in added_page if is_gift_details(lead.additional_details)}
+    services_key = next((c["name"] for c in data["columns"] if _norm_name(c["name"]) == _norm_name(GIFT_KEY)), None)
+
+    def gift_of(item) -> bool:
+        if str(item.get(pk)) in gift_keys:
+            return True
+        return item.get("origin") == "workflow" and bool(services_key) and is_gift(item.get(services_key))
+
     items = lead_crm.attach(
         db,
-        "spin",
+        flow,
         items,
         key=lambda i: i.get(pk),
         location=lambda i: (i.get(city_key) if city_key else None) or ((branch_of(i) or {}).get("city")),
         pincode=lambda i: str(i.get(pin_key) or "") if pin_key else None,
         branch_vendor=lambda i: (branch_of(i) or {}).get("vendor_id"),
+        gift=gift_of if flow == SPIN else None,
+        received=lambda i: i.get("created_at"),
     )
     # The lead's branch (store), from the Branches page
     for item in items:

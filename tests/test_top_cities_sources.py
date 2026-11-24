@@ -180,7 +180,7 @@ class ParseSourcesTests(unittest.TestCase):
             lead_sources.parse_sources("spin,foo,bar")
         self.assertEqual(unknown.exception.detail,
                          "Unknown source(s): bar, foo. Allowed: spin, whatsapp, wedding, wedding_planner, "
-                         "vendor_to_koc, dhruva")
+                         "vendor_to_koc, dhruva, koc_to_dhruva")
 
 
 if __name__ == "__main__":

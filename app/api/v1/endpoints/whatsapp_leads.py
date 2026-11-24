@@ -84,7 +84,7 @@ def list_whatsapp_leads(
         select(WhatsAppLead).where(*filters).order_by(*ordering(sort, order))
         .offset((page - 1) * page_size).limit(page_size)
     ).all()
-    items = attach_crm(db, [_out(r) for r in rows])
+    items = [lead_crm.for_viewer(i, viewer) for i in attach_crm(db, [_out(r) for r in rows])]   # vendors: own copy
     keys = [i["lead_key"] for i in items]
     also_in.attach(db, viewer, "whatsapp", items, key_of=lambda i: i["lead_key"],
                    e164_of=also_in.page_phones(db, "whatsapp", keys))
@@ -156,7 +156,7 @@ def whatsapp_lead_stats(viewer: LeadViewer, db: DbSession, f: Filters):
         "last_7_days": last_7_days,
         "upcoming_events": upcoming_events,
         "top_countries": [{"country": c, "count": n} for c, n in top_countries],
-        "kpis": kpis.for_keys(db, "whatsapp", db.exec(select(WhatsAppLead.sheet_key).where(active)).all()),
+        "kpis": kpis.for_keys(db, "whatsapp", db.exec(select(WhatsAppLead.sheet_key).where(active)).all(), lead_crm.viewer_copy(viewer)),
     }
 
 
@@ -170,6 +170,6 @@ def whatsapp_filter_options(viewer: LeadViewer, db: DbSession):
     return {
         "countries": lead_filters.counted((r[1] or "").strip() for r in rows),
         "origins": [{"value": o, "count": sum(1 for r in rows if r[2] == o)} for o in lead_filters.SHEET_ORIGINS],
-        "updates": lead_filters.update_options(db, "whatsapp", {r[0] for r in rows}),
+        "updates": lead_filters.update_options(db, "whatsapp", {r[0] for r in rows}, viewer),
         "vendors": lead_filters.vendor_options(db, viewer),
     }

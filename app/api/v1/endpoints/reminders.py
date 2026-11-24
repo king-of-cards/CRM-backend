@@ -37,17 +37,19 @@ def _details_for_crm_source(db: Session, source: str, keys: set[str]) -> dict[st
             WeddingPlan.plan_id.in_(keys), WeddingPlan.is_deleted == False)).all()  # noqa: E712
         return {str(k): (name, phone) for k, name, phone in rows}
     from app.models.crm_spin_lead import CrmSpinLead
+    from app.models.koc_dhruva_lead import KOC_KEY_PREFIX, KocDhruvaLead
     from app.models.lead_origin import CRM_KEY_PREFIX
-    local = {k for k in keys if k.startswith(CRM_KEY_PREFIX)}
+    # spin: CRM spin leads (crm-<id>); koc_to_dhruva: its uploaded rows (kd-<id>)
+    model, prefix = (KocDhruvaLead, KOC_KEY_PREFIX) if source == "koc_to_dhruva" else (CrmSpinLead, CRM_KEY_PREFIX)
     output = {}
-    ids = [int(k[len(CRM_KEY_PREFIX):]) for k in local if k[len(CRM_KEY_PREFIX):].isdigit()]
+    ids = [int(k[len(prefix):]) for k in keys if k.startswith(prefix) and k[len(prefix):].isdigit()]
     if ids:
-        for row in db.exec(select(CrmSpinLead).where(CrmSpinLead.id.in_(ids), CrmSpinLead.is_deleted == False)):  # noqa: E712
+        for row in db.exec(select(model).where(model.id.in_(ids), model.is_deleted == False)):  # noqa: E712
             output[row.lead_key] = (row.name, row.phone)
     return output
 
 
-def _workflow_spin_details(keys: list[str]) -> dict[str, tuple[str | None, str | None]]:
+def _workflow_spin_details(keys: list[str], flow: str = "spin") -> dict[str, tuple[str | None, str | None]]:
     """Read workflow names and phones in capped batches through the existing Spin list query."""
     if not keys:
         return {}
@@ -56,7 +58,8 @@ def _workflow_spin_details(keys: list[str]) -> dict[str, tuple[str | None, str |
     for start in range(0, len(keys), 200):
         batch = keys[start:start + 200]
         try:
-            result = sl.list_spin_leads(None, 1, len(batch), filters={"ids_in": batch}, offset=0, limit=len(batch))
+            result = sl.list_spin_leads(None, 1, len(batch), filters={"ids_in": batch}, offset=0, limit=len(batch),
+                                        flow=flow)
         except Exception:
             logger.exception("Could not load workflow Spin reminder details")
             continue
@@ -78,28 +81,42 @@ def _workflow_spin_details(keys: list[str]) -> dict[str, tuple[str | None, str |
 def _reminder_rows(db: Session, viewer: Viewer | None, dhruva_only: bool = False) -> list[dict]:
     today = periods.today_ist()
     rows: list[dict] = []
-    for source in ("spin", "whatsapp", "wedding", "wedding_planner"):
+    # koc_to_dhruva: the Dhruva section's copy of spin leads; access hides it from vendor logins
+    for source in ("spin", "whatsapp", "wedding", "wedding_planner", "koc_to_dhruva"):
         visible = access.visible_keys(db, viewer, source) if viewer is not None else None
-        assignments = access.assignments(db, source) if viewer is not None else {}
+        # koc_to_dhruva is read without a viewer too (the Dhruva reminders endpoint)
+        assignments = access.assignments(db, source) if viewer is not None or source == "koc_to_dhruva" else {}
         metas = list(db.exec(select(LeadMeta).where(LeadMeta.source == source, LeadMeta.follow_up_date.is_not(None))))
         existing_keys = set(assignments)
+        own = getattr(viewer, "vendor_id", None) if viewer is not None and not viewer.sees_all else None
+
+        def counts(m) -> bool:
+            # One reminder per vendor copy with a follow-up (the vendor-less row too): a vendor login
+            # only its own copy; a copy of a vendor that no longer has the lead is left out
+            copy = m.copy_vendor_id or 0
+            if own is not None:
+                return copy == own
+            return copy == 0 or copy in (assignments.get(m.lead_key) or [])
         candidate = [m for m in metas if m.lead_key in existing_keys
-                     and (visible is None or m.lead_key in visible)
+                     and (visible is None or m.lead_key in visible) and counts(m)
                      and m.update_status not in {"converted", "not_interested"}]
         keys = {m.lead_key for m in candidate}
         details = _details_for_crm_source(db, source, keys)
-        if source == "spin":
+        if source in ("spin", "koc_to_dhruva"):
+            # spin: live rows only (the assignment map already leaves out rows before the cut-off)
             workflow = [key for key in keys if not key.startswith("crm-") and key.isdigit()]
-            details.update(_workflow_spin_details(workflow))
+            details.update(_workflow_spin_details(workflow, source))
         vendor_by_id = {v.id: v.name for v in db.exec(select(Vendor))} if viewer is None or viewer.sees_all else {}
         for meta in candidate:
             detail = details.get(meta.lead_key)
             if detail is None:
                 continue
             name, phone = detail
-            assigned = assignments.get(meta.lead_key)
+            vendor_ids = assignments.get(meta.lead_key) or []
+            assigned = meta.copy_vendor_id or (vendor_ids[0] if vendor_ids else None)   # the copy's vendor
             rows.append({"source": source, "lead_key": meta.lead_key, "name": name, "phone": phone,
                          "follow_up_date": meta.follow_up_date, "update_status": meta.update_status,
+                         "vendor_id": meta.copy_vendor_id or None,
                          "vendor_name": vendor_by_id.get(assigned) if viewer is not None and viewer.sees_all else None})
 
     vtk_stmt = select(VendorToKocLead, Vendor.name).join(Vendor, Vendor.id == VendorToKocLead.vendor_id)
@@ -137,7 +154,8 @@ def _make_response(rows: list[dict], days: int, admin: bool) -> dict:
     for row in kept:
         item = {"source": row["source"], "lead_key": row["lead_key"], "name": row["name"],
                 "phone": row["phone"], "follow_up_date": row["follow_up_date"].isoformat(),
-                "days_overdue": (today - row["follow_up_date"]).days}
+                "days_overdue": (today - row["follow_up_date"]).days,
+                "vendor_id": row.get("vendor_id")}     # whose copy (KOC -> Vendors leads; None: the lead's own row)
         if admin:
             item["update_status"] = row["update_status"]
             if row["source"] != "dhruva":

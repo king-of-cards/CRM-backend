@@ -7,7 +7,9 @@ column. Values are what the screen shows:
   date-times   14 Nov 2026, 10:30 am (India time; xlsx: datetime cells)
   phones       +919845012345         (text)
   money        full rupees           (xlsx: number cells with a ₹ format)
-  Assigned to  the chip text: "Phodeo", "Phodeo · auto" or "Unassigned" (admins only)
+  Assigned to  the chips' text: every vendor ("Phodeo, Kraftyz · auto") or "Unassigned" (admins only)
+  Vendor updates  each vendor's own Update and amounts (admins only); the Update / amount columns
+               are the overall values (best Update, amounts summed); vendor logins get their own copy
 The template and the upload parser use the same headers (see fields.py), so an exported file
 can be uploaded back.
 """
@@ -71,9 +73,30 @@ def _g(key: str) -> Callable[[dict], Any]:
 
 
 ASSIGNED_HEADER = "Assigned to"         # left out of vendor logins' exports
+VENDOR_UPDATES_HEADER = "Vendor updates"  # admins only: each vendor's own copy
+ADMIN_ONLY_HEADERS = (ASSIGNED_HEADER, VENDOR_UPDATES_HEADER)
 HOT_COLUMN: Col = ("Hot", lambda i: bool(i.get("is_hot")), "yesno")
+
+
+def vendor_updates(item: dict) -> str:
+    """Each vendor's copy in one cell: "Phodeo: Interested, quoted ₹50000; Kraftyz: Pending"."""
+    parts = []
+    for entry in (item.get("crm") or {}).get("vendors") or []:
+        if not entry.get("vendor"):
+            continue
+        status = entry.get("update_status")
+        text = f"{entry['vendor']['name']}: {UPDATE_LABELS.get(status, status)}"
+        if entry.get("quoted_amount") is not None:
+            text += f", quoted ₹{entry['quoted_amount']}"
+        if entry.get("conversion_amount") is not None:
+            text += f", conversion ₹{entry['conversion_amount']}"
+        parts.append(text)
+    return "; ".join(parts)
+
+
 CRM_COLUMNS: list[Col] = [
     (ASSIGNED_HEADER, lambda i: assigned_label(i.get("crm")), "text"),
+    (VENDOR_UPDATES_HEADER, vendor_updates, "text"),
     ("Update", lambda i: UPDATE_LABELS.get(_crm(i, "update_status"), _crm(i, "update_status")), "text"),
     ("Quoted amount", lambda i: _crm(i, "quoted_amount"), "money"),
     ("Quoted date", lambda i: to_date(_crm(i, "quoted_date")), "date"),
@@ -134,6 +157,8 @@ _SPIN_FIELDS = {
     "pincode": ["pincode", "pin", "zipcode"],
     "city": ["city", "location", "eventcity"],
     "budget": ["estimatedbudgetpercard", "servicebudget", "budget"],
+    "other_services": ["otherweddingservices"],
+    "quantity": ["quantityrequired"],
     "created": ["createdat", "created", "createdon", "submittedat"],
 }
 
@@ -198,19 +223,35 @@ def spin_columns(columns_meta: list[dict], branches: list[dict] | None = None) -
         ("Occasion", lambda i: val(i, "occasion"), "text"),
         ("Event date", lambda i: date_or_text(val(i, "event_date"), val(i, "event_date")), "date"),
         ("Budget", lambda i: _spin_budget(val(i, "budget"), f["budget"]), "text"),
+        ("Other wedding services", lambda i: val(i, "other_services"), "text"),
+        ("Quantity required", lambda i: val(i, "quantity"), "text"),
         *CRM_COLUMNS,
         ("Created", lambda i: to_datetime(val(i, "created")), "datetime"),
     ]
 
 
+# KOC -> Dhruva upload template: its export's columns (koc_to_dhruva.EXPORT_COLUMNS) without "Sl. No"
+KOC_TEMPLATE_COLUMNS: list[tuple[str, str]] = [
+    ("Name", "text"), ("Phone", "phone"), ("Email", "text"), ("Occasion", "text"), ("Event date", "date"),
+    ("Branch", "text"), ("Branch code", "text"), ("Estimated budget per card", "text"), ("Quantity required", "int"),
+    ("Received", "datetime"), ("Update", "text"), ("Additional comments", "text"), ("Quoted amount", "money"),
+    ("Quoted date", "date"), ("Conversion amount", "money"), ("Follow-up date", "date"), ("Hot", "yesno"),
+    ("Source", "text"), ("Relation", "text"),              # optional upload columns, not in the export
+]
+
+
 def headers(source: str) -> list[str]:
     """The column headers of a source's export and template."""
+    if source == "koc_to_dhruva":
+        return [h for h, _ in KOC_TEMPLATE_COLUMNS]
     if source == "spin":
         return [c[0] for c in spin_columns([])]
     return [c[0] for c in SHEET_COLUMNS[source]]
 
 
 def kinds(source: str) -> list[str]:
+    if source == "koc_to_dhruva":
+        return [k for _, k in KOC_TEMPLATE_COLUMNS]
     cols = spin_columns([]) if source == "spin" else SHEET_COLUMNS[source]
     return [c[2] for c in cols]
 

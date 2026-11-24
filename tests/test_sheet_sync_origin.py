@@ -211,10 +211,13 @@ class SheetSyncOriginTest(unittest.TestCase):
                              expected_wedding)
             self.assertEqual(s.exec(select(WeddingPlan.phone_e164).where(WeddingPlan.origin == ORIGIN_SHEET)).one(),
                              "+447911123499")
-            # An upload of the same number (as exported, with "+") is recognised as the existing sheet lead
+            # An upload of the same lead (the number as exported, with "+") is recognised as the existing sheet lead
+            from app.services.crm_leads.fields import from_model
             for source, phone, key in (("wedding", "+447911123456", uk_key),
                                        ("wedding_planner", "+447911123499", "KOC-UKNOPLUS")):
-                results, _, _ = service.check_rows(s, source, [(2, {"phone": phone})])
+                model, key_col = (WeddingLead, WeddingLead.sheet_key) if source == "wedding" else (WeddingPlan, WeddingPlan.plan_id)
+                values = {**from_model(source, s.exec(select(model).where(key_col == key)).one()), "phone": phone}
+                results, _, _ = service.check_rows(s, source, [(2, values)])
                 self.assertEqual((results[0]["status"], results[0]["duplicate"]),
                                  ("duplicate", {"reason": "existing_sheet", "lead_key": key}))
 

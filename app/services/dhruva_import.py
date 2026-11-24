@@ -1,31 +1,26 @@
-"""Reading Dhruva lead files and checking leads (upload preview, bulk save, add, edit).
+"""Reading Dhruva -> KOC lead files and checking leads (upload preview, bulk save, add, edit).
 
-Files: .xlsx (any sheet: sheet_name, default the first) or .csv. Title rows above the headings
-("Updated on 12th Nov") are skipped: the heading row is the first one where at least two cells are
-known headings. Headings are matched ignoring case, spaces and punctuation:
+Files: .xlsx (the sheet "Leads", else the first sheet) or .csv. The first row holds the headings,
+exactly the template's (any case, spaces and punctuation ignored):
 
-    SL NO / SLNO / Sl. No              ignored
-    Name                               name
-    Venue                              venue
-    Date / Event date                  date (as typed)
-    Contact No / MOBILE NO / Phone     phone (the cell may hold two numbers)
-    Alt phone / Alternate phone        alt_phone
-    Event Type                         event_type
+    Name, Phone numbers, Event date, Event type, Venue, WhatsApp status, Response,
+    Message sent, Follow-up notes, Comments, Needs Dhruva intervention, Update, Quoted amount,
+    Conversion amount, Follow-up date
 
-Other columns are ignored (and reported). Values:
+Other columns (e.g. an export's Sl. No, Sent at, Hot) are ignored and reported. Values:
 
-  name, venue   whitespace (line breaks too) collapsed to single spaces
-  event_type    trimmed; line breaks become ", " ("reception\nmuhurtham" -> "reception, muhurtham")
-  phone         split on line breaks, "," "/" ";": the first number is phone, the second alt_phone;
-                Excel numbers (9845012345.0) become text; "nil", "na", "-" = no phone. Indian
-                numbers may skip +91; others need their country code. More than two: an error.
-  date          a real Excel date, DD-MM-YYYY, YYYY-MM-DD, or text with one day and one month
-                ("Dec 4th", "12th Dec", "Feb 28th, Tentative date", "April 23rd 2027"). Without a
-                year: the next time that day comes (today included), from the day it's entered.
-                Ranges and choices ("Jan 22nd -24th 2027", "Dec 5th or 6th"), a month alone
-                ("March") and "Nil" stay text only (event_date empty).
-
-A lead needs a name or a phone. Rows without a phone are allowed and flagged "no_phone".
+  name                required; whitespace collapsed
+  phone numbers       optional; any number of them, comma-separated (also ";", "/" or line
+                      breaks), 10 digits each (+91 / 91 / 0 in front and spaces are dropped);
+                      repeats dropped, order kept
+  event date          one or more real dates as YYYY-MM-DD, comma-separated ("2026-12-04, 2026-12-05");
+                      an Excel date cell also works; sorted, repeats dropped
+  update              a key (will_call_back) or its label (Will call back); empty / Pending = none
+  amounts             rupees: 150000, 1,50,000, ₹1,50,000, 1.5 lakh
+  needs intervention  Yes / No (empty = No)
+  follow-up date      2026-12-04, 04-12-2026 or 4 Dec 2026
+  other text          one line; notes, comments and response keep their line breaks
+N/A-like values ("N/A", "-", "nil", …) are empty everywhere.
 """
 import csv
 import io
@@ -34,30 +29,40 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any
 
-from app.models.dhruva import DATE_TEXT_MAX, EVENT_TYPE_MAX, NAME_MAX, PHONE_MAX, VENUE_MAX
-from app.services import phones
+from app.models.dhruva import (
+    EVENT_TYPE_MAX, MAX_EVENT_DATES, MAX_PHONES, MESSAGE_SENT_MAX, NAME_MAX, NOTES_MAX, VENUE_MAX,
+    WHATSAPP_STATUS_MAX,
+)
 
 MAX_FILE_BYTES = 5 * 1024 * 1024
 MAX_ROWS = 5000
-HEADING_SCAN_ROWS = 15
+SHEET_NAME = "Leads"
 
-HEADINGS: dict[str, tuple[str, ...]] = {
-    "sl_no": ("slno", "sl", "srno", "serialno", "no"),
-    "name": ("name", "customername", "clientname", "fullname"),
-    "venue": ("venue", "eventvenue", "location"),
-    "date": ("date", "eventdate", "dateofevent"),
-    "phone": ("contactno", "contactnumber", "contact", "mobileno", "mobilenumber", "mobile", "phone",
-              "phoneno", "phonenumber"),
-    "alt_phone": ("altphone", "alternatephone", "alternatenumber", "altno", "alternateno"),
-    "event_type": ("eventtype", "event", "typeofevent", "occasion"),
+# (field key, template heading), in template order
+HEADINGS: tuple[tuple[str, str], ...] = (
+    ("name", "Name"), ("phones", "Phone numbers"), ("event_dates", "Event date"),
+    ("event_type", "Event type"), ("venue", "Venue"), ("whatsapp_status", "WhatsApp status"),
+    ("response", "Response"), ("message_sent", "Message sent"), ("follow_up_notes", "Follow-up notes"),
+    ("comments", "Comments"), ("needs_intervention", "Needs Dhruva intervention"), ("update_status", "Update"),
+    ("quoted_amount", "Quoted amount"), ("conversion_amount", "Conversion amount"),
+    ("follow_up_date", "Follow-up date"),
+)
+FIELDS = tuple(key for key, _ in HEADINGS)
+LABELS = dict(HEADINGS)
+TEXT_LIMITS = {"name": NAME_MAX, "venue": VENUE_MAX, "event_type": EVENT_TYPE_MAX,
+               "whatsapp_status": WHATSAPP_STATUS_MAX, "message_sent": MESSAGE_SENT_MAX,
+               "response": NOTES_MAX, "follow_up_notes": NOTES_MAX, "comments": NOTES_MAX}
+MULTILINE = {"response", "follow_up_notes", "comments"}
+
+MSG_NAME = "Name is required"
+MSG_PHONE = "Each phone number must have 10 digits (comma-separated)"
+MSG_DATES = "Use real dates as YYYY-MM-DD, comma-separated (e.g. 2026-12-04, 2026-12-05)"
+TEMPLATE_EXAMPLE = {
+    "name": "Example Name", "phones": "9876543210, 9876543211", "event_dates": "2026-12-04, 2026-12-05",
+    "event_type": "Wedding", "venue": "Example Venue", "whatsapp_status": "Delivered", "response": "Interested",
+    "message_sent": "Yes", "follow_up_notes": "Call after 6 pm", "comments": "", "needs_intervention": "No",
+    "update_status": "Interested", "quoted_amount": "45000", "conversion_amount": "", "follow_up_date": "2026-11-25",
 }
-FIELDS = ("name", "venue", "date", "phone", "alt_phone", "event_type")
-NO_VALUE = {"", "nil", "na", "n/a", "none", "-", "--", "nill", "null"}
-
-MSG_TOO_MANY_PHONES = "At most two numbers (phone and alternate phone)"
-MSG_NAME_OR_PHONE = "A name or a phone is required"
-TEMPLATE_EXAMPLE = {"name": "Example Name", "venue": "Example Venue", "date": "4 Dec 2026",
-                    "phone": "9876543210", "alt_phone": "", "event_type": "wedding"}
 EXAMPLE_ROW_ERROR = {"field": "name", "message": "This is the example row from the template; delete it"}
 
 
@@ -71,11 +76,12 @@ def norm(text: Any) -> str:
     return re.sub(r"[^a-z0-9]", "", str(text or "").lower())
 
 
-_HEADING_KEY = {alias: key for key, aliases in HEADINGS.items() for alias in aliases}
+_HEADING_KEY = {norm(label): key for key, label in HEADINGS}
+_IGNORED_SILENTLY = {"slno", "sl", "srno"}
 
 
 # ── Files ──────────────────────────────────────────────────────────────
-def _xlsx_rows(content: bytes, sheet_name: str | None) -> tuple[list[list[Any]], list[str]]:
+def _xlsx_rows(content: bytes, sheet_name: str | None) -> tuple[list[list[Any]], list[str], str]:
     from openpyxl import load_workbook
 
     try:
@@ -83,17 +89,16 @@ def _xlsx_rows(content: bytes, sheet_name: str | None) -> tuple[list[list[Any]],
     except Exception:  # noqa: BLE001
         raise FileError("The file isn't a readable Excel (.xlsx) file.")
     names = wb.sheetnames
-    if sheet_name:
-        match = next((n for n in names if n == sheet_name), None) or \
-            next((n for n in names if n.strip().lower() == sheet_name.strip().lower()), None)
-        if match is None:
+    wanted = sheet_name or SHEET_NAME
+    match = next((n for n in names if n.strip().lower() == wanted.strip().lower()), None)
+    if match is None:
+        if sheet_name:
             raise FileError(f"No sheet named '{sheet_name}'. Sheets: {', '.join(names)}")
-        ws = wb[match]
-    else:
-        ws = wb[names[0]]
+        match = names[0]
+    ws = wb[match]
     rows = [list(r) for r in ws.iter_rows(values_only=True)]
     wb.close()
-    return rows, names
+    return rows, names, match
 
 
 def _csv_rows(content: bytes) -> list[list[Any]]:
@@ -131,48 +136,39 @@ def read_file(filename: str, content: bytes, sheet_name: str | None = None) -> F
         raise FileError("The file is empty.")
     name = (filename or "").lower()
     sheets: list[str] = []
+    sheet = None
     if content[:2] == b"PK" or name.endswith(".xlsx"):
-        rows, sheets = _xlsx_rows(content, sheet_name)
+        rows, sheets, sheet = _xlsx_rows(content, sheet_name)
     elif name.endswith((".csv", ".txt")) or not name:
         rows = _csv_rows(content)
     else:
         raise FileError("Upload an Excel (.xlsx) or CSV file.")
-
-    heading_index = None
-    for i, row in enumerate(rows[:HEADING_SCAN_ROWS]):
-        keys = {_HEADING_KEY.get(norm(v)) for v in row if not _blank(v)} - {None}
-        if len(keys - {"sl_no"}) >= 2:
-            heading_index = i
-            break
-    if heading_index is None:
-        raise FileError("No heading row found. Use headings like Name, Venue, Date, Contact No, Event Type.")
+    if not rows or all(_blank(v) for v in rows[0]):
+        raise FileError("The first row must hold the headings: " + ", ".join(LABELS.values()) + ".")
     mapping: dict[int, str] = {}
     columns: dict[str, str] = {}
     ignored: list[str] = []
-    for i, heading in enumerate(rows[heading_index]):
+    for i, heading in enumerate(rows[0]):
         if _blank(heading):
             continue
         key = _HEADING_KEY.get(norm(heading))
         written = str(heading).strip()
-        if key == "sl_no":
-            continue
         if key and key not in mapping.values():
             mapping[i] = key
             columns[written] = key
-        else:
+        elif norm(heading) not in _IGNORED_SILENTLY:
             ignored.append(written)
-    if not any(k in mapping.values() for k in ("phone", "name")):
-        raise FileError("The file needs a Name or a phone (Contact No / MOBILE NO / Phone) column.")
+    if "name" not in mapping.values():
+        raise FileError("The file has no Name column. Use the template's headings: " + ", ".join(LABELS.values()) + ".")
     data = []
-    for offset, row in enumerate(rows[heading_index + 1:], start=heading_index + 2):
+    for offset, row in enumerate(rows[1:], start=2):
         values = {key: (row[i] if i < len(row) else None) for i, key in mapping.items()}
         if all(_blank(v) for v in values.values()):
-            continue                                       # empty row (or only SL NO)
+            continue
         data.append((offset, values))
         if len(data) > MAX_ROWS:
             raise FileError(f"The file has more than {MAX_ROWS:,} rows. Split it into smaller files.")
-    sheet = (sheet_name or (sheets[0] if sheets else None)) if sheets else None
-    return FileRows(sheet, sheets, heading_index + 1, columns, ignored, data)
+    return FileRows(sheet, sheets, 1, columns, ignored, data)
 
 
 # ── Values ─────────────────────────────────────────────────────────────
@@ -180,106 +176,131 @@ def as_text(value: Any) -> str:
     if value is None:
         return ""
     if isinstance(value, bool):
-        return str(value)
+        return "Yes" if value else "No"
     if isinstance(value, float) and value.is_integer():
         value = int(value)
     if isinstance(value, datetime):
         value = value.date()
     if isinstance(value, date):
-        return f"{value.day} {value:%b %Y}"
+        return value.isoformat()
     return str(value)
 
 
-def one_line(value: Any) -> str | None:
-    text = re.sub(r"\s+", " ", as_text(value)).strip()
-    return text or None
+def _text(value: Any, multiline: bool) -> str | None:
+    from app.services.lead_values import is_na
+
+    raw = as_text(value)
+    if multiline:
+        text = "\n".join(re.sub(r"[ \t]+", " ", line).strip() for line in raw.strip().splitlines()).strip()
+    else:
+        text = re.sub(r"\s+", " ", raw).strip()
+    return None if is_na(text) else text
 
 
-def clean_event_type(value: Any) -> str | None:
-    parts = [re.sub(r"\s+", " ", p).strip(" ,") for p in re.split(r"[\r\n]+", as_text(value))]
-    text = ", ".join(p for p in parts if p)
-    return text or None
+def parse_phone(value: Any) -> tuple[str | None, str | None]:
+    """-> (10 digits or None, error or None)."""
+    from app.services.lead_values import is_na
 
-
-def split_phones(value: Any) -> list[str]:
-    """The numbers written in one cell (Excel numbers become text)."""
     text = as_text(value).strip()
-    if norm(text) in {norm(v) for v in NO_VALUE} or text.lower() in NO_VALUE:
-        return []
-    return [p.strip() for p in re.split(r"[\r\n,/;]+", text) if p.strip() and p.strip().lower() not in NO_VALUE]
+    if is_na(text):
+        return None, None
+    digits = re.sub(r"\D", "", text)
+    if len(digits) == 12 and digits.startswith("91"):
+        digits = digits[2:]
+    elif len(digits) == 11 and digits.startswith("0"):
+        digits = digits[1:]
+    if len(digits) != 10:
+        return None, MSG_PHONE
+    return digits, None
 
 
-_MONTHS = {m: i for i, names in enumerate(
-    (("jan", "january"), ("feb", "february"), ("mar", "march"), ("apr", "april"), ("may",), ("jun", "june"),
-     ("jul", "july"), ("aug", "august"), ("sep", "sept", "september"), ("oct", "october"),
-     ("nov", "november"), ("dec", "december")), start=1) for m in names}
-_MONTH_RE = re.compile(r"\b(" + "|".join(sorted(_MONTHS, key=len, reverse=True)) + r")\b", re.I)
-_DAY_RE = re.compile(r"(?<!\d)(\d{1,2})(?:st|nd|rd|th)?(?!\d)", re.I)
-_YEAR_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})(?!\d)")
-_NUMERIC_DATES = ((re.compile(r"^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$"), "dmy"),
-                  (re.compile(r"^(\d{4})-(\d{1,2})-(\d{1,2})$"), "ymd"))
+def parse_phones(value: Any) -> tuple[list[str], str | None]:
+    """-> (10-digit numbers, repeats dropped, order kept; error or None). A list, one number, or
+    text with the numbers separated by commas, ";", "/" or line breaks."""
+    from app.services.lead_values import is_na
+
+    items = value if isinstance(value, (list, tuple)) else [value]
+    found: list[str] = []
+    for item in items:
+        text = as_text(item).strip()
+        if is_na(text):
+            continue
+        for part in re.split(r"[,;/\n]+", text):
+            if is_na(part.strip()):
+                continue
+            digits, problem = parse_phone(part)
+            if problem:
+                return [], problem
+            if digits and digits not in found:
+                found.append(digits)
+    if len(found) > MAX_PHONES:
+        return [], f"At most {MAX_PHONES} phone numbers"
+    return found, None
 
 
-def _safe_date(year: int, month: int, day: int) -> date | None:
-    try:
-        return date(year, month, day)
-    except ValueError:
-        return None
+_ISO_DATE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
 
 
-def _next_occurrence(month: int, day: int, today: date) -> date | None:
-    for year in range(today.year, today.year + 9):          # Feb 29th: the next leap year
-        found = _safe_date(year, month, day)
-        if found and found >= today:
-            return found
-    return None
+def parse_event_dates(value: Any) -> tuple[list[date], str | None]:
+    """-> (sorted distinct dates, error or None). A list, one date, or comma-separated text."""
+    from app.services.lead_values import is_na
+
+    items = value if isinstance(value, (list, tuple)) else [value]
+    found: set[date] = set()
+    for item in items:
+        if isinstance(item, datetime):
+            found.add(item.date())
+            continue
+        if isinstance(item, date):
+            found.add(item)
+            continue
+        text = as_text(item).strip()
+        if is_na(text):
+            continue
+        for part in re.split(r"[,;\n]+", text):
+            part = part.strip()
+            if not part:
+                continue
+            m = _ISO_DATE.match(part)
+            if not m:
+                return [], MSG_DATES
+            try:
+                found.add(date(int(m.group(1)), int(m.group(2)), int(m.group(3))))
+            except ValueError:
+                return [], MSG_DATES
+    if len(found) > MAX_EVENT_DATES:
+        return [], f"At most {MAX_EVENT_DATES} event dates"
+    return sorted(found), None
 
 
-def parse_event_date(value: Any, today: date) -> tuple[date | None, str | None, str | None]:
-    """(event_date, event_date_text, error). Text that isn't one clear date stays text only."""
-    if isinstance(value, datetime):
-        value = value.date()
-    if isinstance(value, date):
-        return value, as_text(value), None
-    text = re.sub(r"\s+", " ", as_text(value)).strip()
-    if not text:
-        return None, None, None
-    if len(text) > DATE_TEXT_MAX:
-        return None, text, f"Longer than {DATE_TEXT_MAX} characters"
-    if text.lower() in NO_VALUE:
-        return None, text, None
-    for pattern, order in _NUMERIC_DATES:
-        m = pattern.match(text)
-        if m:
-            a, b, c = (int(g) for g in m.groups())
-            parsed = _safe_date(c, b, a) if order == "dmy" else _safe_date(a, b, c)
-            if parsed is None:
-                return None, text, "Not a real date"
-            return parsed, text, None
-    months = _MONTH_RE.findall(text)
-    years = _YEAR_RE.findall(text)
-    rest = _YEAR_RE.sub(" ", text)
-    days = [int(d) for d in _DAY_RE.findall(rest)]
-    if len(months) != 1 or len(days) != 1 or len(years) > 1:
-        return None, text, None                            # a month alone, a range, a choice: text only
-    month, day = _MONTHS[months[0].lower()], days[0]
-    if years:
-        return _safe_date(int(years[0]), month, day), text, None
-    return _next_occurrence(month, day, today), text, None
+def phones_text(phones: list[str]) -> str | None:
+    return ", ".join(phones) or None
+
+
+def dates_text(dates: list[date]) -> str | None:
+    return ", ".join(d.isoformat() for d in dates) or None
 
 
 # ── One lead ───────────────────────────────────────────────────────────
 @dataclass
 class CleanLead:
+    """A checked lead. present: the fields given (all of them for a new lead)."""
     name: str | None = None
-    venue: str | None = None
-    event_date: date | None = None
-    event_date_text: str | None = None
-    phone: str | None = None
-    alt_phone: str | None = None
-    phone_e164: str | None = None
-    alt_phone_e164: str | None = None
+    phones: list[str] = field(default_factory=list)
+    event_dates: list[date] = field(default_factory=list)
     event_type: str | None = None
+    venue: str | None = None
+    whatsapp_status: str | None = None
+    response: str | None = None
+    message_sent: str | None = None
+    follow_up_notes: str | None = None
+    comments: str | None = None
+    needs_intervention: bool = False
+    update_status: str | None = None
+    quoted_amount: int | None = None
+    conversion_amount: int | None = None
+    follow_up_date: date | None = None
+    present: set[str] = field(default_factory=set)
     errors: list[dict] = field(default_factory=list)
 
     @property
@@ -288,63 +309,74 @@ class CleanLead:
 
     @property
     def no_phone(self) -> bool:
-        return self.phone_e164 is None and self.alt_phone_e164 is None
+        return not self.phones
 
     @property
-    def e164s(self) -> set[str]:
-        return {e for e in (self.phone_e164, self.alt_phone_e164) if e}
+    def tails(self) -> set[str]:
+        """The phones' 10 digits (the duplicate check)."""
+        return set(self.phones)
+
+    @property
+    def first_date(self) -> date | None:
+        return self.event_dates[0] if self.event_dates else None
 
     def values(self) -> dict:
-        """What the preview sends back (the bulk save checks it again)."""
-        return {"name": self.name, "venue": self.venue, "date": self.event_date_text, "phone": self.phone,
-                "alt_phone": self.alt_phone, "event_type": self.event_type}
+        """What the preview sends back (the bulk save checks it again), in upload formats."""
+        return {
+            "name": self.name, "phones": phones_text(self.phones),
+            "event_dates": dates_text(self.event_dates), "event_type": self.event_type, "venue": self.venue,
+            "whatsapp_status": self.whatsapp_status, "response": self.response, "message_sent": self.message_sent,
+            "follow_up_notes": self.follow_up_notes, "comments": self.comments,
+            "needs_intervention": "Yes" if self.needs_intervention else "No", "update_status": self.update_status,
+            "quoted_amount": self.quoted_amount, "conversion_amount": self.conversion_amount,
+            "follow_up_date": self.follow_up_date.isoformat() if self.follow_up_date else None,
+        }
 
 
-def _limited(lead: CleanLead, key: str, value: str | None, limit: int) -> str | None:
-    if value is not None and len(value) > limit:
-        lead.errors.append({"field": key, "message": f"Longer than {limit} characters"})
-    return value
+def clean_lead(raw: dict[str, Any], keys: set[str] | None = None) -> CleanLead:
+    """Check a lead. keys: only these fields (an edit); None = every field (a new lead: Name required)."""
+    from app.services.crm_leads.fields import Invalid, parse_amount, parse_bool, parse_date, parse_update
+    from app.services.lead_values import is_na
 
+    wanted = set(FIELDS) if keys is None else set(keys) & set(FIELDS)
+    lead = CleanLead(present=wanted)
 
-def clean_phones(lead: CleanLead, phone_value: Any, alt_value: Any) -> None:
-    numbers = split_phones(phone_value) + split_phones(alt_value)
-    if len(numbers) > 2:
-        lead.errors.append({"field": "phone", "message": MSG_TOO_MANY_PHONES})
-        numbers = numbers[:2]
-    for key, number in zip(("phone", "alt_phone"), numbers):
-        setattr(lead, key, _limited(lead, key, number, PHONE_MAX))
-        parsed = phones.normalize(number)
-        if parsed.error:
-            lead.errors.append({"field": key, "message": parsed.error})
-        else:
-            setattr(lead, f"{key}_e164", parsed.e164)
-    if lead.phone_e164 and lead.phone_e164 == lead.alt_phone_e164:
-        lead.alt_phone, lead.alt_phone_e164 = None, None          # the same number twice
+    def error(key: str, message: str) -> None:
+        lead.errors.append({"field": key, "message": message})
 
-
-def clean_lead(raw: dict[str, Any], today: date) -> CleanLead:
-    lead = CleanLead()
-    lead.name = _limited(lead, "name", one_line(raw.get("name")), NAME_MAX)
-    lead.venue = _limited(lead, "venue", one_line(raw.get("venue")), VENUE_MAX)
-    lead.event_type = _limited(lead, "event_type", clean_event_type(raw.get("event_type")), EVENT_TYPE_MAX)
-    lead.event_date, lead.event_date_text, error = parse_event_date(raw.get("date"), today)
-    if error:
-        lead.errors.append({"field": "date", "message": error})
-    clean_phones(lead, raw.get("phone"), raw.get("alt_phone"))
-    if not lead.name and not split_phones(raw.get("phone")) and not split_phones(raw.get("alt_phone")):
-        lead.errors.append({"field": "name", "message": MSG_NAME_OR_PHONE})
+    for key in wanted:
+        value = raw.get(key)
+        try:
+            if key in TEXT_LIMITS:
+                text = _text(value, key in MULTILINE)
+                if text is not None and len(text) > TEXT_LIMITS[key]:
+                    raise Invalid(f"Longer than {TEXT_LIMITS[key]} characters")
+                setattr(lead, key, text)
+            elif key == "phones":
+                numbers, problem = parse_phones(value)
+                if problem:
+                    raise Invalid(problem)
+                lead.phones = numbers
+            elif key == "event_dates":
+                dates, problem = parse_event_dates(value)
+                if problem:
+                    raise Invalid(problem)
+                lead.event_dates = dates
+            elif key == "needs_intervention":
+                lead.needs_intervention = False if is_na(as_text(value)) else parse_bool(value)
+            elif key == "update_status":
+                lead.update_status = parse_update(value)
+            elif key in ("quoted_amount", "conversion_amount"):
+                setattr(lead, key, None if is_na(as_text(value)) else parse_amount(value))
+            elif key == "follow_up_date":
+                lead.follow_up_date = None if is_na(as_text(value)) else parse_date(value)
+        except Invalid as exc:
+            error(key, str(exc))
+    if "name" in wanted and not lead.name:
+        error("name", MSG_NAME)
     return lead
 
 
 def is_template_example(lead: CleanLead) -> bool:
     e = TEMPLATE_EXAMPLE
-    return (lead.name == e["name"] and lead.venue == e["venue"] and (lead.phone or "") == e["phone"])
-
-
-def name_date_key(name: str | None, event_date: date | None, event_date_text: str | None) -> tuple | None:
-    """Duplicate key for leads without a phone: the name (any case/spacing) and the event date
-    (the date when known, else the date text)."""
-    if not name:
-        return None
-    when = event_date.isoformat() if event_date else norm(event_date_text)
-    return norm(name), when
+    return lead.name == e["name"] and lead.venue == e["venue"] and phones_text(lead.phones) == e["phones"]

@@ -100,14 +100,17 @@ def upload_preview(
     leads = [(row, flag_template_example(
                   validate_lead(v["name"], v["date"], v["phone"], v["city"], parse_file_date)))
              for row, v in rows]
-    existing = crud.existing_phones(
+    existing = crud.existing_keys(
         db, vendor.id, {lead.phone for _, lead in leads if _phone_ok(lead.phone)})
-    seen: set[str] = set()
+    seen = crud.LeadKeys()
     out, valid, invalid, duplicates = [], 0, 0, 0
     for row, lead in leads:
-        duplicate = _phone_ok(lead.phone) and (lead.phone in existing or lead.phone in seen)
+        # A duplicate: the same phone, and no filled name / date / city differing from this vendor's
+        # lead or an earlier row
+        key = crud.lead_key(lead)
+        duplicate = _phone_ok(lead.phone) and (key in existing or key in seen)
         if lead.ok:
-            seen.add(lead.phone)
+            seen.add(key)
             if duplicate:
                 duplicates += 1
             else:
@@ -128,7 +131,7 @@ def bulk_create_leads(body: LeadBulkCreate, db: DbSession, scope: VendorLogin):
     skips duplicates."""
     vendor = _target_vendor(db, scope)
     errors, failed, duplicates = [], 0, 0
-    seen: set[str] = set()
+    seen = crud.LeadKeys()
     valid = []
     for index, item in enumerate(body.leads):
         lead = flag_template_example(
@@ -136,22 +139,19 @@ def bulk_create_leads(body: LeadBulkCreate, db: DbSession, scope: VendorLogin):
         if not lead.ok:
             failed += 1
             errors.extend({"index": index, **e} for e in lead.errors)
-        elif lead.phone in seen:
+        elif crud.lead_key(lead) in seen:
             duplicates += 1
         else:
-            seen.add(lead.phone)
+            seen.add(crud.lead_key(lead))
             valid.append(lead)
-    existing = crud.existing_phones(db, vendor.id, {lead.phone for lead in valid})
-    new = [lead for lead in valid if lead.phone not in existing]
-    added = crud.insert_ignoring_duplicates(db, vendor.id, new, scope.user.id) if new else 0
+    existing = crud.existing_keys(db, vendor.id, {lead.phone for lead in valid})
+    new = [lead for lead in valid if crud.lead_key(lead) not in existing]
+    saved = crud.insert_new(db, vendor.id, new, scope.user.id) if new else []
+    added = len(saved)
     if added:
-        saved = list(db.exec(select(VendorToKocLead).where(VendorToKocLead.vendor_id == vendor.id,
-            VendorToKocLead.phone.in_([item.phone for item in new]),
-            VendorToKocLead.source == "bulk_upload", VendorToKocLead.created_by == scope.user.id)))
-        for row in saved:
-            lead_activity.log_action(db, source="vendor_to_koc", lead_key=str(row.id), action="created",
-                field="name", old=None, new=row.name, actor_user_id=scope.user.id,
-                actor_name=scope.user.name, actor_role=scope.user.role)
+        lead_activity.log_actions(db, [{"source": "vendor_to_koc", "lead_key": str(row.id), "action": "created",
+                                        "field": "name", "old": None, "new": row.name} for row in saved],
+                                  actor_user_id=scope.user.id, actor_name=scope.user.name, actor_role=scope.user.role)
     duplicates += len(valid) - added           # in the database before, or saved meanwhile
     if added:
         try:
@@ -176,9 +176,9 @@ def create_lead(body: LeadCreate, db: DbSession, scope: VendorLogin):
         lead_id = crud.create_lead(db, vendor.id, lead, scope.user.id)
     except crud.DuplicateLead:
         raise HTTPException(status.HTTP_409_CONFLICT,
-                            "A lead with this phone already exists for this vendor")
-    lead, vendor_name, updater_name = crud.get_lead(db, lead_id)
-    response = crud.serialize(lead, vendor_name, False, updater_name)
+                            "This lead already exists for this vendor (the same phone, name, date and city)")
+    lead, vendor_name, updater_name, creator_name = crud.get_lead(db, lead_id)
+    response = crud.serialize(lead, vendor_name, False, updater_name, creator_name)
     lead_name = lead.name
     lead_activity.log_action(db, source="vendor_to_koc", lead_key=str(lead_id), action="created",
         field="name", old=None, new=lead.name, actor_user_id=scope.user.id,
@@ -326,8 +326,8 @@ def get_lead(lead_id: int, db: DbSession, scope: LeadViewer):
     found = crud.get_lead(db, lead_id, vendor_id=None if scope.sees_all else scope.vendor_id)
     if found is None:       # also for another vendor's lead, so its existence isn't revealed
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Lead not found")
-    lead, vendor_name, updater_name = found
-    return crud.serialize(lead, vendor_name, scope.sees_all, updater_name)
+    lead, vendor_name, updater_name, creator_name = found
+    return crud.serialize(lead, vendor_name, scope.sees_all, updater_name, creator_name)
 
 
 @router.post("/leads/{lead_id}/hot")
@@ -376,8 +376,8 @@ def update_lead(lead_id: int, body: LeadUpdate, db: DbSession, admin: AdminUser)
     lead_activity.log_changes(db, source="vendor_to_koc", lead_key=str(lead_id),
         changes={k: (before[k], getattr(found[0], k)) for k in changes}, actor_user_id=admin.id,
         actor_name=admin.name, actor_role=admin.role)
-    lead, vendor_name, updater_name = crud.get_lead(db, lead_id)
-    return crud.serialize(lead, vendor_name, True, updater_name)
+    lead, vendor_name, updater_name, creator_name = crud.get_lead(db, lead_id)
+    return crud.serialize(lead, vendor_name, True, updater_name, creator_name)
 
 
 @router.get("/leads/{lead_id}/activity")

@@ -1,4 +1,5 @@
 import os
+from datetime import date, datetime
 from typing import Literal
 from urllib.parse import quote_plus
 
@@ -72,6 +73,17 @@ class Settings(BaseSettings):
 
     # Frontend origins allowed to call the API (CORS) and to use the refresh cookie (CSRF check)
     CORS_ORIGINS: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
+
+    # Spin gift leads (Other wedding services names "Wedding Gifts & Return Gifts") go automatically to
+    # the active vendor with this name (case-insensitive exact match); none or inactive: unassigned
+    # until it exists (see app/services/lead_crm.py)
+    WEDDING_GIFTS_VENDOR_NAME: str = Field(default="Kraftyz", min_length=1, max_length=100)
+    # Spin cut-off (an India date, YYYY-MM-DD): workflow spin rows created before it are hidden from
+    # spin everywhere; CRM-uploaded spin leads are always shown (see spin_leads.spin_filter)
+    SPIN_LIVE_FROM: date = date(2026, 11, 21)
+    # Spin gift leads received on or after this moment (India time, YYYY-MM-DDTHH:MM:SS) also go to the
+    # gifts vendor (an extra vendor next to the branch / area one); older gift leads don't
+    WEDDING_GIFTS_FROM: datetime = datetime(2026, 11, 21, 0, 0, 0)
 
     @model_validator(mode="after")
     def _check_auth_settings(self):

@@ -65,7 +65,7 @@ class ViewerTestBase(DhruvaTestBase, unittest.TestCase):
                                       {"update_status": "interested", "quoted_amount": 15000}).status_code, 200)
         with self.logged_in("admin"):
             self.assertEqual(self.client.post(f"{API}/leads/wedding/{self.keys['wedding']}/hot").status_code, 200)
-        dhruva = self.add(who="dhruva", name="Dhruva Lead", venue="Hall", date="Dec 4th", phone="9845010003",
+        dhruva = self.add(who="dhruva", name="Dhruva Lead", venue="Hall", event_dates=["2026-12-04"], phones=["9845010003"],
                           event_type="wedding")
         self.assertEqual(dhruva.status_code, 201, dhruva.text)
         self.dhruva_id = dhruva.json()["id"]
@@ -235,7 +235,7 @@ class ViewerWritesTests(ViewerTestBase):
             ("DELETE", f"/leads/wedding/{w}/hot", {}),
             ("POST", "/dhruva/upload/preview", upload),
             ("POST", "/dhruva/leads/bulk", {"json": {"leads": []}}),
-            ("POST", "/dhruva/leads", {"json": {"name": "N", "phone": "9845099997"}}),
+            ("POST", "/dhruva/leads", {"json": {"name": "N", "phones": ["9845099997"]}}),
             ("PATCH", f"/dhruva/leads/{d}", {"json": {"name": "Changed"}}),
             ("POST", f"/dhruva/leads/{d}/hot", {}),
             ("DELETE", f"/dhruva/leads/{d}/hot", {}),
@@ -343,8 +343,8 @@ class ViewerUsersTests(ViewerTestBase):
                 patched = self.req(who, "PATCH", f"/users/{user_id}", json={"is_active": False})
                 self.assertEqual(patched.status_code, 403, who)
         self.assertEqual(self.req("viewer", "POST", "/users", json=body).json()["detail"], VIEW_ONLY)
-        # No way to change a role: PATCH accepts is_active only (admins get 422, others 403)
-        self.assertEqual(self.req("admin", "PATCH", f"/users/{target}", json={"role": "admin"}).status_code, 422)
+        # Roles: admins may change another login's role; everyone else gets 403
+        self.assertEqual(self.req("admin", "PATCH", f"/users/{target}", json={"role": "boss"}).status_code, 422)
         self.assertEqual(self.req("viewer", "PATCH", f"/users/{self.users['viewer'].id}",
                                   json={"role": "admin"}).status_code, 403)
         with Session(self.engine) as s:

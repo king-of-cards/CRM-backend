@@ -4,14 +4,20 @@ from sqlmodel import Session, select
 
 from app.models.hot_lead import CrmHotLead
 
-def hot_keys(db: Session, source: str) -> set[str]:
-    return set(db.exec(select(CrmHotLead.lead_key).where(CrmHotLead.source == source)).all())
+def hot_keys(db: Session, source: str, vendor_id: int | None = None) -> set[str]:
+    """Leads with a hot flag on any copy (vendor_id: on that vendor's copy; 0 = the vendor-less row)."""
+    query = select(CrmHotLead.lead_key).where(CrmHotLead.source == source)
+    if vendor_id is not None:
+        query = query.where(CrmHotLead.vendor_id == vendor_id)
+    return set(db.exec(query).all())
 
 
-def is_hot(db: Session, source: str, lead_key: str) -> bool:
-    return db.exec(select(CrmHotLead.id).where(
-        CrmHotLead.source == source, CrmHotLead.lead_key == str(lead_key)
-    )).first() is not None
+def is_hot(db: Session, source: str, lead_key: str, vendor_id: int | None = None) -> bool:
+    """Hot on any copy, or (vendor_id) on that vendor's copy."""
+    query = select(CrmHotLead.id).where(CrmHotLead.source == source, CrmHotLead.lead_key == str(lead_key))
+    if vendor_id is not None:
+        query = query.where(CrmHotLead.vendor_id == vendor_id)
+    return db.exec(query).first() is not None
 
 
 def _iso_utc(value: datetime) -> str:
@@ -30,13 +36,14 @@ def attach(db: Session, source: str, items: list[dict], key_of) -> list[dict]:
     return items
 
 
-def set_hot(db: Session, source: str, lead_key: str, actor_user_id: int, hot: bool) -> dict:
+def set_hot(db: Session, source: str, lead_key: str, actor_user_id: int, hot: bool, vendor_id: int = 0) -> dict:
+    """The hot star of one copy (vendor_id; 0 = the vendor-less row, as koc_to_dhruva uses)."""
     row = db.exec(select(CrmHotLead).where(
-        CrmHotLead.source == source, CrmHotLead.lead_key == str(lead_key)
+        CrmHotLead.source == source, CrmHotLead.lead_key == str(lead_key), CrmHotLead.vendor_id == vendor_id
     )).first()
     if hot:
         if row is None:
-            row = CrmHotLead(source=source, lead_key=str(lead_key),
+            row = CrmHotLead(source=source, lead_key=str(lead_key), vendor_id=vendor_id,
                              hot_marked_by=actor_user_id, hot_marked_at=datetime.now(timezone.utc))
             db.add(row)
         else:
@@ -46,7 +53,7 @@ def set_hot(db: Session, source: str, lead_key: str, actor_user_id: int, hot: bo
     elif row is not None:
         db.delete(row)
     db.commit()
-    return {"source": source, "lead_key": str(lead_key), "is_hot": hot,
+    return {"source": source, "lead_key": str(lead_key), "is_hot": hot, "vendor_id": vendor_id or None,
             "hot_marked_by": actor_user_id if hot else None,
             "hot_marked_at": _iso_utc(row.hot_marked_at) if hot and row else None}
 

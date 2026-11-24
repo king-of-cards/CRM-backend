@@ -11,17 +11,23 @@ class LeadMeta(SQLModel, table=True):
     the others in the Google Sheets (copied into crm_* tables). This table only holds what
     the team adds, keyed by (source, lead_key), so the original data is never modified.
 
-      source    spin | whatsapp | wedding | wedding_planner
-      lead_key  stable id in that source: spin lead id, sheet row key, or Plan ID
+      source          spin | whatsapp | wedding | wedding_planner (| koc_to_dhruva, its own section)
+      lead_key        stable id in that source: spin lead id, sheet row key, or Plan ID
+      copy_vendor_id  whose copy this is: a lead can have several vendors (lead_crm.vendor_set), each
+                      with its own Update, amounts, follow-up and notes; 0 = the vendor-less row
+                      (Unassigned flag, admin data, leads without a vendor; koc_to_dhruva uses only it)
     """
     __tablename__ = "crm_lead_meta"
-    __table_args__ = (UniqueConstraint("source", "lead_key", name="uq_lead_meta_source_key"),)
+    __table_args__ = (UniqueConstraint("source", "lead_key", "copy_vendor_id", name="uq_lead_meta_source_key_copy"),)
 
     id: int | None = Field(default=None, primary_key=True)
     source: str = Field(max_length=30, index=True)
     lead_key: str = Field(max_length=100, index=True)
+    copy_vendor_id: int = Field(default=0, index=True, sa_column_kwargs={"server_default": "0"})
 
-    vendor_id: int | None = Field(default=None, foreign_key="crm_vendors.id", index=True)  # manual assignment
+    # Legacy (before crm_lead_assignments): a manual vendor on the vendor-less row. Still read as
+    # the lead's manual vendor while it has no assignment rows; scripts/migrate_lead_vendors.py moves it.
+    vendor_id: int | None = Field(default=None, foreign_key="crm_vendors.id", index=True)
     # False = never assigned automatically (sheet / branch / area rules): the lead stays
     # unassigned until an admin picks a vendor. Uploaded rows with an empty "Assigned to".
     auto_assign: bool = Field(default=True, sa_column_kwargs={"server_default": "1"})
@@ -39,4 +45,4 @@ class LeadMeta(SQLModel, table=True):
     notes: str | None = Field(default=None, sa_column=Column(Text))
 
     updated_at: datetime
-    updated_by: int | None = Field(default=None, foreign_key="crm_users.id")
+    updated_by: int | None = Field(default=None)   # user id; no foreign key: history outlives deleted logins

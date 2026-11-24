@@ -2,7 +2,8 @@
 Admins see every lead, vendor users only their own.
 
 Combines the four lead sources:
-  spin            PostgreSQL spin_lead (read-only workflow database)
+  spin            PostgreSQL spin_lead (read-only workflow database; rows on or after the spin cut-off,
+                  see spin_leads.spin_filter) plus every CRM spin lead (crm_spin_leads, any date)
   whatsapp        International Google Sheet  (crm_whatsapp_leads)
   wedding         Wedding Google Sheet        (crm_wedding_leads)
   wedding_planner Wedding planner Sheet       (crm_wedding_plans)
@@ -17,7 +18,7 @@ from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import select as sa_select
 from sqlmodel import Session, select
 
@@ -40,8 +41,8 @@ SOURCES = ("spin", "whatsapp", "wedding", "wedding_planner")
 CITY_SOURCES = ("spin", "wedding", "wedding_planner", "vendor_to_koc")
 OVERVIEW_CITY_DEFAULTS = ("spin", "wedding", "wedding_planner")
 VTK_CITY_DEFAULTS = ("vendor_to_koc",)
-SOURCES_HELP = ("Comma-separated sources for Top cities (spin, whatsapp, wedding, wedding_planner, vendor_to_koc, "
-                "dhruva; whatsapp and dhruva have no city).")
+SOURCES_HELP = ("Comma-separated sources for Top cities (spin, whatsapp, wedding, wedding_planner, "
+                "vendor_to_koc, dhruva; whatsapp and dhruva have no city).")
 FRESH_SECONDS = 60        # answered from memory, no rebuild
 STALE_SECONDS = 6 * 3600  # answered from memory, rebuilt in the background
 UPCOMING_MONTHS = 12
@@ -117,8 +118,9 @@ def _norm(s: str) -> str:
 
 # ── Spin leads (PostgreSQL, read-only) ─────────────────────────────────
 def _spin_rows(db: Session) -> list[dict] | None:
-    """[{key, created, occasion_type, occasion_date}] for every listed spin lead (the workflow's and
-    the CRM's own, archived ones left out), or None if the workflow database is unavailable."""
+    """[{key, created, occasion_type, occasion_date, city, pincode}] for every lead in spin (the live
+    workflow rows and every CRM spin lead, archived ones left out), or None if the workflow
+    database is unavailable."""
     rows = _workflow_spin_rows()
     if rows is None:
         return None
@@ -147,8 +149,9 @@ def _workflow_spin_rows() -> list[dict] | None:
         from app.api.v1.endpoints import spin_leads as sl
 
         table = sl._get_table()
-        base = sl._required_filter(table)
-        fields = {_norm(f.key): f for fs in sl._get_json_fields(table, base).values() for f in fs}
+        base = sl.spin_filter(table)                 # listed, on or after the spin cut-off
+        fields = {_norm(f.key): f for fs in sl._get_json_fields(table, sl._required_filter(table)).values()
+                  for f in fs}
 
         created_col = next((table.c[c] for c in ("created_at", "createdAt", "created") if c in table.c), None)
         type_field = next((fields[k] for k in ("occasiontype", "eventtype", "occasion") if k in fields), None)
@@ -211,8 +214,8 @@ def _all_source_city_data(db: Session, period, sources: tuple[str, ...], vtk_row
     city_rows += [("wedding_planner", city) for created, city in planner if keep(created)]
     city_rows += [("vendor_to_koc", city) for created, city in vtk_rows if keep(created)]
     included_sources = [source for source in sources if source != "spin" or spin is not None]
+    from app.services.stores import pincode_area
     if "spin" in included_sources:
-        from app.services.stores import pincode_area
         city_rows += [("spin", row.get("city") or pincode_area(row.get("pincode")))
                       for row in spin if keep(row.get("created"))]
     return {
@@ -243,18 +246,21 @@ def _outcome(metas: list, hot_count: int = 0) -> dict:
             "quotes_count": numbers["quoted_count"], "hot_count": hot_count}
 
 
-def _outcomes(db: Session, keys_by_source: dict[str, list[str]], spin_available: bool) -> dict:
-    """{source: outcome, "all": outcome}; spin is None when the workflow database can't be read."""
+def _outcomes(db: Session, keys_by_source: dict[str, list[str]], spin_available: bool,
+              vendor_id: int | None = None) -> dict:
+    """{source: outcome, "all": outcome}; spin is None when the workflow database can't be read. Each
+    lead once, with its overall values (every vendor copy merged); vendor_id: that vendor's copy."""
+    from app.services import lead_crm
     out: dict[str, Any] = {}
     every: list = []
     for source in SOURCES:
         if source == "spin" and not spin_available:
             out[source] = None
             continue
-        metas = {m.lead_key: m for m in db.exec(select(LeadMeta).where(LeadMeta.source == source))}
-        per_lead = [metas.get(k) for k in keys_by_source[source]]
+        metas = lead_crm.records(db, source, vendor_id)
+        per_lead = [metas.get(str(k)) for k in keys_by_source[source]]
         from app.services import hot_leads
-        hot = hot_leads.hot_keys(db, source)
+        hot = hot_leads.hot_keys(db, source, vendor_id)
         hot_count = sum(1 for key in keys_by_source[source] if str(key) in hot)
         out[source] = _outcome(per_lead, hot_count)
         every += per_lead
@@ -384,17 +390,18 @@ def _build(db: Session, keys: dict[str, set[str]] | None = None,
         "wedding_planner": [r[-1] for r in wp_p],
         "spin": [str(r.get("key")) for r in spin_p],
     }
-    outcomes = _outcomes(db, period_keys, spin_available=spin is not None)
+    outcomes = _outcomes(db, period_keys, spin_available=spin is not None,
+                         vendor_id=vtk_vendor_id if keys is not None else None)   # vendor logins: own copy
 
-    # Top cities: only the requested sources (Spin drops out when its database is unavailable)
+    # Top cities: only the requested sources (Spin drops out when the workflow database is unavailable)
     top_cities_sources = [source for source in city_sources if source != "spin" or spin is not None]
     city_rows: list[tuple[str, str | None]] = []
     if "wedding" in top_cities_sources:
         city_rows += [("wedding", r[2]) for r in wd_p]
     if "wedding_planner" in top_cities_sources:
         city_rows += [("wedding_planner", r[2]) for r in wp_p]
+    from app.services.stores import pincode_area
     if "spin" in top_cities_sources:
-        from app.services.stores import pincode_area
         city_rows += [("spin", r.get("city") or pincode_area(r.get("pincode"))) for r in spin_p]
     if "vendor_to_koc" in top_cities_sources:
         vtk_stmt = select(VendorToKocLead.created_at, VendorToKocLead.city)
@@ -410,7 +417,8 @@ def _build(db: Session, keys: dict[str, set[str]] | None = None,
     }
     countries = Counter((r[2] or "").strip() for r in wa_p if r[2])
     occasions = Counter((r[3] or "").strip().title() for r in wd_p if r[3])
-    occasions.update((str(r.get("occasion_type") or "")).strip().title() for r in spin_p if r.get("occasion_type"))
+    occasions.update((str(r.get("occasion_type") or "")).strip().title() for r in spin_p
+                     if r.get("occasion_type"))
     occasions.pop("", None)
 
     partners = Counter(r[5] for r in wd_p if r[5])
@@ -544,13 +552,39 @@ def analytics_overview(viewer: LeadViewer, db: DbSession, period: DashboardPerio
         response_cache.clear("analytics")
     bind = db.get_bind()
     if viewer.sees_all:
-        return response_cache.get(_cache_key("admin", period, city_sources),
-                                  _builder(bind, None, period, None, city_sources),
-                                  fresh=FRESH_SECONDS, stale=STALE_SECONDS)
+        out = response_cache.get(_cache_key("admin", period, city_sources),
+                                 _builder(bind, None, period, None, city_sources),
+                                 fresh=FRESH_SECONDS, stale=STALE_SECONDS)
+        return {**out, "sources": list(SOURCES)}
+    # Vendor logins: only the KOC -> Vendors sources where they have a lead (access.vendor_sources)
+    mine = access.vendor_sources(db, viewer)
+    city_sources = tuple(s for s in city_sources if s in mine or s not in SOURCES)
     keys = {source: access.visible_keys(db, viewer, source) for source in SOURCES}
-    return response_cache.get(_cache_key(("vendor", viewer.vendor_id), period, city_sources),
-                              _builder(bind, keys, period, viewer.vendor_id, city_sources),
-                              fresh=FRESH_SECONDS, stale=FRESH_SECONDS)
+    out = response_cache.get(_cache_key(("vendor", viewer.vendor_id), period, city_sources),
+                             _builder(bind, keys, period, viewer.vendor_id, city_sources),
+                             fresh=FRESH_SECONDS, stale=FRESH_SECONDS)
+    return _only_sources(out, mine)
+
+
+PER_SOURCE_FIELDS = ("totals", "new_in_period", "previous_period", "change_pct", "this_week", "last_week",
+                     "outcomes")
+
+
+def _only_sources(out: dict, keep: list[str]) -> dict:
+    """The overview with only these sources (vendor logins); "all" is unchanged (the left-out
+    sources have no leads of the vendor)."""
+    drop = {s for s in SOURCES if s not in keep}
+    out = dict(out)
+    for name in PER_SOURCE_FIELDS:
+        if isinstance(out.get(name), dict):
+            out[name] = {k: v for k, v in out[name].items() if k not in drop}
+    out["source_mix"] = [m for m in out["source_mix"] if m["source"] not in drop]
+    out["trend"] = [{k: v for k, v in p.items() if k not in drop} for p in out["trend"]]
+    out["upcoming_by_month"] = [{k: v for k, v in p.items() if k not in drop} for p in out["upcoming_by_month"]]
+    out["top_cities_no_city_by_source"] = {k: v for k, v in out.get("top_cities_no_city_by_source", {}).items()
+                                           if k not in drop}
+    out["sources"] = list(keep)
+    return out
 
 
 # ── Vendor -> KOC dashboard ────────────────────────────────────────────
@@ -558,7 +592,8 @@ def _vtk_build(db: Session, vendor_id: int | None, period, admin: bool,
                city_sources: tuple[str, ...] = VTK_CITY_DEFAULTS) -> dict:
     """GET /analytics/vendor-to-koc. Arrival date = created_at (IST day). vendor_id: a vendor
     login's own leads only (no previous_received, per_vendor, top_cities, by_source, latest);
-    admin: every vendor and every number."""
+    admin: every number; per_vendor lists every active vendor (zeros when no leads) plus inactive
+    vendors with leads in the period (is_active false), and dhruva sums up Dhruva -> KOC leads."""
     from app.crud.vendor_to_koc import serialize
     from app.models.vendor import Vendor
     from app.models.vendor_to_koc import CLOSED_STATUSES, LeadSource, UpdateStatus, VendorToKocLead
@@ -630,10 +665,18 @@ def _vtk_build(db: Session, vendor_id: int | None, period, admin: bool,
     converted = status_of.count(UpdateStatus.CONVERTED.value)
     engaged_statuses = {UpdateStatus.INTERESTED.value, UpdateStatus.WILL_CALL_BACK.value, UpdateStatus.CONVERTED.value}
 
+    def blank(vendor_id: int, name: str, active: bool) -> dict:
+        return {"vendor_id": vendor_id, "vendor_name": name, "is_active": active, "leads": 0, "interested": 0,
+                "converted": 0, "pending": 0, "_days": []}
+
+    # Admins: every active vendor (zeros when no leads), plus inactive ones with leads in the period
     per_vendor: dict[int, dict] = {}
+    if admin:
+        for vendor in db.exec(select(Vendor).where(Vendor.is_active == True)):  # noqa: E712
+            per_vendor[vendor.id] = blank(vendor.id, vendor.name, True)
+    inactive = set(db.exec(select(Vendor.id).where(Vendor.is_active == False)))  # noqa: E712
     for lead, name in current:
-        v = per_vendor.setdefault(lead.vendor_id, {"vendor_id": lead.vendor_id, "vendor_name": name, "leads": 0,
-                                                   "interested": 0, "converted": 0, "pending": 0, "_days": []})
+        v = per_vendor.setdefault(lead.vendor_id, blank(lead.vendor_id, name, lead.vendor_id not in inactive))
         v["leads"] += 1
         v["interested"] += lead.update_status == UpdateStatus.INTERESTED.value
         v["converted"] += lead.update_status == UpdateStatus.CONVERTED.value
@@ -674,9 +717,20 @@ def _vtk_build(db: Session, vendor_id: int | None, period, admin: bool,
     if not admin:
         return out
     city_data = _all_source_city_data(db, period, city_sources, all_time=all_time)
+    # Dhruva as a partner: Dhruva -> KOC leads received in the period (archived ones left out)
+    from app.models.dhruva import DhruvaLead
+
+    dhruva = [lead for lead in db.exec(select(DhruvaLead).where(DhruvaLead.is_deleted == False))  # noqa: E712
+              if in_period(periods.ist_date(lead.created_at))]
     out.update({
         "previous_received": before,
         "per_vendor": vendors_out,
+        "dhruva": {
+            "received": len(dhruva),
+            "interested": sum(1 for lead in dhruva if lead.update_status == UpdateStatus.INTERESTED.value),
+            "converted": sum(1 for lead in dhruva if lead.update_status == UpdateStatus.CONVERTED.value),
+            "pending": sum(1 for lead in dhruva if lead.update_status is None),
+        },
         **city_data,
         "by_source": {s.value: sum(1 for lead, _ in current if lead.source == s.value) for s in LeadSource},
         "latest": [serialize(lead, name, True, updater_of[lead.id]) for lead, name in latest],
@@ -783,3 +837,207 @@ def dhruva_overview(user: DhruvaSectionUser, db: DbSession, period: AllTimeDefau
                       **{s.value: sum(1 for r in leads if r.update_status == s.value) for s in UpdateStatus}},
         "latest": [dcrud.serialize(*t, admin=admin, is_hot=str(t[0].id) in hot_keys) for t in latest],
     }
+
+
+# ── KOC -> Dhruva dashboard ────────────────────────────────────────────
+BUDGET_BANDS = (("70-100", 70, 100), ("100-200", 100, 200), ("200-500", 200, 500), ("500+", 500, None))
+
+
+def _budget_band(budget) -> str:
+    """The estimated budget per card's band (first number): under_70 (quantity-only leads), a band
+    from 70 up, or not_given."""
+    from app.api.v1.endpoints.spin_leads import first_number
+
+    n = first_number(budget)
+    if n is None:
+        return "not_given"
+    if n < 70:
+        return "under_70"
+    return next(label for label, low, high in BUDGET_BANDS if n >= low and (high is None or n < high))
+
+
+UPCOMING_WINDOWS = (30, 60, 90)          # days ahead for upcoming_events
+STALE_DAYS = 7                           # open leads untouched this long are stale
+LIST_SIZE = 10                           # upcoming and stale lists
+
+
+@router.get("/koc-to-dhruva")
+def koc_to_dhruva_overview(user: DhruvaSectionUser, db: DbSession, period: AllTimeDefaultPeriod):
+    """KOC -> Dhruva dashboard (its own endpoint: the breakdowns differ from /analytics/dhruva). The
+    shared period rules, all time by default; received = created_at (IST day). CRM numbers are this
+    section's own (source koc_to_dhruva). Admins, view-only and Dhruva logins; vendor logins: 403.
+
+    Open lead: Update none, interested or will call back (koc_dhruva.is_open). Every number covers the leads received
+    in the period, except follow_ups_due (every open lead with a follow-up due today or earlier)."""
+    from app.models.vendor_to_koc import STATUS_LABELS, UpdateStatus
+    from app.services import hot_leads, koc_dhruva
+    from app.services.branches import branches_by_id
+    from app.services.stores import pincode_area, store_for
+
+    rows = koc_dhruva.rows(db)
+    if rows is None:
+        raise HTTPException(503, "Read database unavailable")
+    today = periods.today_ist()
+    arrival = [periods.ist_date(r["created"]) for r in rows]
+    if isinstance(period, periods.AllTime):
+        known = [d for d in arrival if d is not None]
+        period = period.resolve(min(known) if known else None, today)
+
+        def in_period(_):
+            return True
+        previous = None
+    else:
+        in_period = period.contains
+        previous = period.previous()
+    current = [(r, d) for r, d in zip(rows, arrival) if in_period(d)]
+    leads = [r for r, _ in current]
+    before = sum(1 for d in arrival if previous.contains(d)) if previous else None
+
+    metas = kpis.metas_of(db, koc_dhruva.SOURCE)
+    hot = hot_leads.hot_keys(db, koc_dhruva.SOURCE)
+
+    def meta(r):
+        return metas.get(r["key"])
+
+    def status(r):
+        m = meta(r)
+        return m.update_status if m else None
+
+    def is_open(r):
+        return koc_dhruva.is_open(status(r))
+
+    def quoted(r):
+        m = meta(r)
+        return m is not None and (m.quoted_amount is not None or m.quoted_date is not None)
+
+    def entry(r, *extra):
+        out = {"lead_key": r["key"], "name": r["name"], "event_date": r["event_date"], "budget": r["budget"],
+               "quantity": r["quantity"], "update_status": status(r),
+               "status_label": STATUS_LABELS.get(status(r), status(r))}
+        for name in extra:
+            if name == "received":
+                out["received"] = r["created"].isoformat() if r["created"] else None
+            elif name == "last_update":
+                m = meta(r)
+                out["last_update"] = _iso_utc(m.updated_at) if m and m.updated_at else None
+        return out
+
+    # KPIs: the shared six (and AOV inputs) plus pending and follow-ups due
+    per_lead = [meta(r) for r in leads]
+    numbers = _outcome(per_lead, sum(1 for r in leads if r["key"] in hot))
+    numbers.pop("leads", None)
+    open_leads = [r for r in leads if is_open(r)]
+    numbers.update({
+        "shared": len(leads),
+        "pending": sum(1 for r in leads if status(r) is None),
+        "follow_ups_due": sum(1 for r in rows if is_open(r) and meta(r) is not None
+                              and meta(r).follow_up_date is not None and meta(r).follow_up_date <= today),
+    })
+
+    # Funnel: each lead counts at every stage up to the furthest it reached
+    converted = [r for r in leads if status(r) == "converted"]
+    quoted_stage = [r for r in leads if quoted(r) or status(r) == "converted"]
+    interested_stage = [r for r in leads if quoted(r) or status(r) in
+                        ("interested", "will_call_back", "converted", "purchased_with_us")]
+    contacted = [r for r in leads if status(r) is not None or quoted(r)]
+    funnel = [{"stage": stage, "count": len(items)} for stage, items in (
+        ("shared", leads), ("contacted", contacted), ("interested", interested_stage), ("quoted", quoted_stage),
+        ("converted", converted))]
+
+    # Upcoming events of open leads (from today)
+    events = []
+    for r in open_leads:
+        d = _parse_iso(r["event_date"])
+        if d is not None and d >= today:
+            events.append((d, r))
+    events.sort(key=lambda pair: (pair[0], pair[1]["key"]))
+    upcoming = {
+        **{f"next_{n}_days": sum(1 for d, _ in events if (d - today).days <= n) for n in UPCOMING_WINDOWS},
+        "next": [entry(r) for _, r in events[:LIST_SIZE]],
+    }
+
+    # Per month received: shared and (today) converted
+    months = []
+    y, m = period.date_from.year, period.date_from.month
+    while (y, m) <= (period.date_to.year, period.date_to.month):
+        months.append(f"{y:04d}-{m:02d}")
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    monthly = {k: {"month": k, "shared": 0, "converted": 0} for k in months}
+    for r, d in current:
+        if d is not None and d.strftime("%Y-%m") in monthly:
+            monthly[d.strftime("%Y-%m")]["shared"] += 1
+            monthly[d.strftime("%Y-%m")]["converted"] += status(r) == "converted"
+
+    # Per branch (resolved as the export: the Branches page, then the built-in stores)
+    known_branches = list(branches_by_id(db).values())
+    by_branch: dict = {}
+    for r in leads:
+        store = store_for(r["branch_id"], known_branches) or {}
+        key = store.get("id")
+        part = by_branch.setdefault(key, {
+            "branch_id": key, "name": store.get("name"),
+            "code": " · ".join(p for p in (store.get("code"), store.get("city")) if p) or None,
+            "leads": 0, "converted": 0, "conversion_amount": 0})
+        part["leads"] += 1
+        if status(r) == "converted":
+            part["converted"] += 1
+            part["conversion_amount"] += meta(r).conversion_amount or 0
+    branches = sorted(by_branch.values(), key=lambda b: (-b["leads"], b["name"] is None, str(b["name"] or "")))
+
+    # Per budget band
+    band_order = [label for label, _, _ in BUDGET_BANDS] + ["under_70", "not_given"]
+    bands = {b: {"band": b, "leads": 0, "converted": 0} for b in band_order}
+    for r in leads:
+        part = bands[_budget_band(r["budget"])]
+        part["leads"] += 1
+        part["converted"] += status(r) == "converted"
+    for part in bands.values():
+        part["converted_pct"] = round(part["converted"] / part["leads"] * 100, 1) if part["leads"] else None
+
+    # Stale: open leads whose last CRM change (or arrival, if never changed) is 7+ days ago
+    def last_touch(r):
+        m = meta(r)
+        return periods.ist_date(m.updated_at) if m and m.updated_at else periods.ist_date(r["created"])
+    stale = sorted(((last_touch(r), r) for r in open_leads
+                    if last_touch(r) is not None and (today - last_touch(r)).days >= STALE_DAYS),
+                   key=lambda pair: (pair[0], pair[1]["key"]))
+
+    buckets = period.buckets()
+    first = {start: i for i, (start, _) in enumerate(buckets)}
+    inflow = [{"date": s.isoformat(), "end": e.isoformat(), "total": 0} for s, e in buckets]
+    for _, d in current:
+        if d is not None and period.contains(d):
+            inflow[first[period.bucket_start(d)]]["total"] += 1
+
+    statuses = [status(r) for r in leads]
+    occasions = Counter(str(r["occasion"]).strip().title() for r in leads if r["occasion"])
+    latest = sorted(leads, key=lambda r: (r["created"] or datetime.min, r["key"]), reverse=True)[:6]
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "today": today.isoformat(),
+        "period": period.as_dict(),
+        "received": len(leads),
+        "previous_period": before,
+        "change_pct": _change(len(leads), before) if before is not None else None,
+        "kpis": numbers,
+        "funnel": funnel,
+        "upcoming_events": upcoming,
+        "monthly": list(monthly.values()),
+        "by_branch": branches,
+        "by_budget_band": list(bands.values()),
+        "stale": {"count": len(stale), "oldest": [entry(r, "received", "last_update") for _, r in stale[:LIST_SIZE]]},
+        "latest": [{"lead_key": r["key"], "name": r["name"], "occasion": r["occasion"], "event_date": r["event_date"],
+                    "budget": r["budget"], "quantity": r["quantity"], "update_status": status(r),
+                    "status_label": STATUS_LABELS.get(status(r), status(r)),
+                    "received": r["created"].isoformat() if r["created"] else None} for r in latest],
+        # Kept for the current screen
+        "by_occasion": _top(occasions, 10),
+        "inflow": inflow,
+        "by_status": {"pending": statuses.count(None), **{s.value: statuses.count(s.value) for s in UpdateStatus}},
+        "top_cities": _top_cities([(koc_dhruva.SOURCE, r["city"] or pincode_area(r["pincode"])) for r in leads]),
+    }
+
+
+def _iso_utc(value: datetime) -> str:
+    """MySQL gives naive UTC datetimes."""
+    return (value if value.tzinfo else value.replace(tzinfo=timezone.utc)).isoformat()

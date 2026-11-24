@@ -8,15 +8,24 @@ listed before the workflow leads:
 
 Paging runs over that combined list, so every lead appears exactly once across the pages
 (and in an export that walks all pages), and "total" counts both.
+
+Every CRM spin lead is listed in spin, whatever its date (the spin cut-off, SPIN_LIVE_FROM, only
+hides workflow rows), so the history can be uploaded. A lead whose otherWeddingServices names
+"Wedding Gifts & Return Gifts" is a gift lead: same list, other automatic vendor (lead_crm.lead_rules).
+KOC -> Dhruva (koc_to_dhruva) never includes CRM spin leads: its own uploaded rows
+(crm_koc_dhruva_leads, the same columns) are read with the same helpers (flow "koc_to_dhruva"),
+and every one of them is listed (the budget / quantity rule is only shown).
 """
 import json
 import re
 from datetime import date, datetime
+from functools import lru_cache
 from typing import Any
 
 from sqlmodel import Session, select
 
 from app.models.crm_spin_lead import CrmSpinLead
+from app.models.koc_dhruva_lead import KocDhruvaLead
 
 # Same names and rules as app/api/v1/endpoints/spin_leads.py
 PINCODE_FIELD_NAMES = ("pincode", "pin", "zipcode", "postalcode")
@@ -28,6 +37,7 @@ _RANGE_RE = re.compile(r"^\s*([0-9]+(?:\.[0-9]+)?)")
 JSON_PREFIX = "additional_details."
 
 
+@lru_cache(maxsize=4096)
 def _norm_name(name: str) -> str:
     return "".join(ch for ch in name.lower().split(".")[-1] if ch.isalnum())
 
@@ -61,8 +71,37 @@ def _named_value(lead: CrmSpinLead, wanted_names: tuple[str, ...]) -> str | None
     return None
 
 
+def is_gift(lead: CrmSpinLead) -> bool:
+    """A gift lead (see the module docstring)."""
+    from app.api.v1.endpoints.spin_leads import is_gift_details
+
+    return is_gift_details(_details(lead))
+
+
+def koc_reason(lead: CrmSpinLead) -> str | None:
+    """"budget", "quantity" or None: why the lead is (or isn't) a KOC -> Dhruva lead."""
+    from app.api.v1.endpoints.spin_leads import koc_reason as reason_of
+
+    return reason_of(_details(lead))
+
+
+def _model(flow: str | None):
+    """spin (or None): crm_spin_leads; koc_to_dhruva: its uploaded rows (crm_koc_dhruva_leads)."""
+    return KocDhruvaLead if flow == "koc_to_dhruva" else CrmSpinLead
+
+
+def _in_flow(lead, flow: str | None) -> bool:
+    """Every row of the flow's table is listed (archived ones are left out by the callers)."""
+    return True
+
+
 def _like(term: str, text: str) -> bool:
     return term.casefold() in text.casefold()
+
+
+def _key_set(keys) -> frozenset[str]:
+    """The keys as text (matching() converts them once, not once per lead)."""
+    return keys if isinstance(keys, frozenset) else frozenset(str(i) for i in keys)
 
 
 def _matches(lead: CrmSpinLead, search: str, branch: str | None, flt: dict) -> bool:
@@ -78,15 +117,30 @@ def _matches(lead: CrmSpinLead, search: str, branch: str | None, flt: dict) -> b
             return False
     if flt.get("budget") and _named_value(lead, BUDGET_FIELD_NAMES) != str(flt["budget"]):
         return False
-    if flt.get("ids_in") is not None and lead.lead_key not in {str(i) for i in flt["ids_in"]}:
+    if flt.get("ids_in") is not None and lead.lead_key not in _key_set(flt["ids_in"]):
         return False
-    if flt.get("ids_not_in") and lead.lead_key in {str(i) for i in flt["ids_not_in"]}:
+    if flt.get("ids_not_in") and lead.lead_key in _key_set(flt["ids_not_in"]):
         return False
     if flt.get("created_from") is not None:          # arrival in a period (naive UTC bounds)
         created = lead.created_at.replace(tzinfo=None) if lead.created_at else None
         if created is None or not (flt["created_from"] <= created < flt["created_to"]):
             return False
     if flt.get("origins") and lead.origin not in flt["origins"]:
+        return False
+    if flt.get("other_services") and not _like(flt["other_services"], _text(_details(lead).get("otherWeddingServices"))):
+        return False
+    if flt.get("occasion") and not _like(flt["occasion"], _text(_details(lead).get("occasionType"))):
+        return False
+    if flt.get("quantity_min") is not None or flt.get("quantity_max") is not None:
+        from app.api.v1.endpoints.spin_leads import first_number
+        quantity = first_number(_details(lead).get("quantityRequired"))
+        if quantity is None:
+            return False
+        if flt.get("quantity_min") is not None and quantity < flt["quantity_min"]:
+            return False
+        if flt.get("quantity_max") is not None and quantity > flt["quantity_max"]:
+            return False
+    if flt.get("reason") and koc_reason(lead) != flt["reason"]:
         return False
     if flt.get("event_from") is not None or flt.get("event_to") is not None:
         event = str(_details(lead).get("occasionDate") or "")[:10]       # YYYY-MM-DD
@@ -129,13 +183,20 @@ def matching(
     order: str,
     branch: str | None,
     flt: dict | None,
+    flow: str | None = "spin",
 ) -> list[CrmSpinLead]:
-    """CRM spin leads that pass the list's filters, in the list's sort order."""
+    """CRM leads of the view that pass the list's filters, in the list's sort order (spin: CRM spin
+    leads; koc_to_dhruva: its uploaded rows)."""
     term = (search or "").strip()
+    model = _model(flow)
+    flt = dict(flt or {})
+    for name in ("ids_in", "ids_not_in"):            # thousands of keys: one set, not one per lead
+        if flt.get(name) is not None:
+            flt[name] = _key_set(flt[name])
     leads = [
         lead
-        for lead in session.exec(select(CrmSpinLead).where(CrmSpinLead.is_deleted == False))  # noqa: E712
-        if _matches(lead, term, branch, flt or {})
+        for lead in session.exec(select(model).where(model.is_deleted == False))  # noqa: E712
+        if _in_flow(lead, flow) and _matches(lead, term, branch, flt)
     ]
     desc = order == "desc"
     leads.sort(key=lambda lead: lead.id or 0, reverse=desc)         # tie-break, as the primary key
@@ -147,9 +208,12 @@ def matching(
     return leads
 
 
-def active(session: Session) -> list[CrmSpinLead]:
-    """CRM spin leads that count (archived ones are hidden from lists, counts and exports)."""
-    return list(session.exec(select(CrmSpinLead).where(CrmSpinLead.is_deleted == False)))  # noqa: E712
+def active(session: Session, flow: str | None = "spin") -> list[CrmSpinLead]:
+    """CRM rows of the view that count (archived ones are hidden from lists, counts and exports).
+    flow koc_to_dhruva: its uploaded rows."""
+    model = _model(flow)
+    return [lead for lead in session.exec(select(model).where(model.is_deleted == False))  # noqa: E712
+            if _in_flow(lead, flow)]
 
 
 def pincode_of(lead: CrmSpinLead) -> str | None:

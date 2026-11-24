@@ -37,14 +37,16 @@ class User(UserBase, table=True):
 class UserCreate(UserBase):
     password: str = Field(min_length=8, max_length=128)
     role: Role = Role.VENDOR
-    # Vendor logins: the vendor to link (optional; without it the login stays unlinked and gets
-    # 403 on lead endpoints until linked). Not allowed for admins, Dhruva or view-only logins (422).
+    # Vendor logins: the vendor to link (required, an active vendor). Not allowed for admins, Dhruva
+    # or view-only logins (422).
     vendor_id: int | None = None
 
     @model_validator(mode="after")
     def _vendor_link(self):
         if self.role != Role.VENDOR and self.vendor_id is not None:
             raise ValueError("vendor_id is only allowed when role is vendor")
+        if self.role == Role.VENDOR and self.vendor_id is None:
+            raise ValueError("A vendor login needs a vendor_id")
         return self
 
 
@@ -58,10 +60,23 @@ class UserRead(UserBase):
     vendor_name: str | None = None
 
 
-# Request body for PATCH /users/{id}
+# Request body for PATCH /users/{id}: send only what changes
 class UserUpdate(BaseModel):
-    model_config = ConfigDict(extra="forbid")      # unknown fields (role, email...) answer 422
-    is_active: bool     # false = blocked: can't log in; its sessions are revoked
+    model_config = ConfigDict(extra="forbid")      # unknown fields answer 422
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    email: EmailStr | None = Field(default=None, max_length=255)
+    role: Role | None = None
+    vendor_id: int | None = None                   # vendor logins: an active vendor (required for them)
+    password: str | None = Field(default=None, min_length=8, max_length=128)    # a new password (hashed)
+    is_active: bool | None = None                  # false = blocked: can't log in; its sessions are revoked
+
+    @model_validator(mode="after")
+    def _no_nulls(self):
+        nulls = [f for f in ("name", "email", "role", "password", "is_active")
+                 if f in self.model_fields_set and getattr(self, f) is None]
+        if nulls:
+            raise ValueError(f"{', '.join(nulls)} can't be null")
+        return self
 
 
 class Token(SQLModel):

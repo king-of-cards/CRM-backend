@@ -68,8 +68,38 @@ def _clean_list(values: list[str]) -> list[str]:
     return out
 
 
-def _out(v: Vendor) -> dict:
+def _lead_counts(db: Session) -> tuple[dict[int, int], dict[int, int]]:
+    """({vendor id: leads assigned to it across the four KOC -> Vendors sources (the lists' rules)},
+    {vendor id: its Vendor -> KOC leads})."""
+    from collections import Counter
+
+    from sqlalchemy import func
+
+    from app.models.vendor_to_koc import VendorToKocLead
+
+    assigned: Counter = Counter()
+    for source in access.KOC_VENDOR_SOURCES:
+        assigned.update(v for vendor_ids in access.assignments(db, source).values() for v in vendor_ids)
+    vtk = dict(db.exec(select(VendorToKocLead.vendor_id, func.count()).group_by(VendorToKocLead.vendor_id)).all())
+    return dict(assigned), vtk
+
+
+def _name_taken(db: Session, name: str, except_id: int | None = None) -> bool:
+    """Vendor names are unique ignoring case and surrounding spaces."""
+    from sqlalchemy import func
+
+    query = select(Vendor.id).where(func.lower(Vendor.name) == name.strip().lower())
+    if except_id is not None:
+        query = query.where(Vendor.id != except_id)
+    return db.exec(query).first() is not None
+
+
+def _out(v: Vendor, counts: tuple[dict, dict] | None = None) -> dict:
+    assigned, vtk = counts or ({}, {})
     return {
+        "lead_count": assigned.get(v.id, 0),       # leads assigned now, four KOC -> Vendors sources
+        "vtk_lead_count": vtk.get(v.id, 0),        # its Vendor -> KOC leads
+
         "id": v.id,
         "name": v.name,
         "coverage": v.coverage,
@@ -98,18 +128,21 @@ def _changed():
 
 @router.get("")
 def list_vendors(viewer: LeadViewer, db: DbSession, include_inactive: bool = False):
-    """Admins: all vendors. Vendor users: only their own vendor."""
+    """Admins and view-only: active vendors (include_inactive=true: also inactive ones), each with
+    is_active, lead_count (leads assigned to it now across the four KOC -> Vendors sources) and
+    vtk_lead_count (its Vendor -> KOC leads). Vendor users: only their own vendor."""
     query = select(Vendor).order_by(Vendor.priority, Vendor.id)
     if not viewer.sees_all:
         query = query.where(Vendor.id == viewer.vendor_id)
     elif not include_inactive:
         query = query.where(Vendor.is_active == True)  # noqa: E712
-    return [_out(v) for v in db.exec(query)]
+    counts = _lead_counts(db)
+    return [_out(v, counts) for v in db.exec(query)]
 
 
 @router.post("", status_code=201)
 def create_vendor(body: VendorIn, _: AdminUser, db: DbSession):
-    if db.exec(select(Vendor).where(Vendor.name == body.name.strip())).first():
+    if _name_taken(db, body.name):
         raise HTTPException(409, "A vendor with that name already exists")
     now = datetime.now(timezone.utc)
     data = body.model_dump()
@@ -121,7 +154,7 @@ def create_vendor(body: VendorIn, _: AdminUser, db: DbSession):
     db.commit()
     db.refresh(vendor)
     _changed()
-    return _out(vendor)
+    return _out(vendor, _lead_counts(db))
 
 
 @router.patch("/{vendor_id}")
@@ -132,8 +165,7 @@ def update_vendor(vendor_id: int, body: VendorPatch, _: AdminUser, db: DbSession
     data = body.model_dump(exclude_unset=True)
     if "name" in data:
         data["name"] = data["name"].strip()
-        clash = db.exec(select(Vendor).where(Vendor.name == data["name"], Vendor.id != vendor_id)).first()
-        if clash:
+        if _name_taken(db, data["name"], except_id=vendor_id):
             raise HTTPException(409, "A vendor with that name already exists")
     for f in ("areas", "pincodes", "pincode_prefixes"):
         if f in data and data[f] is not None:
@@ -144,14 +176,15 @@ def update_vendor(vendor_id: int, body: VendorPatch, _: AdminUser, db: DbSession
     db.add(vendor)
     db.commit()
     db.refresh(vendor)
-    _changed()
-    return _out(vendor)
+    _changed()                          # deactivating keeps manual assignments; rules stop choosing it
+    return _out(vendor, _lead_counts(db))
 
 
 # ── Statistics ─────────────────────────────────────────────────────────
 def _spin_rows(db: Session) -> list[tuple]:
-    """(lead id, location, pincode, None, branch vendor id) for every listed spin lead:
-    the workflow's and the CRM's own (crm-<id>, archived ones left out)."""
+    """(lead id, location, pincode, None, branch vendor id, is_gift, received) for every lead in spin:
+    the live workflow rows (spin_leads.spin_filter) and the CRM's own (crm-<id>, any date, archived
+    ones left out). is_gift + received: the gifts partner rule (lead_crm.PARTNER_RULES)."""
     from app.services import crm_spin_leads
     from app.services.branches import branches_by_id
 
@@ -160,8 +193,10 @@ def _spin_rows(db: Session) -> list[tuple]:
     for lead in crm_spin_leads.active(db):
         branch = branches.get(str(lead.branch_id)) if lead.branch_id is not None else None
         added.append((lead.lead_key, (branch or {}).get("city"), crm_spin_leads.pincode_of(lead), None,
-                      (branch or {}).get("vendor_id")))
-    return _workflow_spin_rows(db) + added
+                      (branch or {}).get("vendor_id"), crm_spin_leads.is_gift(lead), lead.created_at))
+    workflow = [(*r[:5], bool(r[5]) if len(r) > 5 else False, r[6] if len(r) > 6 else None)
+                for r in _workflow_spin_rows(db)]
+    return workflow + added
 
 
 def _workflow_spin_rows(db: Session) -> list[tuple]:
@@ -174,8 +209,8 @@ def _workflow_spin_rows(db: Session) -> list[tuple]:
         from app.services.branches import branches_by_id
 
         table = sl._get_table()
-        base = sl._required_filter(table)
-        json_fields = sl._get_json_fields(table, base)
+        base = sl.spin_filter(table)                 # listed, on or after the spin cut-off
+        json_fields = sl._get_json_fields(table, sl._required_filter(table))
         pk = list(table.primary_key.columns)[0]
         fields = {f.key.lower(): f for fs in json_fields.values() for f in fs}
         pin_field = next((f for k, f in fields.items() if "pincode" in k or k == "pin"), None)
@@ -186,6 +221,8 @@ def _workflow_spin_rows(db: Session) -> list[tuple]:
             sl._json_text_expr(table, city_field) if city_field else pk.label("no_city"),
             sl._json_text_expr(table, pin_field) if pin_field else pk.label("no_pin"),
             branch_expr.label("branch") if branch_expr is not None else pk.label("no_branch"),
+            sl.gift_expr(table).label("is_gift"),
+            (sl._created_column(table) if sl._created_column(table) is not None else pk).label("received"),
         ]
         with read_engine.connect() as conn:
             rows = conn.execute(sa_select(*exprs).select_from(table).where(*base)).all()
@@ -200,6 +237,8 @@ def _workflow_spin_rows(db: Session) -> list[tuple]:
                     r[2] if pin_field else None,
                     None,
                     (branch or {}).get("vendor_id"),
+                    bool(r[4]),                     # gift lead
+                    r[5] if sl._created_column(table) is not None else None,   # received (created_at)
                 )
             )
         return out

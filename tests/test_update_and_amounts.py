@@ -89,8 +89,14 @@ class UploadCrmColumnsTest(ApiTestBase, unittest.TestCase):
         keys = [r["lead_key"] for r in result["rows"]]
         metas = self.metas()
         one, two = metas[keys[0]], metas[keys[1]]
-        self.assertEqual((one.update_status, one.quoted_amount, one.conversion_amount, one.quoted_date, one.vendor_id),
-                         ("will_call_back", 150000, None, None, self.vendor_ids["phodeo"]))
+        # A manual vendor: an "added" assignment, and the CRM values are that vendor's copy
+        self.assertEqual((one.update_status, one.quoted_amount, one.conversion_amount, one.quoted_date,
+                          one.copy_vendor_id, one.vendor_id),
+                         ("will_call_back", 150000, None, None, self.vendor_ids["phodeo"], None))
+        with Session(self.engine) as s:
+            from app.models.lead_assignment import LeadAssignment
+            added = [(a.vendor_id, a.state) for a in s.exec(select(LeadAssignment).where(LeadAssignment.lead_key == keys[0]))]
+        self.assertEqual(added, [(self.vendor_ids["phodeo"], "added")])
         self.assertEqual((two.update_status, two.quoted_amount, two.conversion_amount, two.vendor_id, two.auto_assign),
                          ("converted", 90000, 85000, None, False))           # empty Assigned to: unassigned
         self.assertNotIn(keys[2], metas)                                      # automatic, Pending, no amounts: no row
@@ -116,8 +122,8 @@ class UploadCrmColumnsTest(ApiTestBase, unittest.TestCase):
     def test_duplicates_are_unchanged(self):
         key = self.add_ok("wedding")["lead_key"]                              # 9845010003
         self.put_crm("admin", "wedding", key, {"update_status": "interested", "quoted_amount": 1000})
-        body = self.preview("Contact,Update,Quoted amount,Conversion amount\r\n"
-                            "+91 98450 10003,Converted,99999,88888\r\n")
+        body = self.preview("Contact,Lead,City,Budget,Update,Quoted amount,Conversion amount\r\n"
+                            "+91 98450 10003,Ravi,Bangalore,1.5 lakh,Converted,99999,88888\r\n")   # the same lead
         self.assertEqual(body["rows"][0]["status"], "duplicate")
         self.assertEqual(self.imported(body)["counts"]["imported"], 0)
         meta = self.metas()[key]

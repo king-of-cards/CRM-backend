@@ -7,6 +7,10 @@
   View only    (crm_users.role = viewer) sees everything an admin sees (Viewer.sees_all) and changes
                nothing: every write answers 403 (app/api/deps.block_viewer_writes).
   Unassigned   leads are visible to admins (and view-only logins) only.
+  KOC -> Dhruva (koc_to_dhruva, a Dhruva section) is never assigned: admins, view-only and Dhruva
+               logins see every lead of it, vendor logins none.
+  Spin         workflow rows before the spin cut-off (SPIN_LIVE_FROM) are hidden from everyone:
+               not in the assignment map, and can_see says no (see spin_leads.spin_filter).
 
 The effective assignment is the one shown in "Assigned to" (lead_crm.meta_out): manual, then the
 sheet's "leads shared", then the branch's vendor, then the area rules, unless the lead was
@@ -67,13 +71,24 @@ def viewer_for(db: Session, user: User) -> Viewer:
     return Viewer(user, link.vendor_id)
 
 
+DHRUVA_SECTION_SOURCES = ("koc_to_dhruva",)
+
+
+def _dhruva_section_reader(viewer: Viewer) -> bool:
+    return viewer.sees_all or viewer.user.role == Role.DHRUVA.value
+
+
 def _rows(db: Session, source: str) -> list[tuple]:
-    """(lead_key, location, pincode, sheet vendor[, branch vendor id]) for every listed lead:
-    the same inputs the list endpoints give lead_crm.attach. Archived/removed leads left out."""
+    """(lead_key, location, pincode, sheet vendor[, branch vendor id[, is_gift[, received]]]) for every
+    listed lead: the same inputs the list endpoints give lead_crm.attach. Archived/removed leads left out."""
     if source == "spin":
         from app.api.v1.endpoints.vendors import _spin_rows
 
         return _spin_rows(db)
+    if source == "koc_to_dhruva":
+        from app.services import koc_dhruva
+
+        return [(key, None, None, None) for key in sorted(koc_dhruva.keys(db))]
     if source == "whatsapp":
         return [(k, c, None, None) for k, c in db.exec(
             select(WhatsAppLead.sheet_key, WhatsAppLead.country).where(WhatsAppLead.is_deleted == False))]  # noqa: E712
@@ -86,26 +101,74 @@ def _rows(db: Session, source: str) -> list[tuple]:
         .where(WeddingPlan.is_deleted == False))]  # noqa: E712
 
 
-def assignments(db: Session, source: str) -> dict[str, int | None]:
-    """{lead_key: effective vendor id or None} for every listed lead of the source."""
+def vendor_entries(db: Session, source: str) -> dict[str, list[tuple[int, str]]]:
+    """{lead_key: [(vendor id, how)]} for every listed lead of the source ([] = nobody); a lead can
+    have several vendors (lead_crm.vendor_set; how: manual, sheet, branch, suggested, partner)."""
     def build():
-        infos = lead_crm.effective_vendor_counts(db, source, _rows(db, source))
-        return {info["lead_key"]: (info["vendor"] or {}).get("id") for info in infos}
+        sets = lead_crm.vendor_sets(db, source, _rows(db, source))
+        return {key: [(v.id, how) for v, how in vendors] for key, vendors in sets.items()}
 
     return response_cache.get(("access", source), build, fresh=CACHE_SECONDS, stale=CACHE_SECONDS)
 
 
+def assignments(db: Session, source: str) -> dict[str, list[int]]:
+    """{lead_key: [the ids of its vendors]} for every listed lead of the source ([] = nobody)."""
+    return {key: [vid for vid, _ in entries] for key, entries in vendor_entries(db, source).items()}
+
+
 def visible_keys(db: Session, viewer: Viewer, source: str) -> set[str] | None:
     """Lead keys this viewer may see in the source; None = all (admin, view only)."""
+    if source in DHRUVA_SECTION_SOURCES:
+        return None if _dhruva_section_reader(viewer) else set()
     if viewer.sees_all:
         return None
-    return {key for key, vendor_id in assignments(db, source).items() if vendor_id == viewer.vendor_id}
+    return {key for key, vendor_ids in assignments(db, source).items() if viewer.vendor_id in vendor_ids}
+
+
+def hidden_spin_key(lead_key: str) -> bool:
+    """A workflow row that is not in spin (before the cut-off, or not listed). CRM spin leads never
+    are; when the workflow database can't be read, nothing is hidden."""
+    from app.models.lead_origin import CRM_KEY_PREFIX
+    from app.services import also_in
+
+    if str(lead_key).startswith(CRM_KEY_PREFIX):
+        return False
+    row = also_in.workflow_row(str(lead_key))
+    return row is not None and not row[1]
 
 
 def can_see(db: Session, viewer: Viewer, source: str, lead_key: str) -> bool:
+    if source in DHRUVA_SECTION_SOURCES:
+        return _dhruva_section_reader(viewer)
+    if source == "spin" and hidden_spin_key(lead_key):
+        return False
     if viewer.sees_all:
         return True
-    return assignments(db, source).get(str(lead_key)) == viewer.vendor_id
+    return viewer.vendor_id in assignments(db, source).get(str(lead_key), [])
+
+
+KOC_VENDOR_SOURCES = ("spin", "whatsapp", "wedding", "wedding_planner")   # the KOC -> Vendors sources
+
+
+def vendor_sources(db: Session, viewer: Viewer) -> list[str]:
+    """The KOC -> Vendors sources this viewer works in: all four for admins and view-only logins;
+    for a vendor login, those where it has at least one visible lead (all time, the lists'
+    assignment). Cached briefly; forget() clears it."""
+    if viewer.sees_all:
+        return list(KOC_VENDOR_SOURCES)
+
+    def build():
+        return [s for s in KOC_VENDOR_SOURCES if visible_keys(db, viewer, s)]
+    return list(response_cache.get(("access", "vendor_sources", viewer.vendor_id), build,
+                                   fresh=CACHE_SECONDS, stale=CACHE_SECONDS))
+
+
+def sources_for_user(db: Session, user: User) -> list[str]:
+    """vendor_sources for any login: [] for Dhruva logins and vendor logins without a vendor."""
+    try:
+        return vendor_sources(db, viewer_for(db, user))
+    except (DhruvaOnly, NotLinked):
+        return []
 
 
 def forget() -> None:

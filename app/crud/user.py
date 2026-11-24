@@ -12,6 +12,25 @@ from app.models.vendor_user import VendorUser
 
 logger = logging.getLogger(__name__)
 
+DELETED_USER = "Deleted user"
+
+
+def display_name(name: str | None, user_id: int | None) -> str | None:
+    """A stored user id as a name: the login's name, "Deleted user" when the login is gone, None
+    when no user is set."""
+    if user_id is None:
+        return None
+    return name or DELETED_USER
+
+
+def user_names(db: Session, ids) -> dict[int, str]:
+    """{user id: display name} for these ids (one query); missing logins are "Deleted user"."""
+    wanted = {i for i in ids if i is not None}
+    if not wanted:
+        return {}
+    found = {uid: name for uid, name in db.exec(select(User.id, User.name).where(User.id.in_(sorted(wanted))))}
+    return {i: found.get(i) or DELETED_USER for i in wanted}
+
 
 def get_user(db: Session, user_id: int) -> User | None:
     return db.get(User, user_id)
@@ -70,6 +89,69 @@ def create_user(db: Session, data: UserCreate) -> User:
         raise EmailAlreadyRegistered() from None
     db.refresh(user)
     return user
+
+
+def update_user(db: Session, user: User, changes: dict, vendor_id: int | None, *, link: bool) -> None:
+    """Apply a PATCH /users/{id} (already checked): name, email, role, password, is_active, and the
+    vendor link (link=True: set it to vendor_id; vendor_id None = remove it). A new password, a role
+    change or a block revokes every session of the login, in the same transaction."""
+    from app.crud import refresh_token
+
+    sign_out = False
+    for field, value in changes.items():
+        if field == "password":
+            user.hashed_password = hash_password(value)
+            sign_out = True
+        elif field == "email":
+            user.email = value.strip().lower()
+        elif field == "role":
+            sign_out = sign_out or value != user.role
+            user.role = value
+        elif field == "is_active":
+            sign_out = sign_out or not value
+            user.is_active = value
+        else:
+            setattr(user, field, value)
+    db.add(user)
+    if link:
+        current = db.get(VendorUser, user.id)
+        if vendor_id is None:
+            if current is not None:
+                db.delete(current)
+        elif current is None:
+            db.add(VendorUser(user_id=user.id, vendor_id=vendor_id))
+        elif current.vendor_id != vendor_id:
+            current.vendor_id = vendor_id
+            db.add(current)
+    if sign_out:
+        refresh_token.revoke_all_for_user(db, user.id)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise EmailAlreadyRegistered() from None
+
+
+def delete_user(db: Session, user: User) -> None:
+    """Remove a login with its sessions, vendor link, notification read marks and its own inbox.
+    History (lead activity, CRM details, uploads …) keeps the user id and shows "Deleted user"."""
+    from sqlmodel import col, delete
+
+    from app.models.notification import CrmNotification, CrmNotificationRead
+    from app.models.refresh_token import RefreshToken
+
+    inbox = select(CrmNotification.id).where(CrmNotification.recipient_user_id == user.id)
+    db.exec(delete(CrmNotificationRead).where(
+        (col(CrmNotificationRead.user_id) == user.id) | col(CrmNotificationRead.notification_id).in_(inbox)))
+    db.exec(delete(CrmNotification).where(col(CrmNotification.recipient_user_id) == user.id))
+    db.exec(delete(RefreshToken).where(col(RefreshToken.user_id) == user.id))
+    db.exec(delete(VendorUser).where(col(VendorUser.user_id) == user.id))
+    db.delete(user)
+    db.commit()
+
+
+def active_admin_count(db: Session) -> int:
+    return len(db.exec(select(User.id).where(User.role == "admin", User.is_active == True)).all())  # noqa: E712
 
 
 def set_active(db: Session, user: User, is_active: bool) -> None:

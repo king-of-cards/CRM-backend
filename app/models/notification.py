@@ -14,6 +14,8 @@ class CrmNotification(SQLModel, table=True):
         ),
         Index("ix_crm_notifications_user_created", "recipient_user_id", "created_at"),
         Index("ix_crm_notifications_vendor_created", "recipient_vendor_id", "created_at"),
+        # cleanup_expired deletes by created_at alone: migrations/2026-11-24_performance_indexes.sql
+        Index("ix_crm_notifications_created_at", "created_at"),
     )
 
     id: int | None = Field(default=None, primary_key=True)
@@ -25,7 +27,7 @@ class CrmNotification(SQLModel, table=True):
     source: str | None = Field(default=None, max_length=30)
     lead_key: str | None = Field(default=None, max_length=100)
     lead_id: int | None = None
-    actor_user_id: int = Field(foreign_key="crm_users.id")
+    actor_user_id: int = Field()   # user id; no foreign key: history outlives deleted logins
     actor_name: str = Field(max_length=100)
     vendor_id: int | None = Field(default=None, foreign_key="crm_vendors.id", index=True)
     created_at: datetime

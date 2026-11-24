@@ -9,7 +9,7 @@ from datetime import date, datetime
 from enum import Enum
 
 from pydantic import ConfigDict, field_validator
-from sqlalchemy import Index, Text, UniqueConstraint
+from sqlalchemy import Index, Text
 from sqlmodel import Field, SQLModel
 
 
@@ -52,8 +52,12 @@ class LeadSource(str, Enum):
 class VendorToKocLead(SQLModel, table=True):
     __tablename__ = "crm_vendor_to_koc_leads"
     __table_args__ = (
-        UniqueConstraint("vendor_id", "phone", name="uq_vtk_leads_vendor_phone"),
+        # Not unique: the same phone with another name, date or city is another lead (see
+        # migrations/2026-11-22_vtk_drop_vendor_phone_unique.sql)
+        Index("ix_vtk_leads_vendor_phone", "vendor_id", "phone"),
         Index("ix_vtk_leads_vendor_lead_date", "vendor_id", "lead_date"),
+        # Phone alone (also_in / duplicate lookups across vendors): migrations/2026-11-17_dhruva.sql
+        Index("ix_crm_vendor_to_koc_leads_phone", "phone"),
     )
 
     id: int | None = Field(default=None, primary_key=True)
@@ -69,13 +73,13 @@ class VendorToKocLead(SQLModel, table=True):
     follow_up_date: date | None = None
     quoted_amount: int | None = None                       # rupees; admins set it (PATCH)
     conversion_amount: int | None = None                   # rupees; admins set it (PATCH)
-    status_updated_by: int | None = Field(default=None, foreign_key="crm_users.id")
+    status_updated_by: int | None = Field(default=None)   # user id; no foreign key: history outlives deleted logins
     status_updated_at: datetime | None = None
     is_hot: bool = Field(default=False, sa_column_kwargs={"server_default": "0", "nullable": False})
-    hot_marked_by: int | None = Field(default=None, foreign_key="crm_users.id")
+    hot_marked_by: int | None = Field(default=None)   # user id; no foreign key: history outlives deleted logins
     hot_marked_at: datetime | None = None
     source: str = Field(max_length=20)                     # LeadSource value
-    created_by: int = Field(foreign_key="crm_users.id")
+    created_by: int = Field()   # user id; no foreign key: history outlives deleted logins
     created_at: datetime
     updated_at: datetime
 
@@ -174,7 +178,8 @@ class VendorLeadRead(SQLModel):
     quoted_amount: int | None = None
     conversion_amount: int | None = None
     status_updated_at: datetime | None
-    status_updated_by_name: str | None = None   # who last changed the update (name)
+    status_updated_by_name: str | None = None   # who last changed the update (name; "Deleted user")
+    created_by_name: str | None = None          # who added the lead (name; "Deleted user")
 
 
 class AdminLeadRead(VendorLeadRead):

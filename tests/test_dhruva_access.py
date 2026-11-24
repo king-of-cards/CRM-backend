@@ -20,7 +20,9 @@ OPEN_TO_ALL = {("GET", f"{API}/auth/me"), ("POST", f"{API}/auth/login"), ("POST"
 
 
 def is_dhruva_route(path: str) -> bool:
-    return "/dhruva" in path
+    """The Dhruva section: Dhruva -> KOC (/dhruva, /analytics/dhruva) and KOC -> Dhruva
+    (/koc-to-dhruva, /analytics/koc-to-dhruva)."""
+    return "/dhruva" in path or "/koc-to-dhruva" in path
 
 
 def is_public(path: str) -> bool:

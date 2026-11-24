@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 
-from sqlalchemy import case, false, func, insert, or_
+from sqlalchemy import case, false, func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
 from sqlmodel import Session, col, select
@@ -15,11 +15,10 @@ from app.models.vendor_to_koc import (
     CLOSED_STATUSES, AdminLeadRead, LeadSource, UpdateStatus, VendorLeadRead, VendorRead, VendorToKocLead,
 )
 from app.models.vendor_user import VendorUser
-from app.services.vendor_lead_import import CleanLead
+from app.services.vendor_lead_import import CleanLead, signature
 
 LIKE_ESCAPE = "/"
 PHONE_LIKE_RE = re.compile(r"^[\d\s+\-()]*\d[\d\s+\-()]*$")   # digits with phone punctuation only
-INSERT_CHUNK = 1000
 PHONE_LOOKUP_CHUNK = 1000
 
 
@@ -28,7 +27,7 @@ def utcnow() -> datetime:
 
 
 class DuplicateLead(Exception):
-    """This vendor already has a lead with this phone."""
+    """This vendor already has this lead (the same phone, name, date and city)."""
 
 
 class DuplicateVendorName(Exception):
@@ -36,16 +35,40 @@ class DuplicateVendorName(Exception):
 
 
 # ── Leads: writing ─────────────────────────────────────────────────────
-def existing_phones(db: Session, vendor_id: int, phones: set[str]) -> set[str]:
-    found: set[str] = set()
+class LeadKeys:
+    """(phone, name, date, city) of leads, looked up the duplicate way: the same phone and no
+    conflicting field (a field empty on either side is ignored; lead_values.compatible)."""
+
+    def __init__(self, keys=()):
+        self._by_phone: dict[str, list[tuple]] = {}
+        for key in keys:
+            self.add(key)
+
+    def add(self, key: tuple) -> None:
+        self._by_phone.setdefault(key[0], []).append(key[1:])
+
+    def __contains__(self, key: tuple) -> bool:
+        from app.services.lead_values import compatible
+
+        return any(compatible(key[1:], other) for other in self._by_phone.get(key[0], []))
+
+
+def existing_keys(db: Session, vendor_id: int, phones: set[str]) -> LeadKeys:
+    """This vendor's leads with these phones: a new lead is a duplicate when its phone matches and
+    none of its filled fields (name, date, city) differs from one of them."""
+    found = LeadKeys()
     phone_list = sorted(phones)
     for i in range(0, len(phone_list), PHONE_LOOKUP_CHUNK):
         chunk = phone_list[i:i + PHONE_LOOKUP_CHUNK]
-        found.update(db.exec(
-            select(VendorToKocLead.phone)
-            .where(VendorToKocLead.vendor_id == vendor_id, col(VendorToKocLead.phone).in_(chunk))
-        ).all())
+        for row in db.exec(select(VendorToKocLead).where(VendorToKocLead.vendor_id == vendor_id,
+                                                         col(VendorToKocLead.phone).in_(chunk))):
+            found.add(lead_key(CleanLead(name=row.name, date=row.lead_date, date_display=None, phone=row.phone,
+                                         city=row.city)))
     return found
+
+
+def lead_key(lead: CleanLead) -> tuple:
+    return (lead.phone, *signature(lead))
 
 
 def _row(vendor_id: int, lead: CleanLead, source: LeadSource, user_id: int, now: datetime) -> dict:
@@ -56,26 +79,30 @@ def _row(vendor_id: int, lead: CleanLead, source: LeadSource, user_id: int, now:
     }
 
 
-def insert_ignoring_duplicates(db: Session, vendor_id: int, leads: list[CleanLead],
-                               user_id: int) -> int:
-    """Insert valid leads; rows whose (vendor_id, phone) already exists are skipped by the
-    database, so a parallel request can't cause an error. Returns the number inserted."""
+def insert_new(db: Session, vendor_id: int, leads: list[CleanLead], user_id: int) -> list[VendorToKocLead]:
+    """Insert valid leads that aren't duplicates (checked again here, in the same transaction).
+    Returns the rows inserted."""
     now = utcnow()
-    stmt = (insert(VendorToKocLead)
-            .prefix_with("IGNORE", dialect="mysql")
-            .prefix_with("OR IGNORE", dialect="sqlite"))
-    added = 0
-    for i in range(0, len(leads), INSERT_CHUNK):
-        rows = [_row(vendor_id, lead, LeadSource.BULK_UPLOAD, user_id, now)
-                for lead in leads[i:i + INSERT_CHUNK]]
-        result = db.connection().execute(stmt, rows)   # same transaction as the session
-        added += max(result.rowcount, 0)
+    existing = existing_keys(db, vendor_id, {lead.phone for lead in leads})
+    new = []
+    for lead in leads:
+        if lead_key(lead) not in existing:
+            existing.add(lead_key(lead))
+            new.append(lead)
+    rows = [VendorToKocLead(**_row(vendor_id, lead, LeadSource.BULK_UPLOAD, user_id, now)) for lead in new]
+    if not rows:
+        return []
+    db.add_all(rows)
+    db.flush()
+    ids = [row.id for row in rows]
     db.commit()
-    return added
+    # Read the saved rows back in one query (not one refresh per row), in insert order
+    by_id = {row.id: row for row in db.exec(select(VendorToKocLead).where(col(VendorToKocLead.id).in_(ids)))}
+    return [by_id[i] for i in ids]
 
 
 def create_lead(db: Session, vendor_id: int, lead: CleanLead, user_id: int) -> int:
-    if existing_phones(db, vendor_id, {lead.phone}):
+    if lead_key(lead) in existing_keys(db, vendor_id, {lead.phone}):
         raise DuplicateLead()
     row = VendorToKocLead(**_row(vendor_id, lead, LeadSource.MANUAL, user_id, utcnow()))
     db.add(row)
@@ -200,22 +227,30 @@ def _order_by(sort: str, order: str) -> list:
     ]
 
 
-def _lead_dict(lead: VendorToKocLead, vendor_name: str, updater_name: str | None) -> dict:
-    return {**lead.model_dump(), "vendor_name": vendor_name, "status_updated_by_name": updater_name}
+def _lead_dict(lead: VendorToKocLead, vendor_name: str, updater_name: str | None,
+               creator_name: str | None = None) -> dict:
+    from app.crud.user import display_name
+
+    return {**lead.model_dump(), "vendor_name": vendor_name,
+            "status_updated_by_name": display_name(updater_name, lead.status_updated_by),
+            "created_by_name": display_name(creator_name, lead.created_by)}
 
 
 def _with_names():
-    """(lead, vendor name, updater name) in one query, no N+1."""
-    updater = aliased(User)
-    return (select(VendorToKocLead, Vendor.name, updater.name)
+    """(lead, vendor name, updater name, creator name) in one query, no N+1."""
+    updater, creator = aliased(User), aliased(User)
+    return (select(VendorToKocLead, Vendor.name, updater.name, creator.name)
             .join(Vendor, col(Vendor.id) == VendorToKocLead.vendor_id)
-            .outerjoin(updater, col(updater.id) == VendorToKocLead.status_updated_by))
+            .outerjoin(updater, col(updater.id) == VendorToKocLead.status_updated_by)
+            .outerjoin(creator, col(creator.id) == VendorToKocLead.created_by))
 
 
-def serialize(lead: VendorToKocLead, vendor_name: str, admin: bool, updater_name: str | None = None) -> dict:
-    """Admins get AdminLeadRead; vendor users get VendorLeadRead (no status_updated_by user id)."""
+def serialize(lead: VendorToKocLead, vendor_name: str, admin: bool, updater_name: str | None = None,
+              creator_name: str | None = None) -> dict:
+    """Admins get AdminLeadRead; vendor users get VendorLeadRead (no status_updated_by user id).
+    Names: "Deleted user" when the login is gone."""
     schema = AdminLeadRead if admin else VendorLeadRead
-    return schema.model_validate(_lead_dict(lead, vendor_name, updater_name)).model_dump(mode="json")
+    return schema.model_validate(_lead_dict(lead, vendor_name, updater_name, creator_name)).model_dump(mode="json")
 
 
 def count_leads(db: Session, f: LeadFilters) -> int:
@@ -288,16 +323,16 @@ def list_leads(db: Session, f: LeadFilters, sort: str, order: str,
         .offset(offset)
         .limit(page_size)
     ).all()
-    items = [{"sl_no": offset + i + 1, **serialize(lead, vendor_name, admin, updater_name)}
-             for i, (lead, vendor_name, updater_name) in enumerate(rows)]
+    items = [{"sl_no": offset + i + 1, **serialize(lead, vendor_name, admin, updater_name, creator_name)}
+             for i, (lead, vendor_name, updater_name, creator_name) in enumerate(rows)]
     return {"items": items, "total": total, "page": page, "page_size": page_size,
             "pages": math.ceil(total / page_size)}
 
 
 def get_lead(db: Session, lead_id: int, vendor_id: int | None = None
-             ) -> tuple[VendorToKocLead, str, str | None] | None:
-    """The lead, its vendor name and the updater's name. With vendor_id, only that vendor's
-    lead is found."""
+             ) -> tuple[VendorToKocLead, str, str | None, str | None] | None:
+    """The lead, its vendor name, the updater's and the creator's names. With vendor_id, only that
+    vendor's lead is found."""
     stmt = _with_names().where(VendorToKocLead.id == lead_id)
     if vendor_id is not None:
         stmt = stmt.where(VendorToKocLead.vendor_id == vendor_id)
@@ -340,12 +375,17 @@ def _name_taken(db: Session, name: str, except_id: int | None = None) -> bool:
 
 
 def _commit_vendor(db: Session, vendor: Vendor) -> Vendor:
+    from app.core import response_cache
+    from app.services import access
+
     db.add(vendor)
     try:
         db.commit()
     except IntegrityError:
         db.rollback()
         raise DuplicateVendorName() from None
+    response_cache.clear("vendors")       # cached vendor lists (lead_crm.vendor_snapshot)
+    access.forget()                       # an inactive vendor no longer gets leads
     db.refresh(vendor)
     return vendor
 

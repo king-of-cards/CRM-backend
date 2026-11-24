@@ -57,7 +57,11 @@ def metas_of(db: Session, source: str) -> dict[str, LeadMeta]:
     return {m.lead_key: m for m in db.exec(select(LeadMeta).where(LeadMeta.source == source))}
 
 
-def for_keys(db: Session, source: str, keys: Iterable[Any]) -> dict:
-    """The KPIs over these leads of one of the 4 sources."""
-    metas = metas_of(db, source)
-    return compute(metas.get(str(k)) for k in keys)
+def for_keys(db: Session, source: str, keys: Iterable[Any], vendor_id: int | None = None) -> dict:
+    """The KPIs over these leads of one of the 4 sources: each lead once, with its overall values
+    (every vendor copy merged: lead_crm.merge_copies, e.g. converted if any vendor converted, amounts
+    summed); vendor_id: that vendor's copy only (a vendor login's numbers)."""
+    from app.services import lead_crm
+
+    values = lead_crm.records(db, source, vendor_id)
+    return compute(values.get(str(k)) for k in keys)

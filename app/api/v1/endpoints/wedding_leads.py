@@ -106,7 +106,7 @@ def list_wedding_leads(
         select(WeddingLead).where(*filters).order_by(*ordering(sort, order))
         .offset((page - 1) * page_size).limit(page_size)
     ).all()
-    items = attach_crm(db, [_out(r) for r in rows])
+    items = [lead_crm.for_viewer(i, viewer) for i in attach_crm(db, [_out(r) for r in rows])]   # vendors: own copy
     keys = [i["lead_key"] for i in items]
     also_in.attach(db, viewer, "wedding", items, key_of=lambda i: i["lead_key"],
                    e164_of=also_in.page_phones(db, "wedding", keys))
@@ -197,7 +197,7 @@ def wedding_lead_stats(viewer: LeadViewer, db: DbSession, f: Filters):
         "repeats": count(WeddingLead.is_repeat == True),  # noqa: E712
         "occasions": grouped(WeddingLead.occasion),
         "shared_with": grouped(WeddingLead.shared_with),
-        "kpis": kpis.for_keys(db, "wedding", db.exec(select(WeddingLead.sheet_key).where(active)).all()),
+        "kpis": kpis.for_keys(db, "wedding", db.exec(select(WeddingLead.sheet_key).where(active)).all(), lead_crm.viewer_copy(viewer)),
     }
 
 
@@ -218,6 +218,6 @@ def wedding_filter_options(viewer: LeadViewer, db: DbSession):
         "shared_with": lead_filters.counted(r[3] for r in rows) + [
             {"value": NOT_SHARED, "count": sum(1 for r in rows if not r[3])}],
         "origins": [{"value": o, "count": sum(1 for r in rows if r[4] == o)} for o in lead_filters.SHEET_ORIGINS],
-        "updates": lead_filters.update_options(db, "wedding", {r[0] for r in rows}),
+        "updates": lead_filters.update_options(db, "wedding", {r[0] for r in rows}, viewer),
         "vendors": lead_filters.vendor_options(db, viewer),
     }
