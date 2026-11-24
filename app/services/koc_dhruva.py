@@ -12,6 +12,7 @@ Who: admins, view-only and Dhruva logins read; admins and Dhruva logins edit (vi
 central 403); vendor logins never see these leads.
 """
 import logging
+import re
 from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any
@@ -71,6 +72,37 @@ def _datetime(value: Any) -> datetime | None:
 
 def is_open(update_status: str | None) -> bool:
     return update_status not in CLOSED_STATUSES
+
+
+# Several numbers in one phone field ("98450 70001 / 98450 70002"). "/" is split last, so "N/A" is
+# dropped whole and never becomes "N" and "A".
+PHONE_SPLIT = re.compile(r"[,;\n]+")
+
+
+def phone_list(value: Any) -> list[str]:
+    """Every phone number in a lead's phone field, as written (trimmed), repeats and N/A-like values
+    dropped, order kept. [] when there is none."""
+    from app.services.lead_values import is_na
+
+    if value is None:
+        return []
+    out: list[str] = []
+    for chunk in PHONE_SPLIT.split(str(value)):
+        if is_na(chunk.strip()):
+            continue
+        for part in chunk.split("/"):
+            part = part.strip()
+            if part and not is_na(part) and part not in out:
+                out.append(part)
+    return out
+
+
+def contact(row: dict) -> dict:
+    """{phone, phones, email} of a row for dashboard lists: phone = the first number (None when there is
+    none), phones = every number (a list, possibly empty), email as stored (None when empty)."""
+    numbers = phone_list(row.get("phone"))
+    email = str(row.get("email")).strip() if row.get("email") is not None else ""
+    return {"phone": numbers[0] if numbers else None, "phones": numbers, "email": email or None}
 
 
 def row_of(item: dict) -> dict:

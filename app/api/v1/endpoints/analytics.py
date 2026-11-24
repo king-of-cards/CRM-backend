@@ -910,9 +910,11 @@ def koc_to_dhruva_overview(user: DhruvaSectionUser, db: DbSession, period: AllTi
         m = meta(r)
         return m is not None and (m.quoted_amount is not None or m.quoted_date is not None)
 
+    # List entries carry the lead's contact details (phone, phones, email). Only admins, view-only and
+    # Dhruva logins reach this endpoint (vendor logins: 403), the same logins that see them in the list.
     def entry(r, *extra):
-        out = {"lead_key": r["key"], "name": r["name"], "event_date": r["event_date"], "budget": r["budget"],
-               "quantity": r["quantity"], "update_status": status(r),
+        out = {"lead_key": r["key"], "name": r["name"], **koc_dhruva.contact(r), "event_date": r["event_date"],
+               "budget": r["budget"], "quantity": r["quantity"], "update_status": status(r),
                "status_label": STATUS_LABELS.get(status(r), status(r))}
         for name in extra:
             if name == "received":
@@ -1026,7 +1028,8 @@ def koc_to_dhruva_overview(user: DhruvaSectionUser, db: DbSession, period: AllTi
         "by_branch": branches,
         "by_budget_band": list(bands.values()),
         "stale": {"count": len(stale), "oldest": [entry(r, "received", "last_update") for _, r in stale[:LIST_SIZE]]},
-        "latest": [{"lead_key": r["key"], "name": r["name"], "occasion": r["occasion"], "event_date": r["event_date"],
+        "latest": [{"lead_key": r["key"], "name": r["name"], **koc_dhruva.contact(r),
+                    "occasion": r["occasion"], "event_date": r["event_date"],
                     "budget": r["budget"], "quantity": r["quantity"], "update_status": status(r),
                     "status_label": STATUS_LABELS.get(status(r), status(r)),
                     "received": r["created"].isoformat() if r["created"] else None} for r in latest],

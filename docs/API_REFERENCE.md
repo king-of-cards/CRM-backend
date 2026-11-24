@@ -2064,9 +2064,14 @@ period rules (`date_from` / `date_to`, `period=all`), **all time by default**; r
 - **Open lead:** Update pending, interested or will call back. Closed: converted, purchased with us,
   not converted, not interested, purchased elsewhere.
 - **Period:** every number covers the leads received in the period, except `follow_ups_due`.
-- **List entries** (`upcoming_events.next`, `stale.oldest`): `lead_key`, `name`,
-  `event_date`, `budget`, `quantity`, `update_status` (`null` = pending),
+- **List entries** (`upcoming_events.next`, `stale.oldest`): `lead_key`, `name`, `phone`, `phones`,
+  `email`, `event_date`, `budget`, `quantity`, `update_status` (`null` = pending),
   `status_label`; `stale.oldest` adds `received` and `last_update` (last CRM change, `null` if never).
+- **Contact details** (every list entry, `latest` too): `phones` = every number in the lead's phone
+  field, as written (a field can hold several, separated by `,` `;` `/` or line breaks; repeats and
+  N/A-like values dropped, order kept; `[]` when none); `phone` = the first of them (`null` when none);
+  `email` as stored (`null` when empty). Shown to the same logins that see them in the KOC → Dhruva
+  lead list (admins, view-only, Dhruva); vendor logins get 403 here as before, so no contact details.
 
 | Field | Covers |
 |---|---|
@@ -2078,7 +2083,7 @@ period rules (`date_from` / `date_to`, `period=all`), **all time by default**; r
 | `by_branch` | `[{branch_id, name, code, leads, converted, conversion_amount}]`: branch resolved as the export (Branches page, then the built-in stores; `code` = `CHA-001 · Bangalore`); leads without a known branch in one row with `branch_id`, `name` and `code` `null`. Most leads first |
 | `by_budget_band` | `[{band, leads, converted, converted_pct}]` for `70-100`, `100-200`, `200-500`, `500+`, `under_70`, `not_given` (`converted_pct` `null` when no leads) |
 | `stale` | `{count, oldest}`: open leads whose last CRM change (or arrival, if never changed) is 7+ days before today; `oldest` = the 10 longest untouched |
-| `latest` | The 6 newest leads: `lead_key`, `name`, `occasion`, `event_date`, `budget`, `quantity`, `update_status`, `status_label`, `received` |
+| `latest` | The 6 newest leads: `lead_key`, `name`, `phone`, `phones`, `email`, `occasion`, `event_date`, `budget`, `quantity`, `update_status`, `status_label`, `received` |
 | `by_occasion`, `inflow`, `by_status`, `top_cities` | Kept for the current screen: top 10 occasions; `[{date, end, total}]` per day / week / month; `pending` plus every Update; city or pincode area |
 
 No field carries the lead's reason (the `reason` list filter still works).

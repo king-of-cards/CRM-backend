@@ -409,7 +409,8 @@ class DashboardTests(KocTestBase):
         u = o["upcoming_events"]
         self.assertEqual((u["next_30_days"], u["next_60_days"], u["next_90_days"]), (1, 2, 3))
         self.assertEqual([e["lead_key"] for e in u["next"]], ["501", "503", "504"])   # open only, by date
-        self.assertEqual(u["next"][0], {"lead_key": "501", "name": "Lead 501", "event_date": "2026-12-01",
+        self.assertEqual(u["next"][0], {"lead_key": "501", "name": "Lead 501", "phone": "9845090001",
+                                        "phones": ["9845090001"], "email": None, "event_date": "2026-12-01",
                                         "budget": "70-100", "quantity": 1000,
                                         "update_status": "interested", "status_label": "Interested"})
         self.assertNotIn("top_value_leads", o)                      # removed with the potential value
@@ -437,7 +438,8 @@ class DashboardTests(KocTestBase):
         self.assertEqual(bands, {"70-100": (2, 0, 0.0), "100-200": (1, 1, 100.0), "200-500": (1, 0, 0.0),
                                  "500+": (1, 0, 0.0), "under_70": (1, 0, 0.0), "not_given": (1, 0, 0.0)})
         self.assertEqual([r["lead_key"] for r in o["latest"]], ["507", "504", "506", "502", "501", "503"])
-        self.assertEqual(o["latest"][0], {"lead_key": "507", "name": "Lead 507", "occasion": "Wedding",
+        self.assertEqual(o["latest"][0], {"lead_key": "507", "name": "Lead 507", "phone": "9845090007",
+                                          "phones": ["9845090007"], "email": None, "occasion": "Wedding",
                                           "event_date": "2026-12-20", "budget": "70-100", "quantity": 300,
                                           "update_status": "purchased_with_us",
                                           "status_label": "Already purchased with us",
@@ -445,6 +447,32 @@ class DashboardTests(KocTestBase):
         self.assertEqual(sum(p["total"] for p in o["inflow"]), 7)
         self.assertEqual((o["by_status"]["pending"], o["by_status"]["converted"]), (2, 1))
         self.assertNotIn("reason", json.dumps(o))                   # nowhere, also not in by_reason / inflow
+
+    def test_list_entries_have_contacts(self):
+        # 501: several numbers in its phone field (a repeat and N/A dropped) and an email; 503: no phone
+        rows = [dict(r) for r in DASH_ROWS]
+        rows[0].update(phone="9845090001 / 9845090011, 9845090001; N/A", email=" lead501@example.com ")
+        rows[2].update(phone="n/a")
+        with mock.patch.object(base, "WORKFLOW_ROWS", rows):
+            o = self.get("/analytics/koc-to-dhruva")
+        contacts = {e["lead_key"]: (e["phone"], e["phones"], e["email"])
+                    for e in o["upcoming_events"]["next"] + o["stale"]["oldest"] + o["latest"]}
+        self.assertEqual(contacts["501"], ("9845090001", ["9845090001", "9845090011"], "lead501@example.com"))
+        self.assertEqual(contacts["503"], (None, [], None))
+        self.assertEqual(contacts["505"], ("9845090005", ["9845090005"], None))
+        for e in o["upcoming_events"]["next"] + o["stale"]["oldest"] + o["latest"]:
+            self.assertTrue({"phone", "phones", "email"} <= e.keys(), e)
+
+    def test_contacts_for_dhruva_and_view_only_logins_not_vendors(self):
+        admin = self.get("/analytics/koc-to-dhruva")
+        for who in ("dhruva", "viewer"):                       # the logins that see them in the lead list
+            o = self.get("/analytics/koc-to-dhruva", who)
+            self.assertEqual(o["latest"], admin["latest"], who)
+            self.assertEqual(o["upcoming_events"]["next"], admin["upcoming_events"]["next"], who)
+            self.assertEqual(o["stale"]["oldest"], admin["stale"]["oldest"], who)
+            self.assertEqual(o["latest"][0]["phone"], "9845090007", who)
+        resp = self.get("/analytics/koc-to-dhruva", "phodeo", status=403)   # vendor logins: 403, no contacts
+        self.assertNotIn("98450900", resp.text)
 
     def test_period_limits_everything_but_follow_ups(self):
         o = self.get("/analytics/koc-to-dhruva", date_from="2026-11-01", date_to="2026-11-21")
