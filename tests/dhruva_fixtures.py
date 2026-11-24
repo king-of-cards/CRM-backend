@@ -1,10 +1,5 @@
-"""Fake Dhruva data copying the real sheet's patterns (no real names or phones).
-
-Two sheets: "Oct - Dec " (title row "Updated on 12th Nov ", headings on row 2 with trailing
-spaces, "Contact No ") and "Dec -March 2027" (blank row 1, "MOBILE NO"). Phones: numeric Excel
-cells, empty, "nil", two numbers split by a line break or by a comma + line break. Dates mostly
-text ("Dec 4th", "Feb 24&25th 2027", "Nil"), a few real date cells. Venues and event types with
-odd spacing and line breaks; a name with a line break.
+"""Fake Dhruva -> KOC data (no real names or phones) in the upload template's format: sheet "Leads",
+the 16 template headings, every value as text. Event dates as YYYY-MM-DD, comma-separated.
 """
 import io
 from contextlib import contextmanager
@@ -16,50 +11,46 @@ from sqlmodel import Session
 
 from app.models.user import User
 from app.services import periods
+from app.services.dhruva_import import HEADINGS
 from tests.test_crm_leads_api import ApiTestBase
 
 TODAY = date(2026, 11, 16)
+HEADERS = [label for _, label in HEADINGS]
 
-# (SL NO, Name, Venue, Date, Contact, Event Type)
-SHEET1 = [
-    (1, "Asha Fake", "Main Palace", "Dec 4th", 9800000001, "wedding"),
-    (2, "Ravi \nKumarfake", "Main palace", "dec 25th", "9800000002\n9000000002", "engagement \nwedding"),
-    (3, "Meena Fake", "Main Palace \n", "12th Dec", "9700000003,\n8200000003", "reception \nmuhurtham"),
-    (4, "No Phone One", None, "Nov 22nd", None, "beegar oota"),
-    (5, "Nil Phone", "Need to finalise the venue", "Feb 28th, Tentative date", "nil", None),
-    (6, "Month Only", None, "March", 9800000006, "naming ceremony"),
-    (7, "Either Day", "Shangrila or other \nOne", "Dec 5th or 6th", 9800000007, "nikah"),
-    (8, "Range Fake", None, "Jan 22nd -24th 2027", 9800000008, "wedding \nsangeeth"),
-    (9, "Excel Date", "Hall Fake", datetime(2026, 12, 20), 9800000009, "after muhurtham lunch"),
-    (10, "Nil Date", None, "Nil", 9800000010, None),
-    (11, "Asha Fake", "Main Palace", "Dec 4th", 9800000001, "wedding"),  # normalized-identical repeat of row 1
-    (12, "No Phone One", None, "Nov 22nd", None, None),                     # same name + date as SL 4
-    (13, None, None, None, None, None),                                    # empty row: skipped
-    (14, "Bad Phone", None, "Dec 1st", "12345", None),                      # needs fixing
+
+def lead_row(name=None, phones=None, event_dates=None, event_type=None, venue=None, **koc) -> list:
+    """One sheet row in template order; koc: the other fields by key (whatsapp_status, update_status, …)."""
+    values = {"name": name, "phones": phones, "event_dates": event_dates, "event_type": event_type,
+              "venue": venue, **koc}
+    return [values.get(key) for key, _ in HEADINGS]
+
+
+SHEET = [
+    lead_row("Asha Fake", "9800000001", "2026-12-04", "wedding", "Main Palace", whatsapp_status="Delivered",
+             update_status="Interested", quoted_amount="45000", conversion_amount="1,20,000",
+             follow_up_date="2026-11-20"),
+    lead_row("Ravi Kumarfake", "9800000002, 9000000002", "2026-12-25, 2026-12-26", "engagement, wedding",
+             "Main palace", needs_intervention="Yes"),
+    lead_row("Meena Fake", "+91 97000 00003, 8200000003; 7000000033", "2026-12-12", "reception", "Main Palace"),
+    lead_row("No Phone One", None, "2026-11-22", "beegar oota"),
+    lead_row("Two Dates", "9800000006", "2027-01-24, 2027-01-22", "wedding, sangeeth"),
+    lead_row("No Date", "9800000010"),
+    lead_row("Asha Again", "9100000099, 9800000001", "2026-12-05", "wedding"),     # a phone of row 2
+    lead_row("No Phone One", None, "2026-11-22", "lunch"),                           # same name + first date
+    lead_row(None, "9800000011"),                                                    # no name: needs fixing
+    lead_row("Bad Phone", "9800000013, 12345", "2026-12-01"),                        # needs fixing
+    lead_row("Bad Date", "9800000012", "Dec 4th"),                                   # needs fixing
+    lead_row(None, None),                                                            # empty row: skipped
 ]
-SHEET2 = [
-    ("1", "Dec Fake", "Garden Fake", "Feb 24&25th 2027", 9800000101, "reception"),
-    ("2", "Two Days", None, "10th & 11th Feb 2027", "9800000102\n9000000102", "engagement"),
-    ("3", "June Fake", None, "June 22nd ,23rd \n2027", 9800000103, "wedding"),
-    ("4", "April Fake", "Main Palace", "April 23rd 2027", None, "wedding"),
-    ("5", "Feb Only", None, "Feb", 9800000105, None),
-    ("6", "Excel Date Two", None, datetime(2027, 1, 10), 9800000106, "nikah"),
-]
 
 
-def sample_workbook() -> bytes:
+def sample_workbook(rows: list[list] | None = None, headers: list[str] | None = None) -> bytes:
     wb = Workbook()
     ws = wb.active
-    ws.title = "Oct - Dec "
-    ws.append(["Updated on 12th Nov "])
-    ws.append(["SL NO", "Name ", "Venue ", "Date ", "Contact No ", "Event Type "])
-    for row in SHEET1:
-        ws.append(list(row))
-    ws2 = wb.create_sheet("Dec -March 2027")
-    ws2.append([])
-    ws2.append(["SLNO ", "Name ", "Venue ", "Date ", "MOBILE NO", "Event Type "])
-    for row in SHEET2:
-        ws2.append(list(row))
+    ws.title = "Leads"
+    ws.append(headers or HEADERS)
+    for row in (SHEET if rows is None else rows):
+        ws.append(row)
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -92,11 +83,11 @@ class DhruvaTestBase(ApiTestBase):
         with self.logged_in(who):
             return self.client.request(method, f"/api/v1/dhruva{url}", **kw)
 
-    def preview(self, who="dhruva", content: bytes | None = None, filename="sample.xlsx", **form):
+    def preview(self, who="admin", content: bytes | None = None, filename="sample.xlsx", **form):
         return self.call(who, "POST", "/upload/preview", files={"file": (filename, content or sample_workbook())},
                          data=form)
 
-    def upload_all(self, who="dhruva", **form) -> dict:
+    def upload_all(self, who="admin", **form) -> dict:
         body = self.preview(who, **form).json()
         leads = [r["values"] for r in body["rows"]]
         return self.call(who, "POST", "/leads/bulk", json={"leads": leads}).json()

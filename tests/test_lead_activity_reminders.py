@@ -153,7 +153,7 @@ class LeadActivityReminderTests(ApiTestBase, unittest.TestCase):
             self.users["dhruva"] = dhruva
         with self.logged_in("admin"):
             created = self.client.post(f"{API}/dhruva/leads", json={
-                "name": "Sample", "venue": "Hall", "date": "Dec 20th 2026", "phone": "9845022222",
+                "name": "Sample", "venue": "Hall", "event_dates": "2026-12-20", "phones": ["9845022222"],
                 "event_type": "Wedding"})
         self.assertEqual(created.status_code, 201, created.text)
         lead_id = created.json()["id"]

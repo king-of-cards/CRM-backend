@@ -39,7 +39,7 @@ class DhruvaDashboardTest(DhruvaTestBase, unittest.TestCase):
         with Session(self.engine) as s:
             for name, created, venue, etype, edate, status, quoted, conversion, archived in spec:
                 s.add(DhruvaLead(name=name, created_at=created, updated_at=created, venue=venue, event_type=etype,
-                                 event_date=edate, event_date_text="March" if name == "L3" else None,
+                                 event_date=edate,
                                  update_status=status, quoted_amount=quoted, conversion_amount=conversion,
                                  status_updated_by=admin if status else None, source="manual",
                                  created_by=self.users["dhruva"].id, is_deleted=archived))

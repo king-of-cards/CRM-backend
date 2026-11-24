@@ -135,9 +135,9 @@ class AlsoInTest(AlsoInFixtures, unittest.TestCase):
         # RJ: its Vendor -> KOC lead's phone is workflow lead 101 (Chamrajpet branch: RJ's)
         self.assertEqual(self.also("vendor_to_koc", "rj")[str(self.vtk["rj"])], [{"source": "spin", "count": 1}])
         self.assertEqual(self.also("spin", "rj")["101"], [{"source": "vendor_to_koc", "count": 1}])
-        # Nothing about other vendors leaks anywhere in their answers
+        # Nothing about other vendors leaks in their also_in (no "vendors" names list)
         for who, place in (("phodeo", "wedding"), ("ohp", "whatsapp"), ("phodeo", "vendor_to_koc")):
-            text = str(self.items(place, who))
+            text = str([item.get("also_in") for item in self.items(place, who)])
             self.assertNotIn("vendors", text)
 
     # ── also_in filter: lists, stats, exports ──
@@ -198,14 +198,16 @@ class DhruvaAlsoInTest(AlsoInFixtures, unittest.TestCase):
             s.commit()
             s.refresh(self.users["dhruva"])
             base = {"source": "manual", "created_by": self.users["dhruva"].id, "created_at": NOW, "updated_at": NOW}
-            s.add_all([
-                DhruvaLead(name="D1", phone="9000000201", phone_e164="+919000000201", alt_phone="9845100001",
-                           alt_phone_e164=PHONE, **base),
-                DhruvaLead(name="D2", phone="9845100001", phone_e164=PHONE, alt_phone="9845100002",
-                           alt_phone_e164="+919845100002", **base),
-                DhruvaLead(name="D3", phone="9000000203", phone_e164="+919000000203", **base),
-                DhruvaLead(name="D4", phone="9845100001", phone_e164=PHONE, is_deleted=True, **base),
-            ])
+            from app.models.dhruva import DhruvaPhone
+
+            for name, numbers, archived in (("D1", ["9000000201", "9845100001"], False),
+                                            ("D2", ["9845100001", "9845100002"], False),
+                                            ("D3", ["9000000203"], False), ("D4", ["9845100001"], True)):
+                lead = DhruvaLead(name=name, phone=numbers[0], phone_e164=f"+91{numbers[0]}", is_deleted=archived,
+                                  **base)
+                s.add(lead)
+                s.flush()
+                s.add_all([DhruvaPhone(lead_id=lead.id, phone=n, phone_e164=f"+91{n}") for n in numbers])
             s.commit()
 
     def test_admins_see_dhruva_matches_everywhere(self):

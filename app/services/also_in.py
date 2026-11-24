@@ -143,10 +143,11 @@ def _matches(db: Session, e164s: set[str], include_koc: bool = False) -> list[tu
                        .join(Vendor, col(Vendor.id) == VendorToKocLead.vendor_id)
                        .where(col(VendorToKocLead.phone).in_(indian)))
         out += [(VTK, str(i), vtk_e164(p), v, name) for i, p, v, name in rows]
-    from app.models.dhruva import DhruvaLead
-    for lead_id, phone, alt in db.exec(select(DhruvaLead.id, DhruvaLead.phone_e164, DhruvaLead.alt_phone_e164).where(
-            or_(col(DhruvaLead.phone_e164).in_(chunk), col(DhruvaLead.alt_phone_e164).in_(chunk)))):
-        out += [(DHRUVA, str(lead_id), e, None, None) for e in {phone, alt} if e in e164s]
+    from app.models.dhruva import DhruvaPhone
+    for lead_id, e164 in set(db.exec(select(DhruvaPhone.lead_id, DhruvaPhone.phone_e164).where(
+            col(DhruvaPhone.phone_e164).in_(chunk)))):
+        if e164 in e164s:
+            out.append((DHRUVA, str(lead_id), e164, None, None))
     if include_koc:
         out += _koc_copies(db, workflow, e164s)
     return out
@@ -247,8 +248,8 @@ def _workflow_index() -> dict[str, tuple[str | None, bool, bool]]:
 
 def index(db: Session, include_koc: bool = False) -> dict[str, list[tuple[str, str, int | None]]]:
     """{place: [(key, e164, vendor_id)]} for every lead of every place (vendor_id: Vendor -> KOC).
-    A Dhruva lead appears once per phone (phone and alt phone). include_koc: also KOC -> Dhruva."""
-    from app.models.dhruva import DhruvaLead
+    A Dhruva lead appears once per phone number. include_koc: also KOC -> Dhruva."""
+    from app.models.dhruva import DhruvaPhone
     from app.models.vendor_to_koc import VendorToKocLead
 
     out: dict[str, list[tuple[str, str, int | None]]] = {source: [] for source in SOURCES}
@@ -259,9 +260,7 @@ def index(db: Session, include_koc: bool = False) -> dict[str, list[tuple[str, s
     out[SPIN] += [(k, e, None) for k, e in workflow_phone_index(SPIN).items()]
     out[VTK] = [(str(i), vtk_e164(p), v) for i, p, v in
                 db.exec(select(VendorToKocLead.id, VendorToKocLead.phone, VendorToKocLead.vendor_id)) if p]
-    out[DHRUVA] = [(str(i), e, None) for i, phone, alt in
-                   db.exec(select(DhruvaLead.id, DhruvaLead.phone_e164, DhruvaLead.alt_phone_e164))
-                   for e in {phone, alt} if e]
+    out[DHRUVA] = sorted({(str(i), e, None) for i, e in db.exec(select(DhruvaPhone.lead_id, DhruvaPhone.phone_e164))})
     out[KOC_TO_DHRUVA] = []
     if include_koc:
         from app.services import koc_dhruva

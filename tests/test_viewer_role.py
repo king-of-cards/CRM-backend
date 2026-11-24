@@ -65,7 +65,7 @@ class ViewerTestBase(DhruvaTestBase, unittest.TestCase):
                                       {"update_status": "interested", "quoted_amount": 15000}).status_code, 200)
         with self.logged_in("admin"):
             self.assertEqual(self.client.post(f"{API}/leads/wedding/{self.keys['wedding']}/hot").status_code, 200)
-        dhruva = self.add(who="dhruva", name="Dhruva Lead", venue="Hall", date="Dec 4th", phone="9845010003",
+        dhruva = self.add(who="dhruva", name="Dhruva Lead", venue="Hall", event_dates=["2026-12-04"], phones=["9845010003"],
                           event_type="wedding")
         self.assertEqual(dhruva.status_code, 201, dhruva.text)
         self.dhruva_id = dhruva.json()["id"]
@@ -235,7 +235,7 @@ class ViewerWritesTests(ViewerTestBase):
             ("DELETE", f"/leads/wedding/{w}/hot", {}),
             ("POST", "/dhruva/upload/preview", upload),
             ("POST", "/dhruva/leads/bulk", {"json": {"leads": []}}),
-            ("POST", "/dhruva/leads", {"json": {"name": "N", "phone": "9845099997"}}),
+            ("POST", "/dhruva/leads", {"json": {"name": "N", "phones": ["9845099997"]}}),
             ("PATCH", f"/dhruva/leads/{d}", {"json": {"name": "Changed"}}),
             ("POST", f"/dhruva/leads/{d}/hot", {}),
             ("DELETE", f"/dhruva/leads/{d}/hot", {}),
