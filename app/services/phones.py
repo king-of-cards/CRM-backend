@@ -75,6 +75,7 @@ def region_for_country(country: str | None) -> str | None:
     return _country_names().get(_norm_name(text))
 
 
+@lru_cache(maxsize=65536)               # pure: the same numbers come back on every list / upload
 def _parse(text: str, region: str | None, lenient: bool) -> str | None:
     try:
         number = phonenumbers.parse(text, region)

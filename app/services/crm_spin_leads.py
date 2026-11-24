@@ -19,6 +19,7 @@ and every one of them is listed (the budget / quantity rule is only shown).
 import json
 import re
 from datetime import date, datetime
+from functools import lru_cache
 from typing import Any
 
 from sqlmodel import Session, select
@@ -36,6 +37,7 @@ _RANGE_RE = re.compile(r"^\s*([0-9]+(?:\.[0-9]+)?)")
 JSON_PREFIX = "additional_details."
 
 
+@lru_cache(maxsize=4096)
 def _norm_name(name: str) -> str:
     return "".join(ch for ch in name.lower().split(".")[-1] if ch.isalnum())
 
@@ -97,6 +99,11 @@ def _like(term: str, text: str) -> bool:
     return term.casefold() in text.casefold()
 
 
+def _key_set(keys) -> frozenset[str]:
+    """The keys as text (matching() converts them once, not once per lead)."""
+    return keys if isinstance(keys, frozenset) else frozenset(str(i) for i in keys)
+
+
 def _matches(lead: CrmSpinLead, search: str, branch: str | None, flt: dict) -> bool:
     if search:
         texts = [_text(getattr(lead, c)) for c in _SEARCH_COLUMNS] + [_text(v) for v in _details(lead).values()]
@@ -110,9 +117,9 @@ def _matches(lead: CrmSpinLead, search: str, branch: str | None, flt: dict) -> b
             return False
     if flt.get("budget") and _named_value(lead, BUDGET_FIELD_NAMES) != str(flt["budget"]):
         return False
-    if flt.get("ids_in") is not None and lead.lead_key not in {str(i) for i in flt["ids_in"]}:
+    if flt.get("ids_in") is not None and lead.lead_key not in _key_set(flt["ids_in"]):
         return False
-    if flt.get("ids_not_in") and lead.lead_key in {str(i) for i in flt["ids_not_in"]}:
+    if flt.get("ids_not_in") and lead.lead_key in _key_set(flt["ids_not_in"]):
         return False
     if flt.get("created_from") is not None:          # arrival in a period (naive UTC bounds)
         created = lead.created_at.replace(tzinfo=None) if lead.created_at else None
@@ -182,10 +189,14 @@ def matching(
     leads; koc_to_dhruva: its uploaded rows)."""
     term = (search or "").strip()
     model = _model(flow)
+    flt = dict(flt or {})
+    for name in ("ids_in", "ids_not_in"):            # thousands of keys: one set, not one per lead
+        if flt.get(name) is not None:
+            flt[name] = _key_set(flt[name])
     leads = [
         lead
         for lead in session.exec(select(model).where(model.is_deleted == False))  # noqa: E712
-        if _in_flow(lead, flow) and _matches(lead, term, branch, flt or {})
+        if _in_flow(lead, flow) and _matches(lead, term, branch, flt)
     ]
     desc = order == "desc"
     leads.sort(key=lambda lead: lead.id or 0, reverse=desc)         # tie-break, as the primary key

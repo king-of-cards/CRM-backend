@@ -14,6 +14,8 @@ class CrmNotification(SQLModel, table=True):
         ),
         Index("ix_crm_notifications_user_created", "recipient_user_id", "created_at"),
         Index("ix_crm_notifications_vendor_created", "recipient_vendor_id", "created_at"),
+        # cleanup_expired deletes by created_at alone: migrations/2026-11-24_performance_indexes.sql
+        Index("ix_crm_notifications_created_at", "created_at"),
     )
 
     id: int | None = Field(default=None, primary_key=True)

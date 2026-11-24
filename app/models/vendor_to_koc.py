@@ -56,6 +56,8 @@ class VendorToKocLead(SQLModel, table=True):
         # migrations/2026-11-22_vtk_drop_vendor_phone_unique.sql)
         Index("ix_vtk_leads_vendor_phone", "vendor_id", "phone"),
         Index("ix_vtk_leads_vendor_lead_date", "vendor_id", "lead_date"),
+        # Phone alone (also_in / duplicate lookups across vendors): migrations/2026-11-17_dhruva.sql
+        Index("ix_crm_vendor_to_koc_leads_phone", "phone"),
     )
 
     id: int | None = Field(default=None, primary_key=True)
