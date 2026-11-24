@@ -5,8 +5,9 @@
   dup_norm()  a value as the duplicate check compares it: trimmed, spaces collapsed, any case,
               dates as ISO (YYYY-MM-DD), numbers without ".0", ranges with "-", N/A-like = "".
 
-Duplicates are "every template field matches" (phones as E.164, compared by the caller); the
-fields compared are each section's own lead fields, without read-only, CRM and arrival columns.
+Duplicates (every section): the same phone (E.164, compared by the caller) and no conflicting
+field: for each of the section's own lead fields (not read-only, CRM or arrival columns), the two
+values are equal or at least one is empty (see compatible()).
 """
 import re
 from datetime import date, datetime
@@ -59,6 +60,12 @@ def to_iso_date(value: Any) -> str | None:
         except ValueError:
             continue
     return None
+
+
+def compatible(new: tuple, existing: tuple) -> bool:
+    """Two leads' comparable values (dup_norm, field by field) don't conflict: every field filled on
+    both sides is equal. A field empty (or N/A-like) on either side is ignored."""
+    return all(not a or not b or a == b for a, b in zip(new, existing))
 
 
 def dup_norm(value: Any, kind: str = "text") -> str:

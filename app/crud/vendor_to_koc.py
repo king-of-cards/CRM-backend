@@ -35,10 +35,28 @@ class DuplicateVendorName(Exception):
 
 
 # ── Leads: writing ─────────────────────────────────────────────────────
-def existing_keys(db: Session, vendor_id: int, phones: set[str]) -> set[tuple]:
-    """(phone, signature) of this vendor's leads with these phones: a new lead is a duplicate only
-    when its phone AND every other field match one of them."""
-    found: set[tuple] = set()
+class LeadKeys:
+    """(phone, name, date, city) of leads, looked up the duplicate way: the same phone and no
+    conflicting field (a field empty on either side is ignored; lead_values.compatible)."""
+
+    def __init__(self, keys=()):
+        self._by_phone: dict[str, list[tuple]] = {}
+        for key in keys:
+            self.add(key)
+
+    def add(self, key: tuple) -> None:
+        self._by_phone.setdefault(key[0], []).append(key[1:])
+
+    def __contains__(self, key: tuple) -> bool:
+        from app.services.lead_values import compatible
+
+        return any(compatible(key[1:], other) for other in self._by_phone.get(key[0], []))
+
+
+def existing_keys(db: Session, vendor_id: int, phones: set[str]) -> LeadKeys:
+    """This vendor's leads with these phones: a new lead is a duplicate when its phone matches and
+    none of its filled fields (name, date, city) differs from one of them."""
+    found = LeadKeys()
     phone_list = sorted(phones)
     for i in range(0, len(phone_list), PHONE_LOOKUP_CHUNK):
         chunk = phone_list[i:i + PHONE_LOOKUP_CHUNK]
@@ -72,11 +90,15 @@ def insert_new(db: Session, vendor_id: int, leads: list[CleanLead], user_id: int
             existing.add(lead_key(lead))
             new.append(lead)
     rows = [VendorToKocLead(**_row(vendor_id, lead, LeadSource.BULK_UPLOAD, user_id, now)) for lead in new]
+    if not rows:
+        return []
     db.add_all(rows)
+    db.flush()
+    ids = [row.id for row in rows]
     db.commit()
-    for row in rows:
-        db.refresh(row)
-    return rows
+    # Read the saved rows back in one query (not one refresh per row), in insert order
+    by_id = {row.id: row for row in db.exec(select(VendorToKocLead).where(col(VendorToKocLead.id).in_(ids)))}
+    return [by_id[i] for i in ids]
 
 
 def create_lead(db: Session, vendor_id: int, lead: CleanLead, user_id: int) -> int:
@@ -353,12 +375,17 @@ def _name_taken(db: Session, name: str, except_id: int | None = None) -> bool:
 
 
 def _commit_vendor(db: Session, vendor: Vendor) -> Vendor:
+    from app.core import response_cache
+    from app.services import access
+
     db.add(vendor)
     try:
         db.commit()
     except IntegrityError:
         db.rollback()
         raise DuplicateVendorName() from None
+    response_cache.clear("vendors")       # cached vendor lists (lead_crm.vendor_snapshot)
+    access.forget()                       # an inactive vendor no longer gets leads
     db.refresh(vendor)
     return vendor
 

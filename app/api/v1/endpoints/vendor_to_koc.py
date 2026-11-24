@@ -102,10 +102,11 @@ def upload_preview(
              for row, v in rows]
     existing = crud.existing_keys(
         db, vendor.id, {lead.phone for _, lead in leads if _phone_ok(lead.phone)})
-    seen: set[tuple] = set()
+    seen = crud.LeadKeys()
     out, valid, invalid, duplicates = [], 0, 0, 0
     for row, lead in leads:
-        # A duplicate: the same phone AND name, date and city as this vendor's lead or an earlier row
+        # A duplicate: the same phone, and no filled name / date / city differing from this vendor's
+        # lead or an earlier row
         key = crud.lead_key(lead)
         duplicate = _phone_ok(lead.phone) and (key in existing or key in seen)
         if lead.ok:
@@ -130,7 +131,7 @@ def bulk_create_leads(body: LeadBulkCreate, db: DbSession, scope: VendorLogin):
     skips duplicates."""
     vendor = _target_vendor(db, scope)
     errors, failed, duplicates = [], 0, 0
-    seen: set[tuple] = set()
+    seen = crud.LeadKeys()
     valid = []
     for index, item in enumerate(body.leads):
         lead = flag_template_example(
@@ -148,10 +149,9 @@ def bulk_create_leads(body: LeadBulkCreate, db: DbSession, scope: VendorLogin):
     saved = crud.insert_new(db, vendor.id, new, scope.user.id) if new else []
     added = len(saved)
     if added:
-        for row in saved:
-            lead_activity.log_action(db, source="vendor_to_koc", lead_key=str(row.id), action="created",
-                field="name", old=None, new=row.name, actor_user_id=scope.user.id,
-                actor_name=scope.user.name, actor_role=scope.user.role)
+        lead_activity.log_actions(db, [{"source": "vendor_to_koc", "lead_key": str(row.id), "action": "created",
+                                        "field": "name", "old": None, "new": row.name} for row in saved],
+                                  actor_user_id=scope.user.id, actor_name=scope.user.name, actor_role=scope.user.role)
     duplicates += len(valid) - added           # in the database before, or saved meanwhile
     if added:
         try:
