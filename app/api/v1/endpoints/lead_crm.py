@@ -10,6 +10,7 @@ The leads themselves are never modified: these details live in crm_lead_meta (si
 """
 import logging
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query
@@ -46,6 +47,10 @@ class LeadCrmUpdate(BaseModel):
     quoted_date: date | None = None
     quoted_amount: int | None = Field(default=None, ge=0, le=MAX_AMOUNT)
     conversion_amount: int | None = Field(default=None, ge=0, le=MAX_AMOUNT)
+    # Payout (commission, admins only): % of the conversion amount, 0-100 with 2 decimals. The server
+    # works out payout_amount itself (lead_crm.apply_payout); a payout_amount sent is accepted and replaced.
+    payout_percent: Decimal | None = Field(default=None, ge=0, le=100, max_digits=5, decimal_places=2)
+    payout_amount: int | None = Field(default=None, ge=0, le=MAX_AMOUNT)
     notes: str | None = Field(default=None, max_length=5000)
     follow_up_date: date | None = None
 
@@ -74,8 +79,11 @@ class LeadCrmUpdate(BaseModel):
         return self
 
 
-EDITABLE = ("vendor_id", "vendor_ids", "update_status", "quoted_date", "quoted_amount", "conversion_amount", "notes", "follow_up_date")
-COPY_FIELDS = ("update_status", "quoted_date", "quoted_amount", "conversion_amount", "notes", "follow_up_date")
+EDITABLE = ("vendor_id", "vendor_ids", "update_status", "quoted_date", "quoted_amount", "conversion_amount",
+            "payout_percent", "payout_amount", "notes", "follow_up_date")
+COPY_FIELDS = ("update_status", "quoted_date", "quoted_amount", "conversion_amount", "payout_percent", "payout_amount",
+               "notes", "follow_up_date")
+PAYOUT_FIELDS = {"payout_percent", "payout_amount"}          # admins only
 
 
 def _require_lead(db, viewer, source: str, lead_key: str) -> None:
@@ -173,6 +181,8 @@ def save_lead_crm(source: Source, lead_key: str, body: LeadCrmUpdate, viewer: Le
         changes["vendor_ids"] = [changes.pop("vendor_id")] if changes["vendor_id"] is not None else []
     if not viewer.is_admin and ("vendor_ids" in changes or assigned_to is not None):
         raise HTTPException(403, "Only an admin can assign leads.")
+    if not viewer.is_admin and PAYOUT_FIELDS & set(changes):
+        raise HTTPException(403, "Only an admin can set the payout.")
     if "vendor_ids" in changes:
         changes["vendor_ids"] = list(dict.fromkeys(changes["vendor_ids"] or []))
         for vendor_id in changes["vendor_ids"]:
@@ -188,8 +198,16 @@ def save_lead_crm(source: Source, lead_key: str, body: LeadCrmUpdate, viewer: Le
     if copy_changes:
         meta = lead_crm.copy_row(db, source, lead_key, copy_id, create=True)
         old_values = {f: getattr(meta, f) for f in copy_changes}
+        old_payout = meta.payout_amount
         for field, value in copy_changes.items():
             setattr(meta, field, value)
+        # The payout in rupees always comes from the conversion amount and the % (also when only the
+        # conversion amount changed); a change to it is saved and logged like the others
+        if PAYOUT_FIELDS & set(copy_changes) or "conversion_amount" in copy_changes:
+            lead_crm.apply_payout(meta)
+            if meta.payout_amount != old_payout or "payout_amount" in copy_changes:
+                copy_changes["payout_amount"] = meta.payout_amount
+                old_values["payout_amount"] = old_payout
         meta.updated_at = datetime.now(timezone.utc)
         meta.updated_by = viewer.user.id
         db.add(meta)

@@ -6,6 +6,7 @@ Vendors and vendor logins are this backend's Vendor (app/models/vendor.py) and V
 All datetimes are timezone-aware UTC (SQLModel stores them as UTC).
 """
 from datetime import date, datetime
+from decimal import Decimal
 from enum import Enum
 
 from pydantic import ConfigDict, field_validator
@@ -73,6 +74,10 @@ class VendorToKocLead(SQLModel, table=True):
     follow_up_date: date | None = None
     quoted_amount: int | None = None                       # rupees; admins set it (PATCH)
     conversion_amount: int | None = None                   # rupees; admins set it (PATCH)
+    # Payout: the vendor's commission, a % of conversion_amount (admins set it), and the rupees
+    # that works out to (always worked out by the server: crud.update_lead)
+    payout_percent: Decimal | None = Field(default=None, max_digits=5, decimal_places=2)
+    payout_amount: int | None = None                       # rupees
     status_updated_by: int | None = Field(default=None)   # user id; no foreign key: history outlives deleted logins
     status_updated_at: datetime | None = None
     is_hot: bool = Field(default=False, sa_column_kwargs={"server_default": "0", "nullable": False})
@@ -155,6 +160,9 @@ class LeadUpdate(SQLModel):
     follow_up_date: date | None = None
     quoted_amount: int | None = Field(default=None, ge=0, le=100_000_000)        # rupees
     conversion_amount: int | None = Field(default=None, ge=0, le=100_000_000)    # rupees
+    # % of the conversion amount (0-100, 2 decimals); payout_amount is worked out by the server
+    payout_percent: Decimal | None = Field(default=None, ge=0, le=100, max_digits=5, decimal_places=2)
+    payout_amount: int | None = Field(default=None, ge=0, le=100_000_000)        # accepted, then recomputed
 
 
 class VendorLeadRead(SQLModel):
@@ -177,6 +185,8 @@ class VendorLeadRead(SQLModel):
     follow_up_date: date | None
     quoted_amount: int | None = None
     conversion_amount: int | None = None
+    payout_percent: float | None = None   # e.g. 10 or 7.5
+    payout_amount: int | None = None      # rupees
     status_updated_at: datetime | None
     status_updated_by_name: str | None = None   # who last changed the update (name; "Deleted user")
     created_by_name: str | None = None          # who added the lead (name; "Deleted user")

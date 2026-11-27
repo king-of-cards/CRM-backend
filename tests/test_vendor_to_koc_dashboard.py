@@ -83,7 +83,7 @@ class VendorDashboardTests(VendorToKocTestCase):
         self.assertEqual((o["received"], o["previous_received"], o["change_pct"]), (4, 1, 300))
         self.assertNotIn("average_per_day", o)
         self.assertEqual(o["kpis"], {"total": 4, "interested": 0, "not_interested": 0, "quoted_count": 0, "quoted_total": 0,
-                                    "converted": 1, "converted_pct": 25.0, "conversion_count": 1, "conversion_total": 20000,
+                                    "converted": 1, "converted_pct": 25.0, "conversion_count": 1, "conversion_total": 20000, "payout_count": 0, "payout_total": 0,
                                     "conversion_amount_count": 0, "conversion_amount_total": 0,
                                     "quotes_count": 0, "hot_count": 1})
         self.assertEqual((o["pending"], o["converted"], o["converted_pct"], o["purchased_with_us"]), (1, 1, 25.0, 1))
@@ -143,7 +143,7 @@ class VendorDashboardTests(VendorToKocTestCase):
         self.assertEqual(set(o), VENDOR_KEYS)
         self.assertEqual(o["kpis"], {"total": 3, "interested": 0, "not_interested": 0, "quoted_count": 1,
                                      "quoted_total": 100000, "converted": 1, "converted_pct": 33.3,
-                                    "conversion_count": 1, "conversion_total": 90000,
+                                    "conversion_count": 1, "conversion_total": 90000, "payout_count": 0, "payout_total": 0,
                                     "conversion_amount_count": 1, "conversion_amount_total": 90000,
                                     "quotes_count": 1, "hot_count": 1})
         admin = self.dash()

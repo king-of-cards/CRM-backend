@@ -339,12 +339,19 @@ def get_lead(db: Session, lead_id: int, vendor_id: int | None = None
     return db.exec(stmt).first()
 
 
-def update_lead(db: Session, lead: VendorToKocLead, changes: dict, admin_id: int) -> None:
+def update_lead(db: Session, lead: VendorToKocLead, changes: dict, admin_id: int, stamp_status: bool = True) -> None:
+    """stamp_status=False (a vendor setting its payout %): status_updated_by / _at stay as they were."""
     now = utcnow()
     for key, value in changes.items():
         setattr(lead, key, value.value if hasattr(value, "value") else value)
-    lead.status_updated_by = admin_id
-    lead.status_updated_at = now
+    # Payout in rupees: always worked out from the conversion amount and the % (the vendor's commission)
+    if {"payout_percent", "payout_amount", "conversion_amount"} & set(changes):
+        from app.services.lead_crm import apply_payout
+
+        apply_payout(lead)
+    if stamp_status:
+        lead.status_updated_by = admin_id
+        lead.status_updated_at = now
     lead.updated_at = now
     db.add(lead)
     db.commit()

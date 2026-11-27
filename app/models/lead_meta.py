@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from decimal import Decimal
 
 from sqlalchemy import Column, Text, UniqueConstraint
 from sqlmodel import Field, SQLModel
@@ -37,6 +38,10 @@ class LeadMeta(SQLModel, table=True):
     follow_up_date: date | None = None
     quoted_amount: int | None = None                                         # rupees
     conversion_amount: int | None = None                                     # rupees
+    # Payout: the commission on a converted lead, as a % of conversion_amount (admins set it), and
+    # the rupees that works out to (always worked out by the server: lead_crm.apply_payout)
+    payout_percent: Decimal | None = Field(default=None, max_digits=5, decimal_places=2)
+    payout_amount: int | None = None                                         # rupees
     # Legacy (replaced by update_status, see migrations/2026-11-16_update_and_amounts.sql): kept in
     # the table for the rollback; the API never reads them and only writes the insert defaults.
     interest: str | None = Field(default=None, max_length=30)

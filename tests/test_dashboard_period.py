@@ -285,6 +285,7 @@ class DashboardPeriodTest(ApiTestBase, unittest.TestCase):
                     "quoted_count": quoted[0], "quoted_total": quoted[1], "converted": converted,
                     "converted_pct": round(converted / total * 100, 1) if total else None,
                     "conversion_count": conversion[0], "conversion_total": conversion[1],
+                    "payout_count": 0, "payout_total": 0,
                     "conversion_amount_count": converted_amount[0], "conversion_amount_total": converted_amount[1],
                     "quotes_count": quoted[0], "hot_count": hot_count}
 

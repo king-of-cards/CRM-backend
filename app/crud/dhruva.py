@@ -415,7 +415,7 @@ def stats(db: Session, f: DhruvaFilters, today: date) -> dict:
         by_status[r.update_status or "pending"] = by_status.get(r.update_status or "pending", 0) + 1
     return {
         "total": len(rows),
-        "kpis": kpis.compute(rows),
+        "kpis": kpis.compute(rows, payout=False),             # Dhruva: no payout yet
         "by_status": by_status,
         "no_phone": sum(1 for r in rows if not numbers.get(r.id)),
         "no_event_date": sum(1 for r in rows if not dates.get(r.id)),

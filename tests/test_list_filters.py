@@ -409,7 +409,8 @@ class SpinListFiltersTest(ApiTestBase, unittest.TestCase):
             everything = self.client.get(f"{API}/spin-leads/stats").json()["kpis"]
         self.assertEqual(everything, {"total": 4, "interested": 0, "not_interested": 0, "quoted_count": 1,
                                       "quoted_total": 30000, "converted": 1, "converted_pct": 25.0,
-                                      "conversion_count": 1, "conversion_total": 25000})
+                                      "conversion_count": 1, "conversion_total": 25000,
+                                      "payout_count": 0, "payout_total": 0})
         with self.logged_in("admin"):
             bad = self.client.get(f"{API}/spin-leads/stats", params={"update_status": "maybe"})
         self.assertEqual(bad.status_code, 400)

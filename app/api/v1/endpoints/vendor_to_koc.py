@@ -26,6 +26,7 @@ from app.services import periods
 from app.services import also_in as also_in_service
 from app.services import notifications
 from app.services import lead_activity
+from app.core import response_cache
 from app.services.lead_filters import parse_quote
 from app.services.access import Viewer
 from app.services.vendor_lead_import import (
@@ -359,25 +360,38 @@ def unmark_vendor_lead_hot(lead_id: int, db: DbSession, scope: LeadViewer):
     return {"id": lead_id, "is_hot": False, "hot_marked_by": None, "hot_marked_at": None}
 
 
+VENDOR_PAYOUT_FIELDS = {"payout_percent", "payout_amount"}    # what a vendor login may change on its own leads
+
+
 @router.patch("/leads/{lead_id}")
-def update_lead(lead_id: int, body: LeadUpdate, db: DbSession, admin: AdminUser):
-    """Admins only. Only the fields sent are changed; null clears a field
-    (update_status: null sets the lead back to pending)."""
+def update_lead(lead_id: int, body: LeadUpdate, db: DbSession, admin: LeadViewer):
+    """Admins: any field. Vendor logins: only their commission (payout_percent; payout_amount is worked
+    out by the server) on their own leads; anything else 403. View-only logins: 403.
+    Only the fields sent are changed; null clears a field (update_status: null sets it back to pending)."""
     changes = body.model_dump(exclude_unset=True)
     if not changes:
         raise _unprocessable([{"type": "missing", "loc": ["body"],
                                "msg": "Send at least one of update_status, additional_comments, "
-                                      "follow_up_date, quoted_amount, conversion_amount"}])
-    found = crud.get_lead(db, lead_id)
+                                      "follow_up_date, quoted_amount, conversion_amount, payout_percent"}])
+    vendor_login = not admin.is_admin
+    if vendor_login and (admin.vendor_id is None or not set(changes) <= VENDOR_PAYOUT_FIELDS):
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            "Vendors can only set their payout %; the rest is updated by KOC."
+                            if admin.vendor_id is not None else "Only admins can update leads.")
+    found = crud.get_lead(db, lead_id, vendor_id=admin.vendor_id if vendor_login else None)
     if found is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Lead not found")
-    before = {k: getattr(found[0], k) for k in changes}
-    crud.update_lead(db, found[0], changes, admin.id)
+    # payout_amount is worked out by the server, so log it whenever the % or the conversion amount changes
+    logged = set(changes) | ({"payout_amount"} if {"payout_percent", "conversion_amount"} & set(changes) else set())
+    before = {k: getattr(found[0], k) for k in logged}
+    # A vendor's payout change doesn't count as KOC's update ("Last updated by" stays KOC's)
+    crud.update_lead(db, found[0], changes, admin.user.id, stamp_status=not vendor_login)
+    response_cache.clear("analytics")    # the dashboards show the new numbers (payout, amounts) at once
     lead_activity.log_changes(db, source="vendor_to_koc", lead_key=str(lead_id),
-        changes={k: (before[k], getattr(found[0], k)) for k in changes}, actor_user_id=admin.id,
-        actor_name=admin.name, actor_role=admin.role)
+        changes={k: (before[k], getattr(found[0], k)) for k in logged}, actor_user_id=admin.user.id,
+        actor_name=admin.user.name, actor_role=admin.user.role)
     lead, vendor_name, updater_name, creator_name = crud.get_lead(db, lead_id)
-    return crud.serialize(lead, vendor_name, True, updater_name, creator_name)
+    return crud.serialize(lead, vendor_name, not vendor_login, updater_name, creator_name)
 
 
 @router.get("/leads/{lead_id}/activity")

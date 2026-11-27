@@ -23,7 +23,7 @@ per vendor ("vendors"); for_viewer() turns it into the vendor's own copy for ven
     "vendor": {"id": 2, "name": "Phodeo"} | None,          # the first vendor
     "vendor_source": "manual" | "sheet" | "branch" | "suggested" | "partner" | None,
     "vendors": [{"vendor", "vendor_source", "update_status", "quoted_amount", "quoted_date",
-                 "conversion_amount", "follow_up_date", "notes", "updated_at", "updated_by_name", "is_hot"}],
+                 "conversion_amount", "payout_percent", "payout_amount", "follow_up_date", "notes", "updated_at", "updated_by_name", "is_hot"}],
     "suggested_vendor": {...} | None,     # what the area rules say
     "update_status", "quoted_date", "quoted_amount", "conversion_amount", "follow_up_date", "notes",
     "updated_at", "updated_by_name", "is_hot", "auto_assign"      # overall (see merge_copies)
@@ -206,6 +206,9 @@ def _copy_fields(meta: LeadMeta | None, names: dict[int, str] | None) -> dict:
         "follow_up_date": meta.follow_up_date.isoformat() if meta and meta.follow_up_date else None,
         "quoted_amount": meta.quoted_amount if meta else None,
         "conversion_amount": meta.conversion_amount if meta else None,
+        # Payout (commission): the % as a number (10, 7.5) and the rupees it works out to
+        "payout_percent": float(meta.payout_percent) if meta and meta.payout_percent is not None else None,
+        "payout_amount": meta.payout_amount if meta else None,
         "notes": meta.notes if meta else None,
         "updated_at": _iso(meta.updated_at) if meta else None,
         "updated_by_name": (names.get(meta.updated_by) if names is not None and meta and meta.updated_by is not None
@@ -420,6 +423,10 @@ def merge_copies(copies: list[LeadMeta]) -> dict:
         "follow_up_date": min(follow).isoformat() if follow else None,
         "quoted_amount": total("quoted_amount"),
         "conversion_amount": total("conversion_amount"),
+        # Payout: the copies' rupees summed; a single % only when one copy has one
+        "payout_percent": (float(pct[0]) if len(pct := [m.payout_percent for m in copies
+                                                        if m.payout_percent is not None]) == 1 else None),
+        "payout_amount": total("payout_amount"),
         "notes": next((m.notes for m in copies if m.notes), None),
         "updated_at": _iso(latest.updated_at) if latest else None,
         "updated_by_name": None,
@@ -431,13 +438,14 @@ class Record:
     vendor's copy."""
 
     def __init__(self, update_status=None, quoted_amount=None, conversion_amount=None, quoted_date=None,
-                 follow_up_date=None, notes=None):
+                 follow_up_date=None, notes=None, payout_amount=None):
         self.update_status = update_status
         self.quoted_amount = quoted_amount
         self.conversion_amount = conversion_amount
         self.quoted_date = quoted_date
         self.follow_up_date = follow_up_date
         self.notes = notes
+        self.payout_amount = payout_amount
 
 
 def _record(copies: list[LeadMeta]) -> Record | None:
@@ -451,7 +459,7 @@ def _record(copies: list[LeadMeta]) -> Record | None:
     return Record(merged["update_status"], merged["quoted_amount"], merged["conversion_amount"],
                   _date.fromisoformat(merged["quoted_date"]) if merged["quoted_date"] else None,
                   _date.fromisoformat(merged["follow_up_date"]) if merged["follow_up_date"] else None,
-                  merged["notes"])
+                  merged["notes"], merged["payout_amount"])
 
 
 def records(session: Session, source: str, vendor_id: int | None = None) -> dict[str, Any]:
@@ -495,7 +503,7 @@ def for_viewer(item: dict, viewer) -> dict:
     item["crm"] = {"lead_key": crm["lead_key"], "vendor": own["vendor"], "vendor_source": own["vendor_source"],
                    "vendors": [own], "suggested_vendor": None,
                    **{k: own[k] for k in ("update_status", "quoted_date", "follow_up_date", "quoted_amount",
-                                          "conversion_amount", "notes", "updated_at", "updated_by_name", "is_hot")},
+                                          "conversion_amount", "payout_percent", "payout_amount", "notes", "updated_at", "updated_by_name", "is_hot")},
                    "auto_assign": crm.get("auto_assign", True)}
     item["is_hot"] = own["is_hot"]
     item["follow_up_date"] = own["follow_up_date"]
@@ -663,3 +671,19 @@ def remove_vendor(session: Session, source: str, lead_key: str, vendor_id: int, 
             if how != "partner" and current != vendor_id:
                 _put(session, rows, source, lead_key, current, "added", user_id)
     _put(session, rows, source, lead_key, vendor_id, "removed", user_id)
+
+
+def payout_of(conversion_amount, payout_percent) -> int | None:
+    """Payout in rupees: conversion amount x % / 100, rounded half up; None without both."""
+    if not conversion_amount or payout_percent is None or payout_percent <= 0:
+        return None
+    from decimal import ROUND_HALF_UP, Decimal
+
+    amount = Decimal(conversion_amount) * Decimal(str(payout_percent)) / Decimal(100)
+    return int(amount.quantize(Decimal(1), rounding=ROUND_HALF_UP))
+
+
+def apply_payout(row) -> None:
+    """Set row.payout_amount from its conversion amount and payout %. The server always works it out,
+    so it stays right when a vendor changes the conversion amount, whatever the client sent."""
+    row.payout_amount = payout_of(row.conversion_amount, row.payout_percent)

@@ -788,7 +788,7 @@ def dhruva_overview(user: DhruvaSectionUser, db: DbSession, period: AllTimeDefau
     received = len(leads)
     before = sum(1 for d in arrival if previous.contains(d)) if previous else None
 
-    numbers = kpis.compute(leads)
+    numbers = kpis.compute(leads, payout=False)               # Dhruva: no payout yet
     numbers["quotes_count"] = numbers["quoted_count"]
     converted_with_amount = [r.conversion_amount for r in leads
                              if r.update_status == UpdateStatus.CONVERTED.value and r.conversion_amount is not None]
@@ -830,6 +830,9 @@ def dhruva_overview(user: DhruvaSectionUser, db: DbSession, period: AllTimeDefau
         "kpis": numbers,
         "by_event_type": [{"value": k, "count": n} for k, n in sorted(types.items(), key=lambda kv: (-kv[1], kv[0]))],
         "top_venues": venues[:10],
+        # The totals beside Top venues: leads (in the period) with a venue, and how many different venues
+        "venue_leads_total": sum(v["count"] for v in venues),
+        "venue_count": len(venues),
         "events_by_month": [{"month": m, "count": months[m]} for m in sorted(months)],
         "no_event_date": sum(1 for r in leads if r.event_date is None),
         "inflow": inflow,

@@ -10,9 +10,11 @@ from app.models.lead_activity import LeadActivity
 
 logger = logging.getLogger(__name__)
 PAGE_SIZE = 100
-VENDOR_CRM_FIELDS = {"update_status", "quoted_date", "quoted_amount", "conversion_amount", "notes", "follow_up_date"}
+VENDOR_CRM_FIELDS = {"update_status", "quoted_date", "quoted_amount", "conversion_amount", "payout_percent",
+                     "payout_amount", "notes", "follow_up_date"}
 VTK_VISIBLE_FIELDS = {"name", "phone", "city", "lead_date", "source", "update_status", "additional_comments",
-                      "follow_up_date", "quoted_amount", "conversion_amount", "status_updated_at"}
+                      "follow_up_date", "quoted_amount", "conversion_amount", "payout_percent", "payout_amount",
+                      "status_updated_at"}
 
 
 def _text(value: Any) -> str | None:

@@ -141,7 +141,7 @@ def lead_stats(db: DbSession, user: DhruvaSectionUser, f: Filters):
     workflow = sl.list_spin_leads(None, 1, 1, f.common.search, None, "asc", f.branch, flt or None, keys_only=True,
                                   flow=SOURCE)
     keys = [lead.lead_key for lead in added] + list(workflow["keys"])
-    return {"total": len(keys), "kpis": kpis.for_keys(db, SOURCE, keys)}
+    return {"total": len(keys), "kpis": kpis.for_keys(db, SOURCE, keys, payout=False)}   # no payout yet
 
 
 @router.get("/leads/filter-options")
